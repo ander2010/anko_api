@@ -1,0 +1,130 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+
+# Translations
+*.mo
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+# Don't ignore app migrations (keep them versioned)
+
+# Environment / secrets
+.env
+.env.*
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+.python-version
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor temporary files
+*~
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Static / build artifacts
+staticfiles/
+static/
+assets/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Coverage and reports
+coverage/
+htmlcov/
+
+# Mypy / type checking
+.mypy_cache/
+dmypy.json
+
+# Pyright
+.pyright/
+
+# Virtualenv
+.venv/
+
+# Celery
+celerybeat-schedule
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Sphinx documentation
+docs/_build/
+
+# IDEA project files
+*.ipr
+*.iws
+
+# Ignore compiled translations
+*.mo
