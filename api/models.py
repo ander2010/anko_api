@@ -42,6 +42,10 @@ class Document(models.Model):
     processing_error = models.TextField(null=True, blank=True)
     extracted_text = models.TextField(null=True, blank=True)
     hash = models.CharField(max_length=64, unique=True, help_text="File hash for deduplication")
+    def save(self, *args, **kwargs):
+        if self.file and not self.size:
+            self.size = self.file.size
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.filename
@@ -72,9 +76,9 @@ class Topic(models.Model):
 
 class Rule(models.Model):
     STRATEGY_CHOICES = [
-        ('random', 'random'),
-        ('balanced', 'balanced'),
-        ('topic_weighted', 'topic_weighted'),
+        ('singleChoice', 'singleChoice'),
+        ('multiSelect', 'multiSelect'),
+        ('trueFalse', 'trueFalse'),
     ]
     DIFFICULTY_CHOICES = [
         ('Easy', 'Easy'),
@@ -108,7 +112,41 @@ class Battery(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     created_at = models.DateTimeField(auto_now_add=True)
     difficulty = models.CharField(max_length=10, choices=DIFFICULTY_CHOICES)
-    questions = models.JSONField(help_text="Stored generated questions snapshot")
+    # questions = models.JSONField(help_text="Stored generated questions snapshot")
 
     def __str__(self):
         return self.name
+class BatteryQuestion(models.Model):
+    QUESTION_TYPE_CHOICES = [
+        ('singleChoice', 'singleChoice'),
+        ('multiSelect', 'multiSelect'),
+        ('trueFalse', 'trueFalse'),
+    ]
+
+    battery = models.ForeignKey(Battery, on_delete=models.CASCADE, related_name="questions_rel")
+    topic = models.ForeignKey(Topic, null=True, blank=True, on_delete=models.SET_NULL, related_name="battery_questions")
+
+    type = models.CharField(max_length=20, choices=QUESTION_TYPE_CHOICES)
+    question = models.TextField()
+    explanation = models.TextField(blank=True, default="")
+    points = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    order = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Battery {self.battery_id} Q{self.order} ({self.type})"
+
+
+class BatteryOption(models.Model):
+    question = models.ForeignKey(BatteryQuestion, on_delete=models.CASCADE, related_name="options")
+
+    option_id = models.CharField(max_length=10)  # "a", "b", "c" o "true"/"false"
+    text = models.TextField()
+    correct = models.BooleanField(default=False)
+    order = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return f"Q{self.question_id} - {self.option_id}"
+
+
