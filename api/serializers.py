@@ -1,6 +1,7 @@
 from rest_framework import serializers
-from .models import User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion
+from .models import User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
+
 User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
@@ -162,9 +163,64 @@ class BatteryQuestionSerializer(serializers.ModelSerializer):
 
 
 class BatterySerializer(serializers.ModelSerializer):
-    # ✅ el frontend quiere battery.questions como array
     questions = BatteryQuestionSerializer(source="questions_rel", many=True, read_only=True)
+
+    attempts_count = serializers.SerializerMethodField()
+    last_attempt = serializers.SerializerMethodField()
 
     class Meta:
         model = Battery
         fields = "__all__"
+
+    def get_attempts_count(self, obj):
+        request = self.context.get("request")
+        if request and request.user.is_authenticated:
+            return obj.attempts.filter(user=request.user).count()
+        return obj.attempts.count()
+
+    def get_last_attempt(self, obj):
+        request = self.context.get("request")
+        qs = obj.attempts.all().order_by("-started_at")
+        if request and request.user.is_authenticated:
+            qs = qs.filter(user=request.user)
+
+        last = qs.first()
+        return BatteryAttemptSerializer(last).data if last else None
+
+
+class BatteryAttemptAnswerSerializer(serializers.ModelSerializer):
+    questionId = serializers.IntegerField(source="question_id", read_only=True)
+
+    # para frontend: devolver ids seleccionados
+    selectedOptionId = serializers.IntegerField(source="selected_option_id", read_only=True)
+    selectedOptionIds = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BatteryAttemptAnswer
+        fields = ["id", "questionId", "selectedOptionId", "selectedOptionIds", "is_correct", "points_earned"]
+
+    def get_selectedOptionIds(self, obj):
+        return list(obj.selected_options.values_list("id", flat=True))
+
+
+class BatteryAttemptSerializer(serializers.ModelSerializer):
+    batteryId = serializers.IntegerField(source="battery_id", read_only=True)
+    userId = serializers.IntegerField(source="user_id", read_only=True)
+    answers = BatteryAttemptAnswerSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = BatteryAttempt
+        fields = [
+            "id",
+            "batteryId",
+            "userId",
+            "status",
+            "started_at",
+            "finished_at",
+            "total_questions",
+            "correct_count",
+            "total_score",
+            "max_score",
+            "percent",
+            "answers",
+        ]

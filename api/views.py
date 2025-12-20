@@ -4,13 +4,14 @@ from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.contrib.auth import authenticate
-from .models import User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion
+from .models import User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt
+from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
     UserSerializer, ProjectSerializer, DocumentSerializer, 
-    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer
+    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 
 class AuthViewSet(viewsets.GenericViewSet):
@@ -171,13 +172,24 @@ class BatteryViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Rule not found for this project"}, status=status.HTTP_400_BAD_REQUEST)
 
         # topic: si rule.topic_scope existe, usamos ese. Si no, elegimos uno random del proyecto.
+        # if rule.topic_scope_id:
+        #     topic = rule.topic_scope
+        # else:
+        #     topics = list(Topic.objects.filter(project_id=project_id, status="active"))
+        #     topic = random.choice(topics) if topics else None
+
+        # if not topic:
+        #     return Response(
+        #         {"detail": "No topics available for this project (create at least 1 active topic)"},
+        #         status=status.HTTP_400_BAD_REQUEST,
+        #     )
+        topics = []
         if rule.topic_scope_id:
-            topic = rule.topic_scope
+            topics = [rule.topic_scope]
         else:
             topics = list(Topic.objects.filter(project_id=project_id, status="active"))
-            topic = random.choice(topics) if topics else None
 
-        if not topic:
+        if not topics:
             return Response(
                 {"detail": "No topics available for this project (create at least 1 active topic)"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -195,7 +207,15 @@ class BatteryViewSet(viewsets.ModelViewSet):
         )
 
         count = int(rule.global_count or 0)
-        generated = generate_questions_for_rule(rule=rule, topic=topic, count=count)
+        generated = []
+
+        # distribución simple (round-robin) entre topics
+        for i in range(count):
+            t = topics[i % len(topics)]
+            q = generate_questions_for_rule(rule=rule, topic=t, count=1)[0]
+            q["order"] = i  # asegura orden global correcto
+            generated.append(q)
+
 
         # crear preguntas
         question_objs = []
@@ -250,3 +270,53 @@ class BatteryViewSet(viewsets.ModelViewSet):
         battery.status = "Draft"
         battery.save(update_fields=["status"])
         return Response(self.get_serializer(battery).data)
+    
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def start_attempt(self, request, pk=None):
+        battery = self.get_object()
+
+        total_questions = battery.questions_rel.count()
+
+        attempt = BatteryAttempt.objects.create(
+            battery=battery,
+            user=request.user,
+            total_questions=total_questions,
+            status="in_progress",
+        )
+
+        return Response(BatteryAttemptSerializer(attempt).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def finish_attempt(self, request, pk=None):
+        battery = self.get_object()
+        attempt_id = request.data.get("attempt_id")
+
+        if not attempt_id:
+            return Response({"detail": "attempt_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            attempt = BatteryAttempt.objects.get(id=attempt_id, battery=battery, user=request.user)
+        except BatteryAttempt.DoesNotExist:
+            return Response({"detail": "Attempt not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # resumen (mínimo) que manda el frontend al finalizar
+        total_score = Decimal(str(request.data.get("total_score", "0")))
+        max_score = Decimal(str(request.data.get("max_score", "0")))
+        correct_count = int(request.data.get("correct_count", 0))
+        total_questions = int(request.data.get("total_questions", battery.questions_rel.count()))
+
+        attempt.finish(
+            total_score=total_score,
+            max_score=max_score,
+            correct_count=correct_count,
+            total_questions=total_questions,
+        )
+
+        return Response(BatteryAttemptSerializer(attempt).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated])
+    def attempts(self, request, pk=None):
+        battery = self.get_object()
+        qs = battery.attempts.filter(user=request.user).order_by("-started_at")
+        return Response(BatteryAttemptSerializer(qs, many=True).data)

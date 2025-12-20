@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
-
+from django.utils import timezone
+from django.conf import settings
 class User(AbstractUser):
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
 
@@ -116,6 +117,7 @@ class Battery(models.Model):
 
     def __str__(self):
         return self.name
+
 class BatteryQuestion(models.Model):
     QUESTION_TYPE_CHOICES = [
         ('singleChoice', 'singleChoice'),
@@ -150,3 +152,58 @@ class BatteryOption(models.Model):
         return f"Q{self.question_id} - {self.option_id}"
 
 
+class BatteryAttempt(models.Model):
+    STATUS_CHOICES = [
+        ("in_progress", "in_progress"),
+        ("finished", "finished"),
+        ("abandoned", "abandoned"),
+    ]
+
+    battery = models.ForeignKey(Battery, on_delete=models.CASCADE, related_name="attempts")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="battery_attempts")
+
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
+
+    total_questions = models.PositiveIntegerField(default=0)
+    correct_count = models.PositiveIntegerField(default=0)
+
+    total_score = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    max_score = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    percent = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+
+    def __str__(self):
+        return f"Attempt {self.id} - Battery {self.battery_id} - {self.user_id}"
+
+    def finish(self, total_score, max_score, correct_count, total_questions):
+        self.finished_at = timezone.now()
+        self.status = "finished"
+        self.total_score = total_score
+        self.max_score = max_score
+        self.correct_count = correct_count
+        self.total_questions = total_questions
+        self.percent = (total_score / max_score * 100) if max_score else 0
+        self.save()
+
+
+class BatteryAttemptAnswer(models.Model):
+    attempt = models.ForeignKey(BatteryAttempt, on_delete=models.CASCADE, related_name="answers")
+    question = models.ForeignKey(BatteryQuestion, on_delete=models.CASCADE, related_name="attempt_answers")
+
+    # singleChoice/trueFalse
+    selected_option = models.ForeignKey(
+        BatteryOption, null=True, blank=True, on_delete=models.SET_NULL, related_name="selected_in_single_attempts"
+    )
+
+    # multiSelect
+    selected_options = models.ManyToManyField(
+        BatteryOption, blank=True, related_name="selected_in_multi_attempts"
+    )
+
+    is_correct = models.BooleanField(default=False)
+    points_earned = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+
+    def __str__(self):
+        return f"Attempt {self.attempt_id} - Q{self.question_id}"
