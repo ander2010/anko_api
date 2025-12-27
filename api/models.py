@@ -69,7 +69,11 @@ class Topic(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
-    related_documents = models.ManyToManyField(Document, related_name='topics')
+    related_sections = models.ManyToManyField(
+        "Section",
+        related_name="topics",
+        blank=True,
+    )
     question_count_target = models.PositiveIntegerField(default=20)
 
     def __str__(self):
@@ -80,6 +84,7 @@ class Rule(models.Model):
         ('singleChoice', 'singleChoice'),
         ('multiSelect', 'multiSelect'),
         ('trueFalse', 'trueFalse'),
+        ('mixed', 'mixed'),
     ]
     DIFFICULTY_CHOICES = [
         ('Easy', 'Easy'),

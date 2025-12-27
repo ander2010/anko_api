@@ -3,6 +3,8 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.db.models import Prefetch
+from collections import defaultdict
 from django.contrib.auth import authenticate
 from .models import User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt
 from decimal import Decimal
@@ -10,7 +12,7 @@ from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    UserSerializer, ProjectSerializer, DocumentSerializer, 
+    DocumentWithSectionsSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 
@@ -62,6 +64,22 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="documents-with-sections")
+    def documents_with_sections(self, request, pk=None):
+        project = self.get_object()
+
+        qs = (
+            project.documents.all()               # ✅ documents (plural)
+            .order_by("-uploaded_at")
+            .prefetch_related(
+                Prefetch("sections", queryset=Section.objects.all().order_by("order", "id"))
+            )
+        )
+
+        ser = DocumentWithSectionsSerializer(qs, many=True, context={"request": request})
+        return Response({"projectId": project.id, "documents": ser.data})
+
+
 
     def get_queryset(self):
         """
@@ -96,16 +114,44 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
         created = []
-        for f in files:
-            doc = Document.objects.create(
-                project=project,
-                file=f,
-                size=getattr(f, "size", 0) or 0,  # tu NOT NULL fix
-            )
-            created.append(doc)
+        with transaction.atomic():
+            for f in files:
+                # ⚠️ en tu modelo Document, 'filename', 'type' y 'hash' son requeridos.
+                # Aquí asumo que ya los estás seteando en tu implementación real.
+                doc = Document.objects.create(
+                    project=project,
+                    file=f,
+                    filename=getattr(f, "name", "document"),
+                    type="PDF",  # <- ajusta según extensión real
+                    size=getattr(f, "size", 0) or 0,
+                    hash="TEMP_HASH",  # <- aquí debes calcularlo de verdad
+                )
+                created.append(doc)
+
+                # ✅ crear 5 secciones temporales
+                sections = [
+                    Section(
+                        document=doc,
+                        title=f"Section {i}",
+                        content="TEMP CONTENT (will be replaced by external service)",
+                        order=i,
+                    )
+                    for i in range(1, 6)
+                ]
+                Section.objects.bulk_create(sections)
 
         ser = DocumentSerializer(created, many=True, context={"request": request})
         return Response({"uploaded": ser.data}, status=status.HTTP_201_CREATED)
+        # for f in files:
+        #     doc = Document.objects.create(
+        #         project=project,
+        #         file=f,
+        #         size=getattr(f, "size", 0) or 0,  # tu NOT NULL fix
+        #     )
+        #     created.append(doc)
+
+        # ser = DocumentSerializer(created, many=True, context={"request": request})
+        # return Response({"uploaded": ser.data}, status=status.HTTP_201_CREATED)
 
 class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all()
@@ -123,8 +169,45 @@ class SectionViewSet(viewsets.ModelViewSet):
     queryset = Section.objects.all()
     serializer_class = SectionSerializer
 
+   
 class TopicViewSet(viewsets.ModelViewSet):
+    permission_classes = [AllowAny]
     serializer_class = TopicSerializer
+
+    @action(detail=True, methods=["get"], url_path="grouped-sections")
+    def grouped_sections(self, request, pk=None):
+        topic = self.get_object()
+
+        sections = (
+            topic.related_sections
+            .select_related("document")
+            .order_by("document_id", "order", "id")
+        )
+
+        grouped = defaultdict(lambda: {"document": None, "sections": []})
+
+        for s in sections:
+            doc = s.document
+            if grouped[doc.id]["document"] is None:
+                grouped[doc.id]["document"] = {
+                    "id": doc.id,
+                    "filename": doc.filename,
+                    "uploaded_at": doc.uploaded_at,
+                    "status": doc.status,
+                }
+            grouped[doc.id]["sections"].append({
+                "id": s.id,
+                "title": s.title,
+                "content": s.content,
+                "order": s.order,
+            })
+
+        return Response({
+            "topicId": topic.id,
+            "projectId": topic.project_id,
+            "documents": list(grouped.values()),
+        })
+    
 
     def get_queryset(self):
         qs = Topic.objects.all()

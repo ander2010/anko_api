@@ -83,8 +83,8 @@ class SectionSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class TopicSerializer(serializers.ModelSerializer):
-    related_documents = serializers.PrimaryKeyRelatedField(
-        queryset=Document.objects.none(),
+    related_sections = serializers.PrimaryKeyRelatedField(
+        queryset=Section.objects.all(),  # 👈 NO none()
         many=True,
         required=False
     )
@@ -97,16 +97,20 @@ class TopicSerializer(serializers.ModelSerializer):
         super().__init__(*args, **kwargs)
 
         request = self.context.get("request")
-        project_id = None
+        if not request:
+            return
 
-        if request:
-            # en create vendrá en request.data
-            project_id = request.data.get("project") or request.query_params.get("project")
+        project_id = (
+            request.query_params.get("project")  # ✅ para GET (browsable API)
+            or request.data.get("project")       # ✅ para POST
+            or getattr(self.instance, "project_id", None)  # ✅ PATCH
+        )
 
         if project_id:
-            self.fields["related_documents"].queryset = Document.objects.filter(project_id=project_id)
-        else:
-            self.fields["related_documents"].queryset = Document.objects.all()
+            self.fields["related_sections"].queryset = Section.objects.filter(
+                document__project_id=project_id
+            )
+
 
 
 class RuleSerializer(serializers.ModelSerializer):
@@ -161,6 +165,26 @@ class BatteryQuestionSerializer(serializers.ModelSerializer):
             "created_at",
         ]
 
+class SectionMiniSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Section
+        fields = ["id", "title", "content", "order"]
+
+
+class DocumentWithSectionsSerializer(serializers.ModelSerializer):
+    sections = SectionMiniSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Document
+        fields = [
+            "id",
+            "filename",
+            "type",
+            "size",
+            "uploaded_at",
+            "status",
+            "sections",
+        ]
 
 class BatterySerializer(serializers.ModelSerializer):
     questions = BatteryQuestionSerializer(source="questions_rel", many=True, read_only=True)
