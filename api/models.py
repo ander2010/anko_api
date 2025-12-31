@@ -193,6 +193,19 @@ class BatteryAttempt(models.Model):
         self.save()
 
 
+
+class Tag(models.Model):
+    document_id = models.TextField(db_index=True)
+    tag = models.TextField()
+
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "tags"   # 👈 nombre real de tu tabla
+        managed = False        # 👈 NO crea migraciones / NO intenta crear tabla
+
+
 class BatteryAttemptAnswer(models.Model):
     attempt = models.ForeignKey(BatteryAttempt, on_delete=models.CASCADE, related_name="answers")
     question = models.ForeignKey(BatteryQuestion, on_delete=models.CASCADE, related_name="attempt_answers")
