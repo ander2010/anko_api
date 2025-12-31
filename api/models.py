@@ -119,7 +119,7 @@ class Battery(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     difficulty = models.CharField(max_length=10, choices=DIFFICULTY_CHOICES)
     # questions = models.JSONField(help_text="Stored generated questions snapshot")
-
+    external_job_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     def __str__(self):
         return self.name
 
@@ -225,3 +225,35 @@ class BatteryAttemptAnswer(models.Model):
 
     def __str__(self):
         return f"Attempt {self.attempt_id} - Q{self.question_id}"
+    
+
+
+
+class QaPair(models.Model):
+    # Si tu tabla tiene un id serial/bigserial, usa AutoField/BigAutoField.
+    # Si NO tiene id, se puede, pero Django siempre prefiere un PK.
+
+    document_id = models.TextField(null=True, blank=True)
+    qa_index = models.IntegerField(null=True, blank=True)
+
+    question = models.TextField(null=True, blank=True)
+    correct_response = models.TextField(null=True, blank=True)
+
+    context = models.TextField(null=True, blank=True)
+    metadata = models.JSONField(null=True, blank=True)
+
+    job_id = models.TextField(db_index=True)  # TEXT en tu error/consulta
+    chunk_id = models.TextField(null=True, blank=True)
+    chunk_index = models.IntegerField(null=True, blank=True)
+
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False  # ✅ NO MIGRATIONS
+        db_table = 'qa_pairs'  # si está en public, esto funciona
+        # Si de verdad está en otro schema, puedes usar:
+        # db_table = 'public"."qa_pairs'  (si te diera problemas, me dices y lo ajustamos)
+
+    def __str__(self):
+        return f"[{self.job_id}] #{self.qa_index} {self.question[:40] if self.question else ''}"

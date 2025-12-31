@@ -1,7 +1,14 @@
+# from multiprocessing.dummy import connection
+from django.db import connection
+
 import os
 import uuid
 import json
 import hashlib
+import time
+
+import re
+from websocket import WebSocketConnectionClosedException
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -11,7 +18,7 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate
-from .models import User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt
+from .models import QaPair, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
@@ -488,10 +495,96 @@ class ProjectViewSet(viewsets.ModelViewSet):
         # ser = DocumentSerializer(created, many=True, context={"request": request})
         # return Response({"uploaded": ser.data}, status=status.HTTP_201_CREATED)
 
+
+def build_ws_url(base_url: str, job_id: str) -> str:
+    base_url = normalize_base_url(base_url)
+    ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+    return f"{ws_base}/ws/progress/{job_id}"
+
+def normalize_base_url(url: str) -> str:
+        return url.rstrip("/")
+
+
 class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
     permission_classes = [AllowAny]
+    
+    # def generate_questions(self, request, pk=None):
+    #     """
+    #     POST /api/documents/<id>/generate-questions/
+    #     Llama al microservicio con process=generate_question y devuelve job_id + ws_url.
+    #     """
+    #     document_id = pk  # desde la URL
+    #     body = request.data or {}
+
+    #     base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+    #     url = f"{normalize_base_url(base_url)}/process-request"
+
+    #     # params del frontend
+    #     query_text = body.get("query_text")  # puede ser string o lista
+    #     tags = body.get("tags")              # null o lista
+    #     quantity = int(body.get("quantity", 3))
+    #     difficulty = body.get("difficulty", "medium")
+    #     question_format = body.get("question_format", "true_false")
+    #     top_k = body.get("top_k")
+    #     min_importance = body.get("min_importance")
+
+    #     # job_id único (simple)
+    #     job_id = body.get("job_id") or str(uuid.uuid4())
+
+    #     payload = {
+    #         "job_id": job_id,
+    #         "doc_id": str(document_id),   # 👈 estable: el id del Document
+    #         "process": "generate_question",
+    #         "tags": tags,
+    #         "query_text": query_text,
+    #         "top_k": top_k,
+    #         "min_importance": min_importance,
+    #         "quantity_question": quantity,
+    #         "difficulty": difficulty,
+    #         "question_format": question_format,
+    #         "options": {},
+    #     }
+
+    #     try:
+    #         resp = requests.post(url, json=payload, timeout=120)
+    #     except requests.RequestException as e:
+    #         return Response(
+    #             {"success": False, "error": str(e), "request_url": url},
+    #             status=status.HTTP_502_BAD_GATEWAY,
+    #         )
+
+    #     # intenta parsear json
+    #     try:
+    #         data = resp.json()
+    #     except Exception:
+    #         return Response(
+    #             {
+    #                 "success": False,
+    #                 "status_code": resp.status_code,
+    #                 "request_url": url,
+    #                 "request_payload": payload,
+    #                 "response_text": resp.text,
+    #             },
+    #             status=status.HTTP_502_BAD_GATEWAY if not resp.ok else status.HTTP_200_OK,
+    #         )
+
+    #     # si ok, arma ws_url
+    #     ws_job_id = data.get("job_id") or job_id
+    #     ws_url = build_ws_url(base_url, ws_job_id)
+
+    #     return Response(
+    #         {
+    #             "success": resp.ok,
+    #             "request_url": url,
+    #             "request_payload": payload,
+    #             "response": data,
+    #             "job_id": ws_job_id,
+    #             "ws_url": ws_url,
+    #         },
+    #         status=status.HTTP_200_OK if resp.ok else status.HTTP_502_BAD_GATEWAY,
+    #     )
 
 
     @action(detail=True, methods=["post", "get"], url_path="tags")
@@ -626,6 +719,713 @@ class RuleViewSet(viewsets.ModelViewSet):
 class BatteryViewSet(viewsets.ModelViewSet):
     queryset = Battery.objects.all()
     serializer_class = BatterySerializer
+
+
+
+    
+
+
+    
+
+
+    def _split_multi_answers(correct_response: str) -> list[str]:
+        """
+        Para multi_select: separa por coma/; / salto de línea.
+        """
+
+        def _safe_str(x) -> str:
+            return "" if x is None else str(x)
+        raw = _safe_str(correct_response).strip()
+        if not raw:
+            return []
+        parts = re.split(r"[,\n;]+", raw)
+        return [p.strip() for p in parts if p.strip()]
+
+
+    def _map_question_type(raw: str) -> str:
+        raw = (raw or "").strip().lower()
+        if raw in ["true_false", "truefalse", "tf"]:
+            return "trueFalse"
+        if raw in ["single_choice", "singlechoice", "single"]:
+            return "singleChoice"
+        if raw in ["multi_select", "multiselect", "multi"]:
+            return "multiSelect"
+        if raw in ["mixed"]:
+            # “mixed” lo tratamos como singleChoice por defecto
+            return "singleChoice"
+        return "singleChoice"
+
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="save-questions-from-qa")
+    def save_questions_from_qa(self, request, pk=None):
+        battery = self.get_object()
+
+        job_id = request.data.get("job_id") or getattr(battery, "external_job_id", None)
+        question_format = request.data.get("question_format") or "true_false"
+        overwrite = bool(request.data.get("overwrite", True))
+        points_default = request.data.get("points_default", 1)
+
+        try:
+            result = BatteryViewSet.save_questions_from_qa_pairs(
+                battery=battery,
+                job_id=str(job_id),
+                question_format=str(question_format),
+                overwrite=overwrite,
+                points_default=points_default,
+            )
+
+            if result.get("questions_created", 0) > 0:
+                battery.status = "Ready"
+                if not getattr(battery, "external_job_id", None):
+                    battery.external_job_id = str(job_id)
+                    battery.save(update_fields=["status", "external_job_id"])
+                else:
+                    battery.save(update_fields=["status"])
+
+            return Response({"ok": True, "battery_id": battery.id, "job_id": str(job_id), "result": result})
+        except Exception as e:
+            return Response(
+                {"ok": False, "detail": "Failed saving questions from qa_pairs", "error": str(e), "battery_id": battery.id, "job_id": str(job_id)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        
+
+    @staticmethod
+    @transaction.atomic
+    def save_questions_from_qa_pairs(
+        *,
+        battery,
+        job_id: str,
+        question_format: str = "true_false",
+        points_default=1,
+        overwrite: bool = True,
+    ) -> dict:
+
+        def _safe_str(x) -> str:
+            return "" if x is None else str(x)
+
+        def _normalize_bool_text(s: str) -> str:
+            s = (s or "").strip().lower()
+            if s in {"true", "t", "verdadero", "v", "1", "yes", "y"}:
+                return "true"
+            if s in {"false", "f", "falso", "0", "no", "n"}:
+                return "false"
+            return s
+
+        def _map_question_type(raw: str) -> str:
+            raw = (raw or "").strip().lower()
+            if raw in ["true_false", "truefalse", "tf"]:
+                return "trueFalse"
+            if raw in ["single_choice", "singlechoice", "single"]:
+                return "singleChoice"
+            if raw in ["multi_select", "multiselect", "multi"]:
+                return "multiSelect"
+            if raw in ["mixed"]:
+                return "singleChoice"
+            return "singleChoice"
+
+        def _split_multi_answers(correct_response: str) -> list[str]:
+            raw = _safe_str(correct_response).strip()
+            if not raw:
+                return []
+            parts = re.split(r"[,\n;]+", raw)
+            return [p.strip() for p in parts if p.strip()]
+
+        job_id = _safe_str(job_id).strip()
+        if not job_id:
+            raise ValueError("job_id is required")
+
+        # 1) Traer filas de qa_pairs (tuplas)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT document_id, qa_index, question, correct_response, metadata, created_at
+                FROM qa_pairs
+                WHERE job_id = %s
+                ORDER BY qa_index, created_at
+                """,
+                [job_id],
+            )
+            rows = cursor.fetchall()
+
+        if overwrite:
+            BatteryOption.objects.filter(question__battery=battery).delete()
+            BatteryQuestion.objects.filter(battery=battery).delete()
+
+        if not rows:
+            return {
+                "battery_id": battery.id,
+                "job_id": job_id,
+                "qa_pairs_found": 0,
+                "questions_created": 0,
+                "options_created": 0,
+            }
+
+        qtype_default = _map_question_type(question_format)
+
+        # 2) Crear BatteryQuestion en bulk
+        q_objs = []
+        prepared = []
+
+        for idx, r in enumerate(rows):
+            document_id, qa_index, question_text, correct_response, meta_raw, created_at = r
+
+            question_text = _safe_str(question_text).strip()
+            correct_response = _safe_str(correct_response).strip()
+
+            if not question_text:
+                continue
+
+            # metadata es JSON string
+            meta = {}
+            if meta_raw:
+                try:
+                    meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+                except Exception:
+                    meta = {}
+
+            meta_type = None
+            if isinstance(meta, dict):
+                meta_type = meta.get("question_format") or meta.get("format") or meta.get("type")
+
+            qtype = _map_question_type(meta_type) if meta_type else qtype_default
+            order_val = int(qa_index) if qa_index is not None else idx
+
+            q_objs.append(
+                BatteryQuestion(
+                    battery=battery,
+                    topic=None,
+                    type=qtype,
+                    question=question_text,
+                    explanation=_safe_str(meta.get("explanation") if isinstance(meta, dict) else ""),
+                    points=Decimal(str(points_default)),
+                    order=order_val,
+                )
+            )
+
+            prepared.append(
+                {
+                    "qtype": qtype,
+                    "correct_response": correct_response,
+                    "metadata": meta,
+                }
+            )
+
+        if not q_objs:
+            return {
+                "battery_id": battery.id,
+                "job_id": job_id,
+                "qa_pairs_found": len(rows),
+                "questions_created": 0,
+                "options_created": 0,
+            }
+
+        BatteryQuestion.objects.bulk_create(q_objs)
+
+        created_questions = list(
+            BatteryQuestion.objects.filter(battery=battery).order_by("order", "id")
+        )
+
+        # 3) Crear opciones
+        opt_objs = []
+
+        for qobj, pdata in zip(created_questions, prepared):
+            qtype = pdata["qtype"]
+            correct_response = pdata["correct_response"]
+            meta = pdata["metadata"] or {}
+
+            # Si metadata trae options
+            if isinstance(meta, dict) and meta.get("options"):
+                options = meta.get("options")
+
+                # options: ["True","False"] (strings)
+                if isinstance(options, list) and options and isinstance(options[0], str):
+                    correct_norm = correct_response.strip().lower()
+                    for i, opt_text in enumerate(options, start=1):
+                        opt_text_str = _safe_str(opt_text).strip()
+                        opt_objs.append(
+                            BatteryOption(
+                                question=qobj,
+                                option_id=str(i),
+                                text=opt_text_str,
+                                correct=(opt_text_str.lower() == correct_norm),
+                                order=i,
+                            )
+                        )
+                    continue
+
+                # options: [{"option_id":...,"text":...}]
+                if isinstance(options, list) and options and isinstance(options[0], dict):
+                    for i, opt in enumerate(options, start=1):
+                        opt_objs.append(
+                            BatteryOption(
+                                question=qobj,
+                                option_id=_safe_str(opt.get("option_id") or opt.get("id") or i),
+                                text=_safe_str(opt.get("text") or ""),
+                                correct=bool(opt.get("correct")),
+                                order=int(opt.get("order") or i),
+                            )
+                        )
+                    continue
+
+            # Fallbacks
+            if qtype == "trueFalse":
+                norm = _normalize_bool_text(correct_response)
+                is_true = norm == "true"
+                is_false = norm == "false"
+                if not (is_true or is_false):
+                    is_true = True
+                    is_false = False
+
+                opt_objs.append(BatteryOption(question=qobj, option_id="true", text="True", correct=is_true, order=1))
+                opt_objs.append(BatteryOption(question=qobj, option_id="false", text="False", correct=is_false, order=2))
+
+            elif qtype == "multiSelect":
+                corrects = {c.lower() for c in _split_multi_answers(correct_response)}
+                if not corrects:
+                    opt_objs.append(BatteryOption(question=qobj, option_id="a", text="N/A", correct=True, order=1))
+                else:
+                    for i, ans in enumerate(sorted(corrects), start=1):
+                        opt_objs.append(
+                            BatteryOption(
+                                question=qobj,
+                                option_id=chr(96 + i),
+                                text=ans,
+                                correct=True,
+                                order=i,
+                            )
+                        )
+            else:
+                if not correct_response:
+                    correct_response = "N/A"
+                opt_objs.append(BatteryOption(question=qobj, option_id="a", text=correct_response, correct=True, order=1))
+                opt_objs.append(BatteryOption(question=qobj, option_id="b", text="Other", correct=False, order=2))
+
+        if opt_objs:
+            BatteryOption.objects.bulk_create(opt_objs)
+
+        return {
+            "battery_id": battery.id,
+            "job_id": job_id,
+            "qa_pairs_found": len(rows),
+            "questions_created": len(created_questions),
+            "options_created": len(opt_objs),
+        }
+
+
+
+
+    
+    @action(detail=True, methods=["get"], permission_classes=[AllowAny], renderer_classes=[SSERenderer], url_path="progress-stream-bat")
+    def progress_stream_bat(self, request, pk=None):
+        battery = self.get_object()
+        job_id = getattr(battery, "external_job_id", None)
+
+        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
+        ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+
+        def sse_one(event_name: str, payload: dict, http_status=200):
+            # helper para devolver SSE incluso en errores
+            def gen():
+                yield f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
+            resp = StreamingHttpResponse(gen(), content_type="text/event-stream", status=http_status)
+            resp["Cache-Control"] = "no-cache"
+            resp["X-Accel-Buffering"] = "no"
+            return resp
+
+        if not job_id:
+            # ✅ NO Response() — siempre SSE
+            return sse_one(
+                "error",
+                {"detail": "Battery has no external_job_id. Start the job first.", "battery_id": battery.id},
+                http_status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ws_url = f"{ws_base}/ws/progress/{job_id}"
+
+        def event_stream():
+            yield f"event: init\ndata: {json.dumps({'battery_id': battery.id, 'job_id': job_id, 'ws_url': ws_url})}\n\n"
+
+            try:
+                ws = create_connection(ws_url, timeout=20)
+            except Exception as e:
+                yield f"event: error\ndata: {json.dumps({'error': 'failed_to_connect_ws', 'detail': str(e), 'ws_url': ws_url})}\n\n"
+                return
+
+            last_keepalive = time.time()
+            try:
+                while True:
+                    if time.time() - last_keepalive > 15:
+                        yield "event: ping\ndata: {}\n\n"
+                        last_keepalive = time.time()
+
+                    try:
+                        msg = ws.recv()
+                    except WebSocketConnectionClosedException:
+                        yield f"event: end\ndata: {json.dumps({'status': 'ws_closed'})}\n\n"
+                        break
+                    except Exception as e:
+                        yield f"event: error\ndata: {json.dumps({'error': 'ws_recv_failed', 'detail': str(e)})}\n\n"
+                        break
+
+                    try:
+                        payload = json.loads(msg) if isinstance(msg, str) else msg
+                    except Exception:
+                        payload = {"raw": msg}
+
+                    yield f"event: progress\ndata: {json.dumps(payload)}\n\n"
+
+                    status_val = str(payload.get("status", "")).upper()
+                    if status_val in {"DONE", "COMPLETED", "FINISHED", "SUCCESS", "FAILED", "ERROR"}:
+                        yield f"event: end\ndata: {json.dumps({'final_status': status_val})}\n\n"
+                        break
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        resp = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
+
+
+    def _map_question_type(raw: str) -> str:
+        raw = (raw or "").strip().lower()
+        if raw in ["true_false", "truefalse", "tf"]:
+            return "trueFalse"
+        if raw in ["single_choice", "singlechoice", "single"]:
+            return "singleChoice"
+        if raw in ["multi_select", "multiselect", "multi"]:
+            return "multiSelect"
+        # default safe
+        return "singleChoice"
+    
+
+
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate")
+    @transaction.atomic
+    def start_generate(self, request):
+        """
+        POST /api/batteries/start-generate/
+
+        Body:
+        {
+          "project": 2,
+          "rule": 5 (opcional),
+          "doc_id": "7",
+          "query_text": ["Barca"] o "Barca",
+          "tags": null o ["x"],
+          "quantity": 3,
+          "difficulty": "medium",
+          "question_format": "true_false",
+          "top_k": null,
+          "min_importance": null
+        }
+
+        Returns: battery + job_id + ws_url
+        """
+        project_id = request.data.get("project")
+        rule_id = request.data.get("rule")
+        # doc_id = request.data.get("doc_id")
+
+        section_ids = request.data.get("sections") or []
+        if not isinstance(section_ids, list) or not section_ids:
+            return Response(
+                {"detail": "sections is required and must be a non-empty list of section ids"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not project_id:
+            return Response({"detail": "project is required"}, status=status.HTTP_400_BAD_REQUEST)
+        # if not doc_id:
+        #     return Response({"detail": "doc_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+        # 1) cargar sections
+        sections_qs = Section.objects.filter(id__in=section_ids).only("id", "title", "document_id").order_by("id")
+        sections = list(sections_qs)
+
+        if len(sections) != len(set(section_ids)):
+            found_ids = {s.id for s in sections}
+            missing = [sid for sid in section_ids if sid not in found_ids]
+            return Response(
+                {"detail": "Some sections were not found", "missing_section_ids": missing},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # 2) validar que todos pertenezcan al mismo document
+        doc_ids = list({s.document_id for s in sections})
+        if len(doc_ids) != 1:
+            return Response(
+                {
+                    "detail": "All sections must belong to the same document",
+                    "document_ids_found": doc_ids,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        document_id = doc_ids[0]
+        derived_tags = [s.title.strip() for s in sections if (s.title or "").strip()]
+
+        # fallback seguro
+        if not derived_tags:
+            derived_tags = ["general"]
+
+
+
+    
+        rule = None
+        if rule_id:
+            try:
+                rule = Rule.objects.get(id=rule_id, project_id=project_id)
+            except Rule.DoesNotExist:
+                return Response({"detail": "Rule not found for this project"}, status=status.HTTP_400_BAD_REQUEST)
+
+        difficulty = (request.data.get("difficulty") or "medium").lower()
+        difficulty_db = {"easy": "Easy", "medium": "Medium", "hard": "Hard"}.get(difficulty, "Medium")
+
+        battery = Battery.objects.create(
+            project_id=project_id,
+            rule=rule,
+            name=request.data.get("name") or (f"Battery - {rule.name}" if rule else "Battery - Generated"),
+            status="Draft",
+            difficulty=difficulty_db,
+            # external_doc_id=str(document_id),
+        )
+
+        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+        url = f"{normalize_base_url(base_url)}/process-request"
+
+        job_id = str(uuid.uuid4())
+
+        query_text = request.data.get("query_text")
+        if isinstance(query_text, list) and len(query_text) == 1:
+            query_text_payload = query_text[0]
+        else:
+            query_text_payload = query_text
+
+        payload = {
+            "job_id": job_id,
+            "doc_id": str(document_id),
+            "process": "generate_question",
+            "tags": derived_tags,
+            "query_text": query_text_payload,
+            "top_k": request.data.get("top_k"),
+            "min_importance": request.data.get("min_importance"),
+            "quantity_question": int(request.data.get("quantity", 3)),
+            "difficulty": difficulty,
+            "question_format": request.data.get("question_format") or "true_false",
+            "options": {},
+        }
+
+        try:
+            resp = requests.post(url, json=payload, timeout=120)
+        except requests.RequestException as e:
+            return Response(
+                {"detail": "Failed calling microservice", "error": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw_text": resp.text}
+
+        ws_job_id = (data.get("job_id") if isinstance(data, dict) else None) or job_id
+        ws_url = build_ws_url(base_url, ws_job_id)
+
+        # guarda job_id en battery (si añadiste el field)
+        battery.external_job_id = ws_job_id
+        battery.save(update_fields=["external_job_id"])
+
+        return Response(
+            {
+                "battery": BatterySerializer(battery, context={"request": request}).data,
+                "job_id": ws_job_id,
+                "ws_url": ws_url,
+                "microservice_response": data,
+            },
+            status=status.HTTP_201_CREATED if resp.ok else status.HTTP_202_ACCEPTED,
+        )
+    
+    
+    # @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="generate-from-service")
+    # @transaction.atomic
+    # def generate_from_service(self, request):
+    #     """
+    #     POST /api/batteries/generate-from-service/
+
+    #     Body esperado (igual que el script de tu amigo):
+    #     {
+    #       "project": 2,
+    #       "rule": 5,                 (opcional si quieres atarlo a una rule)
+    #       "doc_id": "7"              (o "test", o filename)  <-- lo que el microservicio entienda
+    #       "query_text": ["Barca"] or "Barca",
+    #       "tags": null or ["tag1","tag2"],
+    #       "quantity": 3,
+    #       "difficulty": "medium",
+    #       "question_format": "true_false",
+    #       "top_k": null,
+    #       "min_importance": null
+    #     }
+    #     """
+    #     project_id = request.data.get("project")
+    #     rule_id = request.data.get("rule")
+    #     doc_id = request.data.get("doc_id")  # 👈 IMPORTANTÍSIMO: este debe coincidir con lo que tu microservicio entiende
+    #     query_text = request.data.get("query_text")
+    #     tags = request.data.get("tags")
+    #     quantity = int(request.data.get("quantity", 3))
+    #     difficulty = (request.data.get("difficulty") or "medium").lower()
+    #     question_format = request.data.get("question_format") or "true_false"
+    #     top_k = request.data.get("top_k")
+    #     min_importance = request.data.get("min_importance")
+
+    #     if not project_id:
+    #         return Response({"detail": "project is required"}, status=status.HTTP_400_BAD_REQUEST)
+    #     if not doc_id:
+    #         return Response({"detail": "doc_id is required (must match microservice doc_id)"}, status=status.HTTP_400_BAD_REQUEST)
+
+    #     rule = None
+    #     if rule_id:
+    #         try:
+    #             rule = Rule.objects.get(id=rule_id, project_id=project_id)
+    #         except Rule.DoesNotExist:
+    #             return Response({"detail": "Rule not found for this project"}, status=status.HTTP_400_BAD_REQUEST)
+
+    #     # Normaliza query_text a string o lista (como el script)
+    #     if isinstance(query_text, list) and len(query_text) == 1:
+    #         query_text_payload = query_text[0]
+    #     else:
+    #         query_text_payload = query_text
+
+    #     # Crear Battery (usa tu esquema actual)
+    #     battery = Battery.objects.create(
+    #         project_id=project_id,
+    #         rule=rule,
+    #         name=request.data.get("name") or (f"Battery - {rule.name}" if rule else "Battery - Generated"),
+    #         status="Draft",
+    #         difficulty={"easy": "Easy", "medium": "Medium", "hard": "Hard"}.get(difficulty, "Medium"),
+    #     )
+
+    #     base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+    #     url = f"{normalize_base_url(base_url)}/process-request"
+
+    #     job_id = str(uuid.uuid4())
+    #     payload = {
+    #         "job_id": job_id,
+    #         "doc_id": doc_id,
+    #         "process": "generate_question",
+    #         "tags": tags,
+    #         "query_text": query_text_payload,
+    #         "top_k": top_k,
+    #         "min_importance": min_importance,
+    #         "quantity_question": quantity,
+    #         "difficulty": difficulty,
+    #         "question_format": question_format,
+    #         "options": {},
+    #     }
+
+    #     try:
+    #         resp = requests.post(url, json=payload, timeout=120)
+    #     except requests.RequestException as e:
+    #         return Response(
+    #             {
+    #                 "detail": "Failed calling question microservice",
+    #                 "error": str(e),
+    #                 "battery_id": battery.id,
+    #                 "job_id": job_id,
+    #                 "ws_url": build_ws_url(base_url, job_id),
+    #             },
+    #             status=status.HTTP_502_BAD_GATEWAY,
+    #         )
+
+    #     try:
+    #         data = resp.json()
+    #     except Exception:
+    #         return Response(
+    #             {
+    #                 "detail": "Microservice returned non-JSON",
+    #                 "status_code": resp.status_code,
+    #                 "text": resp.text,
+    #                 "battery_id": battery.id,
+    #                 "job_id": job_id,
+    #                 "ws_url": build_ws_url(base_url, job_id),
+    #             },
+    #             status=status.HTTP_502_BAD_GATEWAY if not resp.ok else status.HTTP_200_OK,
+    #         )
+
+    #     ws_job_id = data.get("job_id") or job_id
+    #     ws_url = build_ws_url(base_url, ws_job_id)
+
+    #     # ✅ Aquí viene la clave:
+    #     # Si el microservicio YA devuelve preguntas en data, las guardamos.
+    #     # Si no devuelve, devolvemos ws_url para que el frontend espere y luego llame a otro endpoint.
+    #     questions = data.get("questions") or data.get("result") or None
+
+    #     if not questions:
+    #         return Response(
+    #             {
+    #                 "detail": "Job queued. Connect to ws_url and later sync questions into battery.",
+    #                 "battery": BatterySerializer(battery, context={"request": request}).data,
+    #                 "job_id": ws_job_id,
+    #                 "ws_url": ws_url,
+    #                 "microservice_response": data,
+    #             },
+    #             status=status.HTTP_202_ACCEPTED,
+    #         )
+
+    #     # --- Guardar questions en tus modelos ---
+    #     # Debes adaptar el mapping a la forma exacta que devuelva el microservicio.
+    #     # Yo asumo algo como:
+    #     # questions = [
+    #     #   {"type":"trueFalse","question":"...","explanation":"...","points":1,"options":[{"option_id":"true","text":"True","correct":True,"order":1}, ...]},
+    #     # ]
+    #     q_objs = []
+    #     for idx, q in enumerate(questions):
+    #         q_objs.append(
+    #             BatteryQuestion(
+    #                 battery=battery,
+    #                 topic=None,  # si tu microservicio manda topic_id lo mapeamos
+    #                 type=_map_question_type(q.get("type") or question_format),
+    #                 question=q.get("question") or "",
+    #                 explanation=q.get("explanation") or "",
+    #                 points=q.get("points") or 0,
+    #                 order=idx,
+    #             )
+    #         )
+    #     BatteryQuestion.objects.bulk_create(q_objs)
+
+    #     created_questions = list(BatteryQuestion.objects.filter(battery=battery).order_by("order"))
+    #     opt_objs = []
+    #     for qobj, qdata in zip(created_questions, questions):
+    #         for opt in (qdata.get("options") or []):
+    #             opt_objs.append(
+    #                 BatteryOption(
+    #                     question=qobj,
+    #                     option_id=str(opt.get("option_id") or opt.get("id") or ""),
+    #                     text=opt.get("text") or "",
+    #                     correct=bool(opt.get("correct")),
+    #                     order=int(opt.get("order") or 0),
+    #                 )
+    #             )
+    #     BatteryOption.objects.bulk_create(opt_objs)
+
+    #     return Response(
+    #         {
+    #             "battery": BatterySerializer(battery, context={"request": request}).data,
+    #             "job_id": ws_job_id,
+    #             "ws_url": ws_url,
+    #             "microservice_response": data,
+    #         },
+    #         status=status.HTTP_201_CREATED,
+    #     )
+
+
+
+
 
     def get_queryset(self):
         qs = super().get_queryset()
