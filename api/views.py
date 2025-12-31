@@ -6,8 +6,11 @@ import uuid
 import json
 import hashlib
 import time
+from django.utils import timezone
 
 import re
+from rest_framework import serializers
+
 from websocket import WebSocketConnectionClosedException
 from rest_framework import viewsets, status
 from rest_framework.response import Response
@@ -29,6 +32,21 @@ from .serializers import (
 )
 
 from .models import Tag
+from .models import (
+    Resource, Permission, Role,
+    Plan, PlanLimit, Subscription,
+    BatteryShare, SavedBattery, Invite,
+    Deck, Flashcard, DeckShare, SavedDeck,
+    Tag, QaPair
+)
+
+from .serializers import (
+    ResourceSerializer, PermissionSerializer, RoleSerializer,
+    PlanSerializer, PlanLimitSerializer, SubscriptionSerializer,
+    BatteryShareSerializer, SavedBatterySerializer, InviteSerializer,
+    DeckSerializer, FlashcardSerializer, DeckShareSerializer, SavedDeckSerializer,
+    TagSerializer, QaPairSerializer
+)
 
 import requests
 from websocket import create_connection, WebSocketTimeoutException
@@ -1599,3 +1617,285 @@ class BatteryViewSet(viewsets.ModelViewSet):
         battery = self.get_object()
         qs = battery.attempts.filter(user=request.user).order_by("-started_at")
         return Response(BatteryAttemptSerializer(qs, many=True).data)
+    
+
+
+# ==========================================================
+# RBAC (Resources / Permissions / Roles)
+# ==========================================================
+
+class ResourceViewSet(viewsets.ModelViewSet):
+    queryset = Resource.objects.all().order_by("key")
+    serializer_class = ResourceSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class PermissionViewSet(viewsets.ModelViewSet):
+    queryset = Permission.objects.select_related("resource").all().order_by("resource__key", "action", "code")
+    serializer_class = PermissionSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class RoleViewSet(viewsets.ModelViewSet):
+    queryset = Role.objects.prefetch_related("permissions").all().order_by("name")
+    serializer_class = RoleSerializer
+    permission_classes = [IsAuthenticated]
+
+
+# ==========================================================
+# Plans / Limits / Subscription
+# ==========================================================
+
+class PlanViewSet(viewsets.ModelViewSet):
+    queryset = Plan.objects.prefetch_related("limits").all().order_by("tier")
+    serializer_class = PlanSerializer
+    permission_classes = [AllowAny]  # normalmente el listado de planes es público
+
+
+class PlanLimitViewSet(viewsets.ModelViewSet):
+    queryset = PlanLimit.objects.select_related("plan").all().order_by("plan__tier", "key")
+    serializer_class = PlanLimitSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class SubscriptionViewSet(viewsets.ModelViewSet):
+    queryset = Subscription.objects.select_related("user", "plan").all()
+    serializer_class = SubscriptionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # usuario normal solo ve su subscription; staff/admin ve todas
+        user = self.request.user
+        if user.is_staff or user.is_superuser:
+            return super().get_queryset()
+        return super().get_queryset().filter(user=user)
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me")
+    def me(self, request):
+        sub = getattr(request.user, "subscription", None)
+        if not sub:
+            return Response({"detail": "No subscription found for this user"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self.get_serializer(sub).data)
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="set-plan")
+    def set_plan(self, request):
+        """
+        POST /api/subscriptions/set-plan/
+        Body: { "tier": "free|premium|ultra" }
+        Cambia el plan del usuario (demo/simple). En producción lo maneja Stripe/Paypal webhooks.
+        """
+        tier = (request.data.get("tier") or "").strip().lower()
+        if tier not in ("free", "premium", "ultra"):
+            return Response({"detail": "tier must be free|premium|ultra"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            plan = Plan.objects.get(tier=tier, is_active=True)
+        except Plan.DoesNotExist:
+            return Response({"detail": "Plan not found or inactive"}, status=status.HTTP_404_NOT_FOUND)
+
+        sub, _ = Subscription.objects.get_or_create(user=request.user, defaults={"plan": plan})
+        sub.plan = plan
+        sub.status = "active"
+        sub.current_period_start = timezone.now()
+        sub.save(update_fields=["plan", "status", "current_period_start"])
+
+        return Response(self.get_serializer(sub).data, status=status.HTTP_200_OK)
+
+
+# ==========================================================
+# Sharing / Saved / Invites (Batteries)
+# ==========================================================
+
+class BatteryShareViewSet(viewsets.ModelViewSet):
+    queryset = BatteryShare.objects.select_related("battery", "shared_with").all()
+    serializer_class = BatteryShareSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        # shares donde: yo soy el receptor O yo soy el dueño del battery
+        return (
+            super()
+            .get_queryset()
+            .filter(Q(shared_with=user) | Q(battery__project__owner=user))
+            .distinct()
+        )
+
+    def perform_create(self, serializer):
+        # valida que el usuario sea dueño del battery
+        battery = serializer.validated_data["battery"]
+        if battery.project.owner_id != self.request.user.id:
+            raise serializers.ValidationError("Only the project owner can share this battery.")
+        serializer.save()
+
+
+class SavedBatteryViewSet(viewsets.ModelViewSet):
+    queryset = SavedBattery.objects.select_related("user", "battery", "battery__project").all()
+    serializer_class = SavedBatterySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return super().get_queryset().filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+class InviteViewSet(viewsets.ModelViewSet):
+    queryset = Invite.objects.select_related("inviter", "battery_to_share", "accepted_by").all()
+    serializer_class = InviteSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        # invitaciones que yo mandé, o que yo acepté
+        return super().get_queryset().filter(Q(inviter=user) | Q(accepted_by=user)).distinct()
+
+    def perform_create(self, serializer):
+        # Solo Ultra debería poder invitar (luego lo amarramos a PlanLimit)
+        serializer.save(inviter=self.request.user)
+
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="accept")
+    def accept(self, request):
+        """
+        POST /api/invites/accept/
+        Body: { "token": "<uuid>" }
+        """
+        token = request.data.get("token")
+        if not token:
+            return Response({"detail": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            invite = Invite.objects.select_related("battery_to_share").get(token=token)
+        except Invite.DoesNotExist:
+            return Response({"detail": "Invite not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if not invite.is_valid():
+            return Response({"detail": "Invite is not valid (expired/revoked/accepted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Si está autenticado, registramos accepted_by
+        if request.user.is_authenticated:
+            invite.status = "accepted"
+            invite.accepted_by = request.user
+            invite.accepted_at = timezone.now()
+            invite.save(update_fields=["status", "accepted_by", "accepted_at"])
+            return Response(InviteSerializer(invite).data)
+
+        # Si no está autenticado, el frontend debe redirigir a register/login
+        return Response(
+            {"detail": "Invite is valid. Please login/register to accept.", "invite": InviteSerializer(invite).data},
+            status=status.HTTP_200_OK,
+        )
+
+
+# ==========================================================
+# Flashcards
+# ==========================================================
+
+class DeckViewSet(viewsets.ModelViewSet):
+    queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
+    serializer_class = DeckSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        # owner + decks compartidos conmigo
+        return (
+            super()
+            .get_queryset()
+            .filter(Q(owner=user) | Q(shares__shared_with=user) | Q(visibility="public"))
+            .distinct()
+            .order_by("-created_at")
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="add-card")
+    def add_card(self, request, pk=None):
+        deck = self.get_object()
+        if deck.owner_id != request.user.id:
+            return Response({"detail": "Only owner can add cards."}, status=status.HTTP_403_FORBIDDEN)
+
+        front = request.data.get("front")
+        back = request.data.get("back")
+        notes = request.data.get("notes", "")
+        if not front or not back:
+            return Response({"detail": "front and back are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        card = Flashcard.objects.create(deck=deck, front=front, back=back, notes=notes)
+        return Response(FlashcardSerializer(card).data, status=status.HTTP_201_CREATED)
+
+
+class FlashcardViewSet(viewsets.ModelViewSet):
+    queryset = Flashcard.objects.select_related("deck").all()
+    serializer_class = FlashcardSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        return (
+            super()
+            .get_queryset()
+            .filter(Q(deck__owner=user) | Q(deck__shares__shared_with=user) | Q(deck__visibility="public"))
+            .distinct()
+            .order_by("-created_at")
+        )
+
+
+class DeckShareViewSet(viewsets.ModelViewSet):
+    queryset = DeckShare.objects.select_related("deck", "shared_with").all()
+    serializer_class = DeckShareSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        return super().get_queryset().filter(Q(shared_with=user) | Q(deck__owner=user)).distinct()
+
+    def perform_create(self, serializer):
+        deck = serializer.validated_data["deck"]
+        if deck.owner_id != self.request.user.id:
+            raise serializers.ValidationError("Only deck owner can share this deck.")
+        serializer.save()
+
+
+class SavedDeckViewSet(viewsets.ModelViewSet):
+    queryset = SavedDeck.objects.select_related("user", "deck").all()
+    serializer_class = SavedDeckSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return super().get_queryset().filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+# ==========================================================
+# Optional: exponer Tag / QaPair (managed=False)
+# ==========================================================
+
+class TagViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        document_id = self.request.query_params.get("document_id")
+        if document_id:
+            qs = qs.filter(document_id=str(document_id))
+        return qs.order_by("created_at")
+
+
+class QaPairViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = QaPair.objects.all()
+    serializer_class = QaPairSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        job_id = self.request.query_params.get("job_id")
+        if job_id:
+            qs = qs.filter(job_id=str(job_id))
+        return qs.order_by("qa_index", "created_at")

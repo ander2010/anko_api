@@ -1,7 +1,14 @@
 from rest_framework import serializers
 from .models import User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
-
+from .models import (
+    Resource, Permission, Role,
+    Plan, PlanLimit, Subscription,
+    BatteryShare, SavedBattery, Invite,
+    Deck, Flashcard, DeckShare, SavedDeck,
+    Tag, QaPair
+)
+import uuid
 User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
@@ -248,3 +255,227 @@ class BatteryAttemptSerializer(serializers.ModelSerializer):
             "percent",
             "answers",
         ]
+
+
+# =========================
+# RBAC
+# =========================
+
+
+
+class ResourceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Resource
+        fields = "__all__"
+
+
+class PermissionSerializer(serializers.ModelSerializer):
+    resourceKey = serializers.CharField(source="resource.key", read_only=True)
+
+    class Meta:
+        model = Permission
+        fields = ["id", "resource", "resourceKey", "action", "code"]
+
+
+class RoleSerializer(serializers.ModelSerializer):
+    permissions = serializers.PrimaryKeyRelatedField(
+        queryset=Permission.objects.all(),
+        many=True,
+        required=False
+    )
+
+    class Meta:
+        model = Role
+        fields = ["id", "name", "description", "permissions"]
+
+
+# =========================
+# Plans / Limits / Subscription
+# =========================
+
+class PlanLimitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlanLimit
+        fields = ["id", "plan", "key", "value_type", "int_value", "bool_value", "str_value"]
+
+
+class PlanSerializer(serializers.ModelSerializer):
+    limits = PlanLimitSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Plan
+        fields = [
+            "id",
+            "tier",
+            "name",
+            "description",
+            "price_cents",
+            "currency",
+            "billing_period",
+            "max_documents",
+            "max_batteries",
+            "is_active",
+            "limits",
+        ]
+
+
+class SubscriptionSerializer(serializers.ModelSerializer):
+    userId = serializers.IntegerField(source="user_id", read_only=True)
+
+    planId = serializers.IntegerField(source="plan_id", read_only=True)
+    plan = PlanSerializer(read_only=True)
+
+    isAccessActive = serializers.BooleanField(source="is_access_active", read_only=True)
+
+    class Meta:
+        model = Subscription
+        fields = [
+            "id",
+            "userId",
+            "planId",
+            "plan",
+            "status",
+            "start_at",
+            "current_period_start",
+            "current_period_end",
+            "provider",
+            "provider_subscription_id",
+            "isAccessActive",
+        ]
+        read_only_fields = ["userId", "isAccessActive"]
+
+
+# =========================
+# Sharing / Saved / Invite (Batteries)
+# =========================
+
+class BatteryShareSerializer(serializers.ModelSerializer):
+    batteryId = serializers.IntegerField(source="battery_id", read_only=True)
+    sharedWithId = serializers.IntegerField(source="shared_with_id", read_only=True)
+    sharedWithUsername = serializers.CharField(source="shared_with.username", read_only=True)
+
+    class Meta:
+        model = BatteryShare
+        fields = [
+            "id",
+            "battery",
+            "batteryId",
+            "shared_with",
+            "sharedWithId",
+            "sharedWithUsername",
+            "access",
+            "created_at",
+        ]
+        read_only_fields = ["created_at", "batteryId", "sharedWithId", "sharedWithUsername"]
+
+
+class SavedBatterySerializer(serializers.ModelSerializer):
+    batteryId = serializers.IntegerField(source="battery_id", read_only=True)
+
+    # opcional para UI
+    batteryName = serializers.CharField(source="battery.name", read_only=True)
+    batteryOwnerId = serializers.IntegerField(source="battery.project.owner_id", read_only=True)
+
+    class Meta:
+        model = SavedBattery
+        fields = ["id", "battery", "batteryId", "batteryName", "batteryOwnerId", "created_at"]
+        read_only_fields = ["created_at", "batteryId", "batteryName", "batteryOwnerId"]
+
+
+class InviteSerializer(serializers.ModelSerializer):
+    inviterId = serializers.IntegerField(source="inviter_id", read_only=True)
+    token = serializers.UUIDField(read_only=True)
+
+    batteryToShareId = serializers.IntegerField(source="battery_to_share_id", read_only=True)
+    acceptedById = serializers.IntegerField(source="accepted_by_id", read_only=True)
+
+    class Meta:
+        model = Invite
+        fields = [
+            "id",
+            "inviterId",
+            "email",
+            "token",
+            "battery_to_share",
+            "batteryToShareId",
+            "share_access",
+            "status",
+            "created_at",
+            "expires_at",
+            "acceptedById",
+            "accepted_at",
+        ]
+        read_only_fields = ["inviterId", "token", "status", "created_at", "acceptedById", "accepted_at"]
+
+
+# =========================
+# Flashcards
+# =========================
+
+class FlashcardSerializer(serializers.ModelSerializer):
+    deckId = serializers.IntegerField(source="deck_id", read_only=True)
+
+    class Meta:
+        model = Flashcard
+        fields = ["id", "deck", "deckId", "front", "back", "notes", "created_at"]
+        read_only_fields = ["created_at", "deckId"]
+
+
+class DeckSerializer(serializers.ModelSerializer):
+    ownerId = serializers.IntegerField(source="owner_id", read_only=True)
+    cardsCount = serializers.SerializerMethodField()
+    cards = FlashcardSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Deck
+        fields = ["id", "ownerId", "title", "visibility", "created_at", "cardsCount", "cards"]
+        read_only_fields = ["created_at", "ownerId", "cardsCount", "cards"]
+
+    def get_cardsCount(self, obj):
+        return obj.cards.count()
+
+
+class DeckShareSerializer(serializers.ModelSerializer):
+    deckId = serializers.IntegerField(source="deck_id", read_only=True)
+    sharedWithId = serializers.IntegerField(source="shared_with_id", read_only=True)
+    sharedWithUsername = serializers.CharField(source="shared_with.username", read_only=True)
+
+    class Meta:
+        model = DeckShare
+        fields = [
+            "id",
+            "deck",
+            "deckId",
+            "shared_with",
+            "sharedWithId",
+            "sharedWithUsername",
+            "access",
+            "created_at",
+        ]
+        read_only_fields = ["created_at", "deckId", "sharedWithId", "sharedWithUsername"]
+
+
+class SavedDeckSerializer(serializers.ModelSerializer):
+    deckId = serializers.IntegerField(source="deck_id", read_only=True)
+    deckTitle = serializers.CharField(source="deck.title", read_only=True)
+
+    class Meta:
+        model = SavedDeck
+        fields = ["id", "deck", "deckId", "deckTitle", "created_at"]
+        read_only_fields = ["created_at", "deckId", "deckTitle"]
+
+
+# =========================
+# managed=False tables (si las quieres exponer)
+# =========================
+
+class TagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
+        fields = "__all__"
+
+
+class QaPairSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QaPair
+        fields = "__all__"
