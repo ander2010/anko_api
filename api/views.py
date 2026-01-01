@@ -27,7 +27,7 @@ from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    DocumentWithSectionsSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AllowedRoutesSerializer, DocumentWithSectionsSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 
@@ -85,11 +85,25 @@ class AuthViewSet(viewsets.GenericViewSet):
             token, created = Token.objects.get_or_create(user=user)
             return Response({'token': token.key, 'user': UserSerializer(user).data})
         return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
-
-    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    
+    @action(detail=False, methods=["get", "patch"], url_path="me")
     def me(self, request):
-        serializer = UserSerializer(request.user)
+        user = request.user
+
+        if request.method == "GET":
+            serializer = self.get_serializer(user)
+            return Response(serializer.data)
+
+        # PATCH
+        serializer = self.get_serializer(user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
         return Response(serializer.data)
+
+    # @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    # def me(self, request):
+    #     serializer = UserSerializer(request.user)
+    #     return Response(serializer.data)
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
@@ -1899,3 +1913,57 @@ class QaPairViewSet(viewsets.ReadOnlyModelViewSet):
         if job_id:
             qs = qs.filter(job_id=str(job_id))
         return qs.order_by("qa_index", "created_at")
+
+
+class RBACViewSet(viewsets.ViewSet):
+    """
+    /api/rbac/me/allowed-routes/
+    Devuelve keys de rutas permitidas según roles del usuario.
+
+    Convención:
+      - Resource.key guarda keys estilo: "dashboard.home", "dashboard.projects", etc.
+      - Permission.action="view" es el permiso para ver esa ruta.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=["get"], url_path="me/allowed-routes")
+    def me_allowed_routes(self, request):
+        user = request.user
+
+        # Admin override: si es staff/superuser o si tiene rol "admin"
+        role_names = list(user.roles.values_list("name", flat=True))
+
+        is_admin = bool(user.is_staff or user.is_superuser or ("admin" in role_names))
+
+        if is_admin:
+            # Admin ve todo lo que tenga permiso view (todas las routes)
+            allowed = list(
+                Permission.objects.filter(action="view")
+                .select_related("resource")
+                .values_list("resource__key", flat=True)
+                .distinct()
+                .order_by("resource__key")
+            )
+        else:
+            # Usuario normal: permisos por roles
+            allowed = list(
+                Permission.objects.filter(
+                    action="view",
+                    roles__users=user,
+                )
+                .select_related("resource")
+                .values_list("resource__key", flat=True)
+                .distinct()
+                .order_by("resource__key")
+            )
+
+        payload = {
+            "user_id": user.id,
+            "username": user.username,
+            "is_admin": is_admin,
+            "roles": role_names,
+            "allowed_routes": allowed,
+        }
+
+        ser = AllowedRoutesSerializer(payload)
+        return Response(ser.data)

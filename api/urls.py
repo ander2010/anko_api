@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    AuthViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
+    AuthViewSet, RBACViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
     SectionViewSet, TopicViewSet, RuleViewSet, BatteryViewSet,
     ResourceViewSet, PermissionViewSet, RoleViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
@@ -36,7 +36,7 @@ router.register(r"decks", DeckViewSet)
 router.register(r"flashcards", FlashcardViewSet)
 router.register(r"deck-shares", DeckShareViewSet)
 router.register(r"saved-decks", SavedDeckViewSet)
-
+router.register(r"rbac", RBACViewSet, basename="rbac")
 # opcional
 # router.register(r"tags", TagViewSet, basename="tags")
 # router.register(r"qa-pairs", QaPairViewSet, basename="qa-pairs")

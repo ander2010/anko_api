@@ -17,6 +17,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'password', 'avatar', 'first_name', 'last_name','roles']
+        read_only_fields = ["id", "username", "email"]  # ejemplo
 
     def create(self, validated_data):
         password = validated_data.pop('password')
@@ -466,7 +467,7 @@ class SavedDeckSerializer(serializers.ModelSerializer):
 
 
 # =========================
-# managed=False tables (si las quieres exponer)
+# managed=False tables (si las quieresfv exponer)
 # =========================
 
 class TagSerializer(serializers.ModelSerializer):
@@ -479,3 +480,9 @@ class QaPairSerializer(serializers.ModelSerializer):
     class Meta:
         model = QaPair
         fields = "__all__"
+class AllowedRoutesSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField()
+    username = serializers.CharField()
+    is_admin = serializers.BooleanField()
+    roles = serializers.ListField(child=serializers.CharField())
+    allowed_routes = serializers.ListField(child=serializers.CharField())
