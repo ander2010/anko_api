@@ -267,12 +267,46 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
 
     def get_queryset(self):
-        """
-        Solo devuelve proyectos donde el usuario es owner o miembro.
-        """
         user = self.request.user
+
+        user_id = self.request.query_params.get("user")          # ejemplo: ?user=12
+        username = self.request.query_params.get("username")     # ejemplo: ?username=ander
+
+        is_admin = (
+            user.is_superuser
+            or user.is_staff
+            or user.roles.filter(name="admin").exists()
+        )
+
+        qs = Project.objects.all()
+
+        # 1) Si NO mandan user/username: SOLO admin ve todo
+        if not user_id and not username:
+            if is_admin:
+                return qs.order_by("-updated_at")
+            return qs.filter(Q(owner=user) | Q(members=user)).distinct().order_by("-updated_at")
+
+        # 2) Si mandan filtro: resolvemos target_user
+        target_user = None
+        if user_id:
+            try:
+                target_user = User.objects.get(id=int(user_id))
+            except (ValueError, User.DoesNotExist):
+                return Project.objects.none()
+
+        if username:
+            try:
+                target_user = User.objects.get(username=username)
+            except User.DoesNotExist:
+                return Project.objects.none()
+
+        # 3) Seguridad: si no es admin, SOLO puede pedir sus propios proyectos
+        if not is_admin and target_user.id != user.id:
+            return Project.objects.none()
+
+        # 4) Filtrar por owner o member del target_user
         return (
-            Project.objects.filter(Q(owner=user) | Q(members=user))  # ✅ usa Q importado
+            qs.filter(Q(owner=target_user) | Q(members=target_user))
             .distinct()
             .order_by("-updated_at")
         )
