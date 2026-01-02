@@ -1880,6 +1880,118 @@ class DeckViewSet(viewsets.ModelViewSet):
         super().initial(request, *args, **kwargs)
         # PlanGuard.assert_flashcards_allowed(user=request.user)
 
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="create-with-cards")
+    @transaction.atomic
+    def create_with_cards(self, request):
+        data = request.data
+
+        # --- Deck required ---
+        project_id = data.get("project_id")
+        title = (data.get("title") or "").strip()
+        if not project_id:
+            return Response({"detail": "project_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not title:
+            return Response({"detail": "title is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        description = data.get("description") or ""
+        visibility = data.get("visibility") or "private"
+
+        # --- Optional: section_ids ---
+        section_ids = data.get("section_ids")
+        if section_ids is None:
+            section_ids = []
+        if not isinstance(section_ids, list):
+            return Response({"detail": "section_ids must be a list of integers (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --- Optional: document_ids (solo reflejo) ---
+        document_ids = data.get("document_ids")
+        if document_ids is not None and not isinstance(document_ids, list):
+            return Response({"detail": "document_ids must be a list of integers (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --- Cards count (N) ---
+        cards_count = data.get("cards_count", 0)
+        try:
+            cards_count = int(cards_count)
+        except (TypeError, ValueError):
+            return Response({"detail": "cards_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if cards_count < 0:
+            return Response({"detail": "cards_count must be >= 0"}, status=status.HTTP_400_BAD_REQUEST)
+        if cards_count > 500:  # límite razonable anti abuso
+            return Response({"detail": "cards_count too large (max 500)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --- Project ---
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            return Response({"detail": "project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 🔒 Si Project tiene owner, enforce (opcional pero recomendado)
+        if hasattr(project, "owner_id") and project.owner_id != request.user.id:
+            return Response({"detail": "You do not own this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        # --- Create Deck ---
+        deck = Deck.objects.create(
+            project=project,
+            owner=request.user,
+            title=title,
+            description=description,
+            visibility=visibility,
+        )
+
+        # --- Attach Sections (optional) ---
+        attached_section_ids = []
+        if section_ids:
+            qs = Section.objects.filter(id__in=section_ids)
+            found_ids = list(qs.values_list("id", flat=True))
+            missing = [sid for sid in section_ids if sid not in set(found_ids)]
+            if missing:
+                return Response(
+                    {"detail": "Some section_ids do not exist (or are not allowed).", "missing_section_ids": missing},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            deck.sections.set(qs)
+            attached_section_ids = found_ids
+
+        # --- Create N Flashcards ---
+        created = []
+        for i in range(1, cards_count + 1):
+            created.append(
+                Flashcard(
+                    deck=deck,
+                    front=f"Front {i}",
+                    back=f"Back {i}",
+                    notes=""
+                )
+            )
+
+        if created:
+            Flashcard.objects.bulk_create(created)
+
+        # --- Response ---
+        flashcards_count = cards_count  # ya sabes cuántas creaste
+        sections_count = len(attached_section_ids)
+
+        return Response(
+            {
+                "project_id": project_id,
+                "deck": {
+                    "id": deck.id,
+                    "title": deck.title,
+                    "description": deck.description,
+                    "visibility": deck.visibility,
+                    "owner_id": deck.owner_id,
+                    "section_ids": attached_section_ids,
+                    "sections_count": sections_count,
+                    "flashcards_count": flashcards_count,
+                    "document_ids": document_ids,
+                },
+                "cards_created": flashcards_count,
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
     # def get_queryset(self):
     #     user = self.request.user
     #     # owner + decks compartidos conmigo
