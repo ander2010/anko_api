@@ -10,7 +10,7 @@ from django.utils import timezone
 
 import re
 from rest_framework import serializers
-
+from rest_framework.exceptions import PermissionDenied
 from websocket import WebSocketConnectionClosedException
 from rest_framework import viewsets, status
 from rest_framework.response import Response
@@ -2032,13 +2032,28 @@ class FlashcardViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        return (
-            super()
-            .get_queryset()
-            .filter(Q(deck__owner=user) | Q(deck__shares__shared_with=user) | Q(deck__visibility="public"))
-            .distinct()
-            .order_by("-created_at")
+        qs = super().get_queryset()
+
+        deck_id = self.request.query_params.get("deck")
+        if not deck_id:
+            # Si NO pasas deck, por seguridad NO devuelvas todo
+            return qs.none()
+
+        # Filtra SOLO ese deck
+        qs = qs.filter(deck_id=deck_id)
+
+        # Permisos: owner OR compartido OR público
+        allowed = qs.filter(
+            Q(deck__owner=user) |
+            Q(deck__shares__shared_with=user) |
+            Q(deck__visibility="public")
         )
+
+        if not allowed.exists():
+            # Si el deck existe pero no tienes permiso, 403
+            raise PermissionDenied("You do not have access to this deck.")
+
+        return allowed.order_by("-created_at")
 
 
 class DeckShareViewSet(viewsets.ModelViewSet):
