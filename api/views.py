@@ -1867,23 +1867,39 @@ class DeckViewSet(viewsets.ModelViewSet):
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        qs = Deck.objects.filter(owner=self.request.user)
+
+        project_id = self.request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+
+        return qs
+
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
-        PlanGuard.assert_flashcards_allowed(user=request.user)
+        # PlanGuard.assert_flashcards_allowed(user=request.user)
 
-    def get_queryset(self):
-        user = self.request.user
-        # owner + decks compartidos conmigo
-        return (
-            super()
-            .get_queryset()
-            .filter(Q(owner=user) | Q(shares__shared_with=user) | Q(visibility="public"))
-            .distinct()
-            .order_by("-created_at")
-        )
+    # def get_queryset(self):
+    #     user = self.request.user
+    #     # owner + decks compartidos conmigo
+    #     return (
+    #         super()
+    #         .get_queryset()
+    #         .filter(Q(owner=user) | Q(shares__shared_with=user) | Q(visibility="public"))
+    #         .distinct()
+    #         .order_by("-created_at")
+    #     )
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+    
+
+class FlashcardViewSet(viewsets.ModelViewSet):
+    queryset = Flashcard.objects.select_related("deck").all()
+    serializer_class = FlashcardSerializer
+    permission_classes = [IsAuthenticated]
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="add-card")
     def add_card(self, request, pk=None):
@@ -1901,10 +1917,6 @@ class DeckViewSet(viewsets.ModelViewSet):
         return Response(FlashcardSerializer(card).data, status=status.HTTP_201_CREATED)
 
 
-class FlashcardViewSet(viewsets.ModelViewSet):
-    queryset = Flashcard.objects.select_related("deck").all()
-    serializer_class = FlashcardSerializer
-    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
