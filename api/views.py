@@ -30,7 +30,7 @@ from .serializers import (
     AllowedRoutesSerializer, DocumentWithSectionsSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
-
+from api.services.plan_guard import PlanGuard
 from .models import Tag
 from .models import (
     Resource, Permission, Role,
@@ -373,7 +373,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 {"error": "No files provided. Use multipart/form-data with key 'files'."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
+        PlanGuard.assert_upload_allowed(user=request.user, files=files)
         created_docs = []
         processing = []  # doc + ws_url + respuesta del microservicio
 
@@ -1194,6 +1194,7 @@ class BatteryViewSet(viewsets.ModelViewSet):
 
         Returns: battery + job_id + ws_url
         """
+        PlanGuard.assert_can_create_battery(user=request.user)
         project_id = request.data.get("project")
         rule_id = request.data.get("rule")
         # doc_id = request.data.get("doc_id")
@@ -1502,6 +1503,7 @@ class BatteryViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
+        PlanGuard.assert_can_create_battery(user=request.user)
         project_id = request.data.get("project")
         rule_id = request.data.get("rule")
         difficulty = request.data.get("difficulty")
@@ -1699,6 +1701,26 @@ class PlanViewSet(viewsets.ModelViewSet):
     serializer_class = PlanSerializer
     permission_classes = [AllowAny]  # normalmente el listado de planes es público
 
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me/limits")
+    def my_limits(self, request):
+        plan = PlanGuard.get_plan_for_user(request.user)
+
+        data = {
+            "plan": {"tier": plan.tier, "name": plan.name},
+            "max_documents": plan.max_documents,
+            "max_batteries": plan.max_batteries,
+            "limits": {
+                "upload_max_mb": PlanGuard.limit_int(plan, "upload_max_mb"),
+                "questions_per_battery_max": PlanGuard.limit_int(plan, "questions_per_battery_max"),
+                "explore_topics_limit": PlanGuard.limit_int(plan, "explore_topics_limit"),
+                "can_use_flashcards": PlanGuard.limit_bool(plan, "can_use_flashcards"),
+                "can_invite": PlanGuard.limit_bool(plan, "can_invite"),
+                "can_collect_batteries": PlanGuard.limit_bool(plan, "can_collect_batteries"),
+                "can_collect_decks": PlanGuard.limit_bool(plan, "can_collect_decks"),
+            },
+        }
+        return Response(data)
+
 
 class PlanLimitViewSet(viewsets.ModelViewSet):
     queryset = PlanLimit.objects.select_related("plan").all().order_by("plan__tier", "key")
@@ -1844,6 +1866,10 @@ class DeckViewSet(viewsets.ModelViewSet):
     queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        PlanGuard.assert_flashcards_allowed(user=request.user)
 
     def get_queryset(self):
         user = self.request.user
