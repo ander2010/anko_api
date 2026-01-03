@@ -28,8 +28,8 @@ AWS_S3_SIGNATURE_VERSION = "s3v4"
 AWS_S3_ADDRESSING_STYLE = "path"
 AWS_DEFAULT_ACL = None
 
-AWS_QUERYSTRING_AUTH = False  # ✅ si bucket es PUBLIC
-
+AWS_QUERYSTRING_AUTH = True  # ✅ si bucket es PUBLIC
+AWS_QUERYSTRING_EXPIRE = 60 * 60  # 1 hora
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 

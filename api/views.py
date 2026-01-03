@@ -577,6 +577,29 @@ class DocumentViewSet(viewsets.ModelViewSet):
     serializer_class = DocumentSerializer
     permission_classes = [AllowAny]
     
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-url")
+    def download_url(self, request, pk=None):
+        doc = self.get_object()
+
+        # seguridad extra (por si cambias get_queryset)
+        user = request.user
+        can_view = (
+            doc.project.owner_id == user.id
+            or doc.project.members.filter(id=user.id).exists()
+        )
+        if not can_view:
+            raise PermissionDenied("You do not have access to this document.")
+
+        if not doc.file:
+            return Response({"detail": "Document has no file"}, status=status.HTTP_404_NOT_FOUND)
+        url = doc.file.storage.url(doc.file.name)
+        return Response({
+            "id": doc.id,
+            "filename": doc.filename,
+            "storage_key": doc.file.name,  # ej: "anko/documents/migracion.pdf"
+            "url": url,           # ✅ URL pública (si bucket es public)
+        })
     # def generate_questions(self, request, pk=None):
     #     """
     #     POST /api/documents/<id>/generate-questions/
