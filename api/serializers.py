@@ -429,8 +429,8 @@ class DeckSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Deck
-        fields = ["id", "ownerId", "title", "visibility", "created_at", "cardsCount", "cards","project","sections"]
-        read_only_fields = ["created_at", "ownerId", "cardsCount", "cards"]
+        fields = ["id", "ownerId", "title", "visibility", "created_at", "cardsCount", "cards","project","sections","external_job_id"]
+        read_only_fields = ["created_at", "ownerId", "cardsCount", "cards","external_job_id"]
 
     def get_cardsCount(self, obj):
         return obj.cards.count()

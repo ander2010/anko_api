@@ -8,6 +8,7 @@ import hashlib
 import time
 from django.utils import timezone
 
+
 import re
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
@@ -1880,10 +1881,146 @@ class DeckViewSet(viewsets.ModelViewSet):
         super().initial(request, *args, **kwargs)
         # PlanGuard.assert_flashcards_allowed(user=request.user)
 
+
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="create-and-start-job")
+    @transaction.atomic
+    def create_and_start_job(self, request):
+        data = request.data
+        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
+        # --- Deck required ---
+        project_id = data.get("project_id")
+        title = (data.get("title") or "").strip()
+        if not project_id:
+            return Response({"detail": "project_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not title:
+            return Response({"detail": "title is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        description = data.get("description") or ""
+        visibility = data.get("visibility") or "private"
+
+        # --- Optional: section_ids ---
+        section_ids = data.get("section_ids") or []
+        if not isinstance(section_ids, list):
+            return Response({"detail": "section_ids must be a list of integers (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --- Cards count (N) -> quantity for microservice ---
+        cards_count = data.get("cards_count", 0)
+        try:
+            cards_count = int(cards_count)
+        except (TypeError, ValueError):
+            return Response({"detail": "cards_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        if cards_count <= 0:
+            return Response({"detail": "cards_count must be > 0"}, status=status.HTTP_400_BAD_REQUEST)
+        if cards_count > 500:
+            return Response({"detail": "cards_count too large (max 500)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --- Project ---
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            return Response({"detail": "project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # opcional: validar ownership del project
+        if hasattr(project, "owner_id") and project.owner_id != request.user.id:
+            return Response({"detail": "You do not own this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        # --- Create Deck ---
+        deck = Deck.objects.create(
+            project=project,
+            owner=request.user,
+            title=title,
+            description=description,
+            visibility=visibility,
+        )
+
+        # --- Attach Sections (optional) ---
+        attached_section_ids = []
+        if section_ids:
+            qs = Section.objects.filter(id__in=section_ids)
+            found_ids = list(qs.values_list("id", flat=True))
+            missing = [sid for sid in section_ids if sid not in set(found_ids)]
+            if missing:
+                return Response(
+                    {"detail": "Some section_ids do not exist.", "missing_section_ids": missing},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            deck.sections.set(qs)
+            attached_section_ids = found_ids
+
+        # --- Payload para microservicio ---
+        document_ids = data.get("document_ids") or []
+        if not isinstance(document_ids, list):
+            return Response({"detail": "document_ids must be a list (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tags = data.get("tags") or []
+        if not isinstance(tags, list):
+            return Response({"detail": "tags must be a list (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        difficulty = data.get("difficulty") or "medium"
+
+        svc_payload = {
+            "document_ids": document_ids,
+            "tags": tags,
+            "quantity": cards_count,
+            "difficulty": difficulty,
+            "user_id": str(request.user.id),
+        }
+
+        # --- Call microservice ---
+        try:
+            resp = requests.post(f"{base_url}/flashcards/create", json=svc_payload, timeout=30)
+            resp.raise_for_status()
+            svc_data = resp.json()
+        except requests.RequestException as e:
+            return Response(
+                {"detail": "Failed calling flashcards service", "error": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        job_id = svc_data.get("job_id")
+        if not job_id:
+            return Response({"detail": "flashcards service did not return job_id", "service_response": svc_data},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        # construir ws urls
+        host = base_url.split("://", 1)[-1].lstrip("/")
+        ws_flashcards = f"ws://{host}/ws/flashcards/{job_id}"
+        ws_progress = f"ws://{host}/ws/progress/{job_id}"
+
+        return Response(
+            {
+                "project_id": project_id,
+                "deck": {
+                    "id": deck.id,
+                    "title": deck.title,
+                    "description": deck.description,
+                    "visibility": deck.visibility,
+                    "owner_id": deck.owner_id,
+                    "section_ids": attached_section_ids,
+                    "sections_count": len(attached_section_ids),
+                },
+                "job": {
+                    "job_id": job_id,
+                    "ws_flashcards": ws_flashcards,
+                    "ws_progress": ws_progress,
+                    # por si te sirve guardar request
+                    "requested_quantity": cards_count,
+                    "difficulty": difficulty,
+                    "tags": tags,
+                    "document_ids": document_ids,
+                },
+            },
+            status=status.HTTP_201_CREATED
+        )
+    
+
+
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="create-with-cards")
     @transaction.atomic
     def create_with_cards(self, request):
         data = request.data
+        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
 
         # --- Deck required ---
         project_id = data.get("project_id")
@@ -1897,17 +2034,46 @@ class DeckViewSet(viewsets.ModelViewSet):
         visibility = data.get("visibility") or "private"
 
         # --- Optional: section_ids ---
-        section_ids = data.get("section_ids")
-        if section_ids is None:
-            section_ids = []
+        section_ids = data.get("section_ids") or []
         if not isinstance(section_ids, list):
-            return Response({"detail": "section_ids must be a list of integers (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "section_ids must be a list of integers (or omitted)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # --- Optional: document_ids (solo reflejo) ---
+        # --- Optional: document_ids (solo reflejo, igual que antes) ---
         document_ids = data.get("document_ids")
-        if document_ids is not None and not isinstance(document_ids, list):
-            return Response({"detail": "document_ids must be a list of integers (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+        if document_ids is None:
+            document_ids = []
+        if not isinstance(document_ids, list):
+            return Response(
+                {"detail": "document_ids must be a list of ids (or omitted)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        document_filenames = []
 
+        if document_ids:
+            docs_qs = (
+                Document.objects
+                .filter(id__in=document_ids)
+                .only("id", "filename")
+            )
+
+            found_ids = list(docs_qs.values_list("id", flat=True))
+            missing = [did for did in document_ids if did not in set(found_ids)]
+            if missing:
+                return Response(
+                    {
+                        "detail": "Some document_ids do not exist",
+                        "missing_document_ids": missing,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            document_filenames = list(
+                docs_qs.values_list("filename", flat=True)
+            )
+        # print("Document IDs:", document_ids)
         # --- Cards count (N) ---
         cards_count = data.get("cards_count", 0)
         try:
@@ -1915,9 +2081,9 @@ class DeckViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             return Response({"detail": "cards_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if cards_count < 0:
-            return Response({"detail": "cards_count must be >= 0"}, status=status.HTTP_400_BAD_REQUEST)
-        if cards_count > 500:  # límite razonable anti abuso
+        if cards_count <= 0:
+            return Response({"detail": "cards_count must be > 0"}, status=status.HTTP_400_BAD_REQUEST)
+        if cards_count > 500:
             return Response({"detail": "cards_count too large (max 500)"}, status=status.HTTP_400_BAD_REQUEST)
 
         # --- Project ---
@@ -1941,35 +2107,72 @@ class DeckViewSet(viewsets.ModelViewSet):
 
         # --- Attach Sections (optional) ---
         attached_section_ids = []
+        tags = []  # 👈 ahora tags sale de sections
+
         if section_ids:
-            qs = Section.objects.filter(id__in=section_ids)
+            qs = Section.objects.filter(id__in=section_ids).only("id", "title")
             found_ids = list(qs.values_list("id", flat=True))
-            missing = [sid for sid in section_ids if sid not in set(found_ids)]
+            found_set = set(found_ids)
+
+            missing = [sid for sid in section_ids if sid not in found_set]
             if missing:
                 return Response(
-                    {"detail": "Some section_ids do not exist (or are not allowed).", "missing_section_ids": missing},
-                    status=status.HTTP_400_BAD_REQUEST
+                    {"detail": "Some section_ids do not exist.", "missing_section_ids": missing},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
+
             deck.sections.set(qs)
             attached_section_ids = found_ids
 
-        # --- Create N Flashcards ---
-        created = []
-        for i in range(1, cards_count + 1):
-            created.append(
-                Flashcard(
-                    deck=deck,
-                    front=f"Front {i}",
-                    back=f"Back {i}",
-                    notes=""
-                )
+            # ✅ tags = títulos de las secciones
+            titles = list(qs.values_list("title", flat=True))
+            tags = [t.strip() for t in titles if (t or "").strip()]
+            # opcional: únicos preservando orden
+            seen = set()
+            tags = [t for t in tags if not (t in seen or seen.add(t))]
+        else:
+            # Fallback opcional (si quieres permitir tags manuales cuando NO hay sections)
+            tags = data.get("tags") or []
+        
+        difficulty = (data.get("difficulty") or "medium").lower()
+
+        svc_payload = {
+        #      "document_ids": ["test"],
+        # "tags": ["Barcelona"],
+            "document_ids":document_filenames,             # tú decides qué manda el frontend
+            "tags": tags,
+            "quantity": cards_count,                  # 👈 esto reemplaza el bulk_create local
+            "difficulty": difficulty,
+            "user_id": str(request.user.id),          # importante para luego importar por user/job
+        }
+
+        # --- Call microservice ---
+        try:
+            resp = requests.post(f"{base_url}/flashcards/create", json=svc_payload, timeout=30)
+            resp.raise_for_status()
+            svc_data = resp.json()
+        except requests.RequestException as e:
+            # Como está en transaction.atomic, al devolver error se hace rollback del deck
+            return Response(
+                {"detail": "Failed calling flashcards service", "error": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        if created:
-            Flashcard.objects.bulk_create(created)
+        job_id = svc_data.get("job_id")
+        if not job_id:
+            return Response(
+                {"detail": "flashcards service did not return job_id", "service_response": svc_data},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
 
-        # --- Response ---
-        flashcards_count = cards_count  # ya sabes cuántas creaste
+        # construir ws urls
+        host = base_url.split("://", 1)[-1].lstrip("/")
+        ws_flashcards = f"ws://{host}/ws/flashcards/{job_id}"
+        ws_progress = f"ws://{host}/ws/progress/{job_id}"
+        deck.external_job_id = job_id
+        deck.save(update_fields=["external_job_id"])
+        # --- Response (MISMO estilo del primero + job/ws) ---
+        flashcards_count = cards_count
         sections_count = len(attached_section_ids)
 
         return Response(
@@ -1986,10 +2189,128 @@ class DeckViewSet(viewsets.ModelViewSet):
                     "flashcards_count": flashcards_count,
                     "document_ids": document_ids,
                 },
-                "cards_created": flashcards_count,
+                "cards_created": flashcards_count,   # mantiene compat con tu frontend
+                "job": {
+                    "job_id": job_id,
+                    "ws_flashcards": ws_flashcards,
+                    "ws_progress": ws_progress,
+                    "requested_quantity": cards_count,
+                    "difficulty": difficulty,
+                    "tags": tags,
+                    "document_ids": document_ids,
+                    # opcional: por si luego quieres debug
+                    "microservice_response": svc_data,
+                },
             },
             status=status.HTTP_201_CREATED
         )
+        # data = request.data
+
+        # # --- Deck required ---
+        # project_id = data.get("project_id")
+        # title = (data.get("title") or "").strip()
+        # if not project_id:
+        #     return Response({"detail": "project_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        # if not title:
+        #     return Response({"detail": "title is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # description = data.get("description") or ""
+        # visibility = data.get("visibility") or "private"
+
+        # # --- Optional: section_ids ---
+        # section_ids = data.get("section_ids")
+        # if section_ids is None:
+        #     section_ids = []
+        # if not isinstance(section_ids, list):
+        #     return Response({"detail": "section_ids must be a list of integers (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # # --- Optional: document_ids (solo reflejo) ---
+        # document_ids = data.get("document_ids")
+        # if document_ids is not None and not isinstance(document_ids, list):
+        #     return Response({"detail": "document_ids must be a list of integers (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # # --- Cards count (N) ---
+        # cards_count = data.get("cards_count", 0)
+        # try:
+        #     cards_count = int(cards_count)
+        # except (TypeError, ValueError):
+        #     return Response({"detail": "cards_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # if cards_count < 0:
+        #     return Response({"detail": "cards_count must be >= 0"}, status=status.HTTP_400_BAD_REQUEST)
+        # if cards_count > 500:  # límite razonable anti abuso
+        #     return Response({"detail": "cards_count too large (max 500)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # # --- Project ---
+        # try:
+        #     project = Project.objects.get(id=project_id)
+        # except Project.DoesNotExist:
+        #     return Response({"detail": "project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # # 🔒 Si Project tiene owner, enforce (opcional pero recomendado)
+        # if hasattr(project, "owner_id") and project.owner_id != request.user.id:
+        #     return Response({"detail": "You do not own this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        # # --- Create Deck ---
+        # deck = Deck.objects.create(
+        #     project=project,
+        #     owner=request.user,
+        #     title=title,
+        #     description=description,
+        #     visibility=visibility,
+        # )
+
+        # # --- Attach Sections (optional) ---
+        # attached_section_ids = []
+        # if section_ids:
+        #     qs = Section.objects.filter(id__in=section_ids)
+        #     found_ids = list(qs.values_list("id", flat=True))
+        #     missing = [sid for sid in section_ids if sid not in set(found_ids)]
+        #     if missing:
+        #         return Response(
+        #             {"detail": "Some section_ids do not exist (or are not allowed).", "missing_section_ids": missing},
+        #             status=status.HTTP_400_BAD_REQUEST
+        #         )
+        #     deck.sections.set(qs)
+        #     attached_section_ids = found_ids
+
+        # # --- Create N Flashcards ---
+        # created = []
+        # for i in range(1, cards_count + 1):
+        #     created.append(
+        #         Flashcard(
+        #             deck=deck,
+        #             front=f"Front {i}",
+        #             back=f"Back {i}",
+        #             notes=""
+        #         )
+        #     )
+
+        # if created:
+        #     Flashcard.objects.bulk_create(created)
+
+        # # --- Response ---
+        # flashcards_count = cards_count  # ya sabes cuántas creaste
+        # sections_count = len(attached_section_ids)
+
+        # return Response(
+        #     {
+        #         "project_id": project_id,
+        #         "deck": {
+        #             "id": deck.id,
+        #             "title": deck.title,
+        #             "description": deck.description,
+        #             "visibility": deck.visibility,
+        #             "owner_id": deck.owner_id,
+        #             "section_ids": attached_section_ids,
+        #             "sections_count": sections_count,
+        #             "flashcards_count": flashcards_count,
+        #             "document_ids": document_ids,
+        #         },
+        #         "cards_created": flashcards_count,
+        #     },
+        #     status=status.HTTP_201_CREATED
+        # )
 
 
     # def get_queryset(self):
@@ -2028,7 +2349,139 @@ class FlashcardViewSet(viewsets.ModelViewSet):
         card = Flashcard.objects.create(deck=deck, front=front, back=back, notes=notes)
         return Response(FlashcardSerializer(card).data, status=status.HTTP_201_CREATED)
 
+    def _sync_from_public_flashcards(self, *, deck, job_id: str, user_id: str, limit: int = 5000) -> int:
+        """
+        Copia public.flashcards (sin modelo) -> api_flashcard (modelo Flashcard)
+        Mapea front/back, notes=""
+        Retorna cantidad insertada
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT front, back
+                FROM public.flashcards
+                WHERE job_id = %s
+                  AND user_id = %s
+                ORDER BY created_at ASC
+                LIMIT %s
+                """,
+                [str(job_id), str(user_id), int(limit)],
+            )
+            rows = cursor.fetchall()
 
+        if not rows:
+            return 0
+
+        existing = set(
+            Flashcard.objects.filter(deck=deck).values_list("front", "back")
+        )
+
+        to_create = []
+        for front, back in rows:
+            front = "" if front is None else str(front)
+            back = "" if back is None else str(back)
+
+            key = (front, back)
+            if key in existing:
+                continue
+
+            to_create.append(Flashcard(deck=deck, front=front, back=back, notes=""))
+            existing.add(key)
+
+        if to_create:
+            Flashcard.objects.bulk_create(to_create)
+
+        return len(to_create)
+
+       # ✅ NUEVO: solo se llama cuando tú quieras (al crear deck o cuando WS termine)
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="sync-from-job")
+    @transaction.atomic
+    def sync_from_job(self, request):
+        print("AUTH:", request.user, request.user.is_authenticated)
+        print("HEADERS AUTH:", request.headers.get("Authorization"))
+
+        user = request.user
+        # user=User.objects.get(id=1)
+
+        deck_id = request.query_params.get("deck")
+        if not deck_id:
+            return Response([], status=200)
+
+        try:
+            deck_id_int = int(deck_id)
+        except ValueError:
+            return Response({"detail": "deck must be an integer"}, status=400)
+
+        # Cargar deck para permisos + sync
+        try:
+            deck = Deck.objects.get(id=deck_id_int)
+        except Deck.DoesNotExist:
+            return Response({"detail": "Deck not found"}, status=404)
+
+        # ✅ Permisos a nivel deck (igual que tu lógica)
+        # can_view = (
+        #     deck.owner_id == user.id
+        #     or deck.visibility == "public"
+        #     or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
+        # )
+        # if not can_view:
+        #     raise PermissionDenied("You do not have access to this deck.")
+
+        # ✅ job_id: viene del query o fallback al deck.external_job_id
+        job_id = request.query_params.get("job_id") or deck.external_job_id
+        job_id = str(job_id).strip() if job_id else None
+
+        should_sync = False
+
+        if job_id:
+            # 1) El deck debe tener external_job_id y debe coincidir
+            if not deck.external_job_id:
+                should_sync = False
+            elif str(deck.external_job_id) != job_id:
+                should_sync = False
+            else:
+                # 2) Solo si no está ya sincronizado con ese job
+                # if deck.synced_job_id == job_id:
+                #     should_sync = False
+                # else:
+                    # 3) Solo si el deck está vacío en tu modelo
+                has_any = Flashcard.objects.filter(deck=deck).exists()
+                should_sync = not has_any
+
+        if should_sync:
+            inserted = self._sync_from_public_flashcards(
+                deck=deck,
+                job_id=job_id,
+                user_id=str(request.user.id),
+            )
+
+        # ✅ Si hay job_id y todavía NO lo sincronizaste, copia una vez
+        # if job_id:
+        #     # recomendado: solo owner puede importar/escribir
+        #     if deck.owner_id != user.id:
+        #         raise PermissionDenied("Only owner can sync cards into this deck.")
+
+        #     inserted = self._sync_from_public_flashcards(
+        #         deck=deck,
+        #         job_id=str(job_id),
+        #         user_id=str(user.id),
+        #         limit=5000,
+        #     )
+
+            # deck.synced_job_id = str(job_id)
+            # deck.synced_at = timezone.now()
+            # deck.save(update_fields=["synced_job_id", "synced_at"])
+
+        # ✅ Ahora devuelve lo que ya existe en api_flashcard para ese deck
+        qs = Flashcard.objects.filter(deck_id=deck_id_int).order_by("-created_at")
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            ser = self.get_serializer(page, many=True)
+            return self.get_paginated_response(ser.data)
+
+        ser = self.get_serializer(qs, many=True)
+        return Response(ser.data)
 
     def get_queryset(self):
         user = self.request.user
@@ -2059,7 +2512,7 @@ class FlashcardViewSet(viewsets.ModelViewSet):
 class DeckShareViewSet(viewsets.ModelViewSet):
     queryset = DeckShare.objects.select_related("deck", "shared_with").all()
     serializer_class = DeckShareSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         user = self.request.user
@@ -2075,7 +2528,7 @@ class DeckShareViewSet(viewsets.ModelViewSet):
 class SavedDeckViewSet(viewsets.ModelViewSet):
     queryset = SavedDeck.objects.select_related("user", "deck").all()
     serializer_class = SavedDeckSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get_queryset(self):
         return super().get_queryset().filter(user=self.request.user)

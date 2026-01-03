@@ -527,7 +527,8 @@ class Deck(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
-
+    # ✅ Job externo asociado (último o actual)
+    external_job_id = models.CharField(max_length=64, blank=True, null=True, db_index=True)
     def __str__(self):
         return f"{self.title} ({self.owner})"
 
