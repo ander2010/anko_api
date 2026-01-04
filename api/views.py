@@ -7,9 +7,10 @@ import json
 import hashlib
 import time
 from django.utils import timezone
-
-
+import websockets
+from typing import Any, Dict, Optional
 import re
+import asyncio
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from websocket import WebSocketConnectionClosedException
@@ -122,10 +123,174 @@ class SSERenderer(BaseRenderer):
         return data
 
 
+def _normalize_base_url(url: str) -> str:
+    return (url or "").rstrip("/")
+
+
+def _build_ws_url_for_progress(base_url: str, job_id: str) -> str:
+    base_url = _normalize_base_url(base_url)
+    ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+    return f"{ws_base}/ws/progress/{job_id}"
+
+
+def _build_chat_ws_url(base_url: str, session_id: str) -> str:
+    base_url = _normalize_base_url(base_url)
+    ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+    return f"{ws_base}/ws/chat/{session_id}"
+
+
+async def _receive_final(ws: websockets.WebSocketClientProtocol) -> Dict[str, Any]:
+    done_status = {"COMPLETED", "FAILED", "ERROR", "DONE", "FINISHED", "SUCCESS"}
+    async for msg in ws:
+        try:
+            data = json.loads(msg)
+        except Exception:
+            return {"error": "invalid websocket payload", "raw": msg}
+
+        # “final” style
+        if data.get("type") == "final":
+            return data
+
+        # status style
+        if str(data.get("status", "")).upper() in done_status:
+            return data
+
+        # error style
+        if data.get("error"):
+            return data
+
+    return {"error": "websocket closed without final response"}
+
+
+async def _ask_via_chat_ws(base_url: str, payload: dict, session_id: str) -> Dict[str, Any]:
+    chat_ws_url = _build_chat_ws_url(base_url, session_id)
+
+    # Nota: ping_interval=None para que no meta pings si tu server no los maneja
+    async with websockets.connect(chat_ws_url, ping_interval=None) as ws:
+        await ws.send(json.dumps(payload))
+        final_msg = await _receive_final(ws)
+        final_msg["_transport"] = "ws"
+        final_msg["_chat_ws_url"] = chat_ws_url
+        return final_msg
+
+
+def _ask_via_http(base_url: str, payload: dict) -> Dict[str, Any]:
+    url = f"{_normalize_base_url(base_url)}/ask"
+    resp = requests.post(url, json=payload, timeout=120)
+
+    out: Dict[str, Any] = {
+        "_transport": "http",
+        "request_url": url,
+        "status_code": resp.status_code,
+        "request_payload": payload,
+    }
+
+    try:
+        out["response_json"] = resp.json()
+    except Exception:
+        out["response_text"] = resp.text
+
+    out["ok"] = bool(resp.ok)
+    return out
+
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
     serializer_class = ProjectSerializer
     permission_classes = [AllowAny]
+
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="ask")
+    def ask(self, request):
+        """
+        POST /api/projects/ask/
+
+        Body:
+        {
+          "question": "...." (required),
+          "context": ["doc1","doc2"] or "doc1" (optional; default ["test"]),
+          "top_k": 10 (optional),
+          "min_importance": 0.2 (optional),
+          "session_id": "uuid" (optional; default auto),
+          "user_id": "uuid|string" (optional; default request.user.id)
+        }
+
+        Behavior:
+        - Try WS /ws/chat/<session_id> first (like ask_client.py)
+        - Fallback to HTTP POST /ask if WS fails
+        - Returns job_id + ws_url(progress) + response details
+        """
+        base_url = os.getenv("ASK_BASE_URL", os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
+
+        body = request.data or {}
+        question = (body.get("question") or "").strip()
+        if not question:
+            return Response({"detail": "question is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # context puede venir como string o lista
+        context = body.get("context")
+        if not context:
+            context_list = ["test"]
+        elif isinstance(context, list):
+            context_list = context
+        else:
+            context_list = [str(context)]
+
+        top_k = body.get("top_k")
+        min_importance = body.get("min_importance")
+        session_id = (body.get("session_id") or str(uuid.uuid4())).strip()
+
+        # user_id: si no lo mandan, usa el id del usuario autenticado
+        user_id = body.get("user_id") or str(request.user.id)
+
+        payload = {
+            "question": question,
+            "context": context_list,
+            "top_k": top_k,
+            "min_importance": min_importance,
+            "session_id": session_id,
+            "user_id": user_id,
+        }
+
+        # 1) intenta por WS
+        try:
+            final_msg = asyncio.run(_ask_via_chat_ws(base_url, payload, session_id))
+            job_id = final_msg.get("job_id")
+
+            resp_payload = {
+                "ok": True if not final_msg.get("error") else False,
+                "transport": "ws",
+                "session_id": session_id,
+                "job_id": job_id,
+                "ws_url": _build_ws_url_for_progress(base_url, job_id) if job_id else None,
+                "final": final_msg,
+                "request_payload": payload,
+            }
+            return Response(resp_payload, status=status.HTTP_200_OK)
+
+        except Exception as exc:
+            # 2) fallback HTTP
+            http_result = _ask_via_http(base_url, payload)
+
+            # intenta extraer job_id si vino en JSON
+            job_id = None
+            rj = http_result.get("response_json")
+            if isinstance(rj, dict):
+                job_id = rj.get("job_id")
+
+            return Response(
+                {
+                    "ok": bool(http_result.get("ok")),
+                    "transport": "http",
+                    "session_id": session_id,
+                    "job_id": job_id,
+                    "ws_url": _build_ws_url_for_progress(base_url, job_id) if job_id else None,
+                    "http": http_result,
+                    "ws_error": str(exc),
+                },
+                status=status.HTTP_200_OK if http_result.get("ok") else status.HTTP_502_BAD_GATEWAY,
+            )
+        
+        
 
     @action(
     detail=False,
