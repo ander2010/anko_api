@@ -2239,6 +2239,7 @@ class DeckViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         document_filenames = []
+        document_id_str = []
 
         if document_ids:
             docs_qs = (
@@ -2249,6 +2250,7 @@ class DeckViewSet(viewsets.ModelViewSet):
 
             found_ids = list(docs_qs.values_list("id", flat=True))
             missing = [did for did in document_ids if did not in set(found_ids)]
+            
             if missing:
                 return Response(
                     {
@@ -2258,9 +2260,7 @@ class DeckViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            document_filenames = list(
-                docs_qs.values_list("filename", flat=True)
-            )
+            document_id_str = [str(doc_id) for doc_id in document_ids]
         # print("Document IDs:", document_ids)
         # --- Cards count (N) ---
         cards_count = data.get("cards_count", 0)
@@ -2327,11 +2327,11 @@ class DeckViewSet(viewsets.ModelViewSet):
         svc_payload = {
         #      "document_ids": ["test"],
         # "tags": ["Barcelona"],
-            "document_ids":document_filenames,             # tú decides qué manda el frontend
+            "document_ids": document_id_str,            
             "tags": tags,
-            "quantity": cards_count,                  # 👈 esto reemplaza el bulk_create local
+            "quantity": cards_count,                
             "difficulty": difficulty,
-            "user_id": str(request.user.id),          # importante para luego importar por user/job
+            "user_id": str(request.user.id),          
         }
 
         # --- Call microservice ---
