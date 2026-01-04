@@ -43,7 +43,7 @@ SECRET_KEY = 'django-insecure-!@@uw(j#in54g*gx_ky!yh7c9k4z1zu2d_z67)fhw@v)t$spxp
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['anko-api.onrender.com', 'localhost', '127.0.0.1','italk2.me','www.italk2.me']
+ALLOWED_HOSTS = ['anko-api.onrender.com', 'localhost', '127.0.0.1','italk2.me']
 
 
 # Application definition
@@ -85,7 +85,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     # ✅ AGREGA ESTA LÍNEA (requerida por allauth)
     'allauth.account.middleware.AccountMiddleware',
-    
+
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
