@@ -7,11 +7,12 @@ from .views import (
     ResourceViewSet, PermissionViewSet, RoleViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
     BatteryShareViewSet, SavedBatteryViewSet, InviteViewSet,
-    DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet
+    DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet,GoogleLoginView, FacebookLoginView
 )
 
 router = DefaultRouter()
 router.register(r'auth', AuthViewSet, basename='auth')
+
 router.register(r'users', UserViewSet)
 router.register(r"projects", ProjectViewSet, basename="projects")
 
@@ -45,4 +46,6 @@ router.register(r"rbac", RBACViewSet, basename="rbac")
 
 urlpatterns = [
     path('', include(router.urls)),
+    path("auth/google/", GoogleLoginView.as_view(), name="google_login"),
+    path("auth/facebook/", FacebookLoginView.as_view(), name="facebook_login"),
 ]

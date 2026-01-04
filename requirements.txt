@@ -2,8 +2,12 @@ asgiref==3.11.0
 boto3==1.42.17
 botocore==1.42.17
 certifi==2025.11.12
+cffi==2.0.0
 charset-normalizer==3.4.4
+cryptography==46.0.3
+dj-rest-auth==7.0.1
 Django==4.2.27
+django-allauth==65.13.1
 django-cors-headers==4.9.0
 django-filter==25.1
 django-storages==1.14.6
@@ -14,6 +18,8 @@ jmespath==1.0.1
 packaging==25.0
 pillow==11.3.0
 psycopg2-binary==2.9.11
+pycparser==2.23
+PyJWT==2.10.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 requests==2.32.5
@@ -23,3 +29,4 @@ sqlparse==0.5.4
 typing_extensions==4.15.0
 urllib3==1.26.20
 websocket-client==1.9.0
+websockets==15.0.1

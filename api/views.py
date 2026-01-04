@@ -11,6 +11,12 @@ import websockets
 from typing import Any, Dict, Optional
 import re
 import asyncio
+from dj_rest_auth.registration.views import SocialLoginView
+from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
+from allauth.socialaccount.providers.facebook.views import FacebookOAuth2Adapter
+
+
+
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from websocket import WebSocketConnectionClosedException
@@ -2807,3 +2813,14 @@ class RBACViewSet(viewsets.ViewSet):
 
         ser = AllowedRoutesSerializer(payload)
         return Response(ser.data)
+
+
+
+class GoogleLoginView(SocialLoginView):
+    permission_classes = [AllowAny]
+    adapter_class = GoogleOAuth2Adapter
+
+
+class FacebookLoginView(SocialLoginView):
+    permission_classes = [AllowAny]
+    adapter_class = FacebookOAuth2Adapter
