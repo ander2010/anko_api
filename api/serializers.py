@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
+from .models import SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
 from .models import (
     Resource, Permission, Role,
@@ -486,3 +486,33 @@ class AllowedRoutesSerializer(serializers.Serializer):
     is_admin = serializers.BooleanField()
     roles = serializers.ListField(child=serializers.CharField())
     allowed_routes = serializers.ListField(child=serializers.CharField())
+
+
+class SupportRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SupportRequest
+        fields = [
+            "id",
+            "user",
+            "name",
+            "phone",
+            "email",
+            "message",
+            "status",
+            "source",
+            "created_at",
+            "resolved_at",
+        ]
+        read_only_fields = [
+            "id",
+            "user",
+            "email",
+            "status",
+            "created_at",
+            "resolved_at",
+        ]
+
+    def validate_message(self, value: str):
+        if len(value.strip()) < 10:
+            raise serializers.ValidationError("Describe el problema con más detalle.")
+        return value

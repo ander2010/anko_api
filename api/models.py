@@ -563,3 +563,39 @@ class SavedDeck(models.Model):
 
     class Meta:
         unique_together = ("user", "deck")
+
+
+
+class SupportRequest(models.Model):
+    STATUS_NEW = "new"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_DONE = "done"
+
+    STATUS_CHOICES = [
+        (STATUS_NEW, "New"),
+        (STATUS_IN_PROGRESS, "In progress"),
+        (STATUS_DONE, "Done"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="support_requests",
+    )
+
+    name = models.CharField(max_length=120, blank=True)
+    phone = models.CharField(max_length=40, blank=True)
+
+    # la guardamos para snapshot (por si el user cambia email luego)
+    email = models.EmailField()
+
+    message = models.TextField()
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_NEW)
+    source = models.CharField(max_length=50, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.user_id} - {self.status} - {self.created_at:%Y-%m-%d}"

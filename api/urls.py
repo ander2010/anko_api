@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    AuthViewSet, RBACViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
+    AuthViewSet, RBACViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
     SectionViewSet, TopicViewSet, RuleViewSet, BatteryViewSet,
     ResourceViewSet, PermissionViewSet, RoleViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
@@ -43,7 +43,7 @@ router.register(r"rbac", RBACViewSet, basename="rbac")
 # router.register(r"tags", TagViewSet, basename="tags")
 # router.register(r"qa-pairs", QaPairViewSet, basename="qa-pairs")
 
-
+router.register(r"support-requests", SupportRequestViewSet, basename="support-request")
 urlpatterns = [
     path('', include(router.urls)),
     path("auth/google/", GoogleLoginView.as_view(), name="google_login"),

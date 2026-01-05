@@ -15,8 +15,7 @@ from dj_rest_auth.registration.views import SocialLoginView
 from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 from allauth.socialaccount.providers.facebook.views import FacebookOAuth2Adapter
 
-
-
+from urllib.parse import quote
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from websocket import WebSocketConnectionClosedException
@@ -29,13 +28,13 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate
-from .models import QaPair, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt
+from .models import QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AllowedRoutesSerializer, DocumentWithSectionsSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AllowedRoutesSerializer, DocumentWithSectionsSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from api.services.plan_guard import PlanGuard
@@ -763,14 +762,55 @@ class DocumentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You do not have access to this document.")
 
         if not doc.file:
-            return Response({"detail": "Document has no file"}, status=status.HTTP_404_NOT_FOUND)
-        url = doc.file.storage.url(doc.file.name)
+            return Response(
+                {"detail": "Document has no file"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # mode puede ser: view | download (default view)
+        mode = (request.query_params.get("mode") or "view").lower()
+        if mode not in ("view", "download"):
+            return Response(
+                {"detail": "Invalid mode. Use 'view' or 'download'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        storage_key = doc.file.name  # ej: "anko/documents/test.pdf"
+        # Escapar por si hay espacios o caracteres raros
+        storage_key_q = quote(storage_key, safe="/")
+
+        base = "https://italk2.me/content_view"
+        url = f"{base}/{mode}?file={storage_key_q}"
+
         return Response({
             "id": doc.id,
-            "filename": doc.filename,
-            "storage_key": doc.file.name,  # ej: "anko/documents/migracion.pdf"
-            "url": url,           # ✅ URL pública (si bucket es public)
+            "filename": doc.filename,        # ej: "test.pdf"
+            "storage_key": storage_key,      # ej: "anko/documents/test.pdf"
+            "mode": mode,                    # "view" | "download"
+            "url": url,
         })
+    
+    # def download_url(self, request, pk=None):
+    #     doc = self.get_object()
+
+    #     # seguridad extra (por si cambias get_queryset)
+    #     user = request.user
+    #     can_view = (
+    #         doc.project.owner_id == user.id
+    #         or doc.project.members.filter(id=user.id).exists()
+    #     )
+    #     if not can_view:
+    #         raise PermissionDenied("You do not have access to this document.")
+
+    #     if not doc.file:
+    #         return Response({"detail": "Document has no file"}, status=status.HTTP_404_NOT_FOUND)
+    #     url = doc.file.storage.url(doc.file.name)
+    #     return Response({
+    #         "id": doc.id,
+    #         "filename": doc.filename,
+    #         "storage_key": doc.file.name,  # ej: "anko/documents/migracion.pdf"
+    #         "url": url,           # ✅ URL pública (si bucket es public)
+    #     })
     # def generate_questions(self, request, pk=None):
     #     """
     #     POST /api/documents/<id>/generate-questions/
@@ -2824,3 +2864,20 @@ class GoogleLoginView(SocialLoginView):
 class FacebookLoginView(SocialLoginView):
     permission_classes = [AllowAny]
     adapter_class = FacebookOAuth2Adapter
+
+
+class SupportRequestViewSet(viewsets.ModelViewSet):
+    serializer_class = SupportRequestSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # El usuario normal solo ve sus tickets
+        qs = SupportRequest.objects.all().order_by("-created_at")
+        # user = self.request.user
+        # if user.is_staff:
+        #     return qs
+        return qs
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        serializer.save(user=user, email=user.email)
