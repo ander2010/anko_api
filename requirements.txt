@@ -30,3 +30,4 @@ typing_extensions==4.15.0
 urllib3==1.26.20
 websocket-client==1.9.0
 websockets==15.0.1
+whitenoise ==6.5.0
