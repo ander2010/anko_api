@@ -751,6 +751,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-url")
     def download_url(self, request, pk=None):
         doc = self.get_object()
+        
 
         # seguridad extra (por si cambias get_queryset)
         user = request.user
