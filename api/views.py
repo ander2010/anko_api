@@ -75,6 +75,9 @@ class AuthViewSet(viewsets.GenericViewSet):
         serializer = UserSerializer(data=data)
         if serializer.is_valid():
             user = serializer.save()
+            # ✅ ASIGNAR ROL CLIENT
+            client_role, _ = Role.objects.get_or_create(name="client")
+            user.roles.add(client_role)
             token, created = Token.objects.get_or_create(user=user)
             return Response({'token': token.key, 'user': UserSerializer(user).data}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -751,7 +754,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-url")
     def download_url(self, request, pk=None):
         doc = self.get_object()
-        
+
 
         # seguridad extra (por si cambias get_queryset)
         user = request.user
