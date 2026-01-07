@@ -2720,31 +2720,76 @@ class FlashcardViewSet(viewsets.ModelViewSet):
 
         ser = self.get_serializer(qs, many=True)
         return Response(ser.data)
-
+    
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        base_qs = super().get_queryset()
 
         deck_id = self.request.query_params.get("deck")
         if not deck_id:
-            # Si NO pasas deck, por seguridad NO devuelvas todo
-            return qs.none()
+            return base_qs.none()
 
-        # Filtra SOLO ese deck
-        qs = qs.filter(deck_id=deck_id)
+        # 1) Traer el deck (para permisos y para obtener externalJobId)
+        #    Ajusta "Deck" al import/modelo real.
+        try:
+            deck = Deck.objects.get(id=deck_id)
+        except Deck.DoesNotExist:
+            raise NotFound("Deck not found.")
 
-        # Permisos: owner OR compartido OR público
-        allowed = qs.filter(
-            Q(deck__owner=user) |
-            Q(deck__shares__shared_with=user) |
-            Q(deck__visibility="public")
+        # 2) Check de permisos (owner OR compartido OR público)
+        has_access = (
+            deck.owner_id == user.id
+            or deck.visibility == "public"
+            or deck.shares.filter(shared_with=user).exists()
         )
-
-        if not allowed.exists():
-            # Si el deck existe pero no tienes permiso, 403
+        if not has_access:
             raise PermissionDenied("You do not have access to this deck.")
 
-        return allowed.order_by("-created_at")
+        # 3) Query inicial del deck
+        qs = base_qs.filter(deck_id=deck_id)
+
+        # 4) Si está vacío → sync y re-consulta
+        if not qs.exists():
+            job_id = getattr(deck, "external_job_id", None)  # o deck.external_job_id, según tu modelo
+            if job_id:
+                # Recomendado: envolver en transacción si vas a crear en DB
+                with transaction.atomic():
+                    self._sync_from_public_flashcards(
+                        deck=deck,
+                        job_id=str(job_id),
+                        user_id=str(user.id),
+                        limit=5000,
+                    )
+
+                # Re-query después del sync
+                qs = base_qs.filter(deck_id=deck_id)
+
+        return qs.order_by("-created_at")
+
+    # def get_queryset(self):
+    #     user = self.request.user
+    #     qs = super().get_queryset()
+
+    #     deck_id = self.request.query_params.get("deck")
+    #     if not deck_id:
+    #         # Si NO pasas deck, por seguridad NO devuelvas todo
+    #         return qs.none()
+
+    #     # Filtra SOLO ese deck
+    #     qs = qs.filter(deck_id=deck_id)
+
+    #     # Permisos: owner OR compartido OR público
+    #     allowed = qs.filter(
+    #         Q(deck__owner=user) |
+    #         Q(deck__shares__shared_with=user) |
+    #         Q(deck__visibility="public")
+    #     )
+
+    #     if not allowed.exists():
+    #         # Si el deck existe pero no tienes permiso, 403
+    #         raise PermissionDenied("You do not have access to this deck.")
+
+    #     return allowed.order_by("-created_at")
 
 
 class DeckShareViewSet(viewsets.ModelViewSet):
