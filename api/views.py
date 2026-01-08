@@ -2253,6 +2253,104 @@ class DeckViewSet(viewsets.ModelViewSet):
         )
     
 
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="create-with-flashcards")
+    @transaction.atomic
+    def create_with_flashcards(self, request):
+        data = request.data or {}
+
+        # --------- Deck fields ----------
+        project_id = data.get("project_id")
+        title = (data.get("title") or "").strip()
+        description = data.get("description") or ""
+        visibility = (data.get("visibility") or "private").strip()
+
+        if not project_id:
+            return Response({"detail": "project_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not title:
+            return Response({"detail": "title is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --------- Validate project + ownership ----------
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            return Response({"detail": "project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 🔒 recomendado: solo owner del project puede crear decks ahí
+        if hasattr(project, "owner_id") and project.owner_id != request.user.id:
+            return Response({"detail": "You do not own this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        # --------- Optional: section_ids ----------
+        section_ids = data.get("section_ids") or []
+        if not isinstance(section_ids, list):
+            return Response({"detail": "section_ids must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+
+        sections_qs = Section.objects.none()
+        attached_section_ids = []
+        if section_ids:
+            sections_qs = Section.objects.filter(id__in=section_ids).only("id", "title")
+            found_ids = list(sections_qs.values_list("id", flat=True))
+            missing = [sid for sid in section_ids if sid not in set(found_ids)]
+            if missing:
+                return Response({"detail": "Some section_ids do not exist", "missing_section_ids": missing},
+                                status=status.HTTP_400_BAD_REQUEST)
+            attached_section_ids = found_ids
+
+        # --------- Cards payload ----------
+        cards = data.get("cards") or []
+        if not isinstance(cards, list) or not cards:
+            return Response({"detail": "cards is required and must be a non-empty list"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(cards) > 2000:
+            return Response({"detail": "Too many cards (max 2000)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validación mínima
+        clean_cards = []
+        for i, c in enumerate(cards):
+            if not isinstance(c, dict):
+                return Response({"detail": f"cards[{i}] must be an object"}, status=status.HTTP_400_BAD_REQUEST)
+
+            front = (c.get("front") or "").strip()
+            back = (c.get("back") or "").strip()
+            notes = c.get("notes") or ""
+
+            if not front or not back:
+                continue
+                # return Response({"detail": f"cards[{i}] front and back are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            clean_cards.append({"front": front, "back": back, "notes": notes})
+
+        # --------- Create deck ----------
+        deck = Deck.objects.create(
+            project=project,
+            owner=request.user,
+            title=title,
+            description=description,
+            visibility=visibility,
+        )
+
+        if attached_section_ids:
+            deck.sections.set(sections_qs)
+
+        # --------- Bulk create flashcards ----------
+        objs = [Flashcard(deck=deck, front=c["front"], back=c["back"], notes=c["notes"]) for c in clean_cards]
+        Flashcard.objects.bulk_create(objs)
+
+        # --------- Response ----------
+        deck_data = DeckSerializer(deck, context={"request": request}).data
+        cards_qs = Flashcard.objects.filter(deck=deck).order_by("created_at", "id")
+        cards_data = FlashcardSerializer(cards_qs, many=True, context={"request": request}).data
+
+        return Response(
+            {
+                "deck": deck_data,
+                "cards_created": len(cards_data),
+                "cards": cards_data,
+                "section_ids": attached_section_ids,
+            },
+            status=status.HTTP_201_CREATED
+        )
+    
+
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="create-with-cards")
     @transaction.atomic
