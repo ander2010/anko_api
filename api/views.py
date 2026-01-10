@@ -788,7 +788,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         user_token = encrypt_user_id(user.id)
         query = urlencode({
         "file": storage_key_q,
-        "user_id": user_token,  # encrypted user id
+        "seed": user_token,  # encrypted user id
 })
 
 
