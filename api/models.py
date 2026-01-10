@@ -186,6 +186,8 @@ class Document(models.Model):
     processing_error = models.TextField(null=True, blank=True)
     extracted_text = models.TextField(null=True, blank=True)
     hash = models.CharField(max_length=64, unique=True, help_text="File hash for deduplication")
+    job_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    
     def save(self, *args, **kwargs):
         if self.file and not self.size:
             self.size = self.file.size
@@ -194,14 +196,21 @@ class Document(models.Model):
     def __str__(self):
         return self.filename
 
+
 class Section(models.Model):
+    id = models.BigAutoField(primary_key=True)
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='sections')
-    title = models.CharField(max_length=255)
-    content = models.TextField()
-    order = models.PositiveIntegerField()
+    document_id = models.TextField(db_index=True)  # keep if you already use it; else rely on FK
+    job_id = models.TextField(null=True, blank=True, db_index=True)
+    title = models.TextField(blank=True, default="")
+    content = models.TextField(blank=True, default="")
+    order = models.PositiveIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.document.filename} - {self.title}"
+
 
 class Topic(models.Model):
     STATUS_CHOICES = [
@@ -533,12 +542,33 @@ class Deck(models.Model):
         return f"{self.title} ({self.owner})"
 
 class Flashcard(models.Model):
-    deck = models.ForeignKey(Deck, on_delete=models.CASCADE, related_name="cards")
+    card_id = models.CharField(max_length=255, primary_key=True)  # pipeline PK
+    user_id = models.CharField(max_length=255)
+    job_id = models.CharField(max_length=255)
     front = models.TextField()
     back = models.TextField()
-    notes = models.TextField(blank=True)
+    source_doc_id = models.CharField(max_length=255, null=True, blank=True)
+    tags = models.JSONField(default=list)
+    difficulty = models.CharField(max_length=50, null=True, blank=True)
+    kind = models.CharField(max_length=50, default="new")
+    status = models.CharField(max_length=50, default="learning")
+    learning_step_index = models.IntegerField(default=0)
+    repetition = models.IntegerField(default=0)
+    interval_days = models.IntegerField(default=0)
+    ease_factor = models.FloatField(default=2.5)
+    due_at = models.DateTimeField(null=True, blank=True)
+    first_seen_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
+    # Your additions
+    deck = models.ForeignKey(Deck, null=True, blank=True, on_delete=models.SET_NULL, related_name="cards")
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "flashcards"
+        verbose_name = "Flashcard"
+        verbose_name_plural = "Flashcards"
 
 class DeckShare(models.Model):
     ACCESS = [
