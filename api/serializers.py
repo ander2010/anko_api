@@ -516,3 +516,21 @@ class SupportRequestSerializer(serializers.ModelSerializer):
         if len(value.strip()) < 10:
             raise serializers.ValidationError("Describe el problema con más detalle.")
         return value
+
+
+class NextCardRequestSerializer(serializers.Serializer):
+    # Si no lo mandas, lo tomamos del deck.external_job_id
+    job_id = serializers.CharField(required=False, allow_blank=True)
+    user_id = serializers.CharField(required=False, allow_blank=True)
+    last_seq = serializers.IntegerField(required=False, default=0)
+    token = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class CardFeedbackRequestSerializer(serializers.Serializer):
+    job_id = serializers.CharField(required=False, allow_blank=True)
+    user_id = serializers.CharField(required=False, allow_blank=True)
+    seq = serializers.IntegerField(required=True)
+    card_id = serializers.IntegerField(required=True)
+    rating = serializers.IntegerField(required=True)  # 0 hard, 1 good, 2 easy
+    time_to_answer_ms = serializers.IntegerField(required=False, default=500)
+    token = serializers.CharField(required=False, allow_blank=True, default="")

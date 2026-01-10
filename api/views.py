@@ -7,6 +7,7 @@ import json
 import hashlib
 import time
 from django.utils import timezone
+from api.utils.cripto import encrypt_user_id
 import websockets
 from typing import Any, Dict, Optional
 import re
@@ -14,7 +15,7 @@ import asyncio
 from dj_rest_auth.registration.views import SocialLoginView
 from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 from allauth.socialaccount.providers.facebook.views import FacebookOAuth2Adapter
-
+from asgiref.sync import async_to_sync
 from urllib.parse import quote
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
@@ -34,9 +35,11 @@ from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AllowedRoutesSerializer, DocumentWithSectionsSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AllowedRoutesSerializer, CardFeedbackRequestSerializer, DocumentWithSectionsSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
+from urllib.parse import quote, urlencode
+from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
 from .models import Tag
 from .models import (
@@ -782,9 +785,17 @@ class DocumentViewSet(viewsets.ModelViewSet):
         storage_key = doc.file.name  # ej: "anko/documents/test.pdf"
         # Escapar por si hay espacios o caracteres raros
         storage_key_q = quote(storage_key, safe="/")
+        user_token = encrypt_user_id(user.id)
+        query = urlencode({
+        "file": storage_key_q,
+        "user_id": user_token,  # encrypted user id
+})
+
+
 
         base = "https://italk2.me/content_view"
-        url = f"{base}/{mode}?file={storage_key_q}"
+        # url = f"{base}/{mode}?file={storage_key_q}"
+        url = f"{base}/{mode}?{query}"
 
         return Response({
             "id": doc.id,
@@ -2105,6 +2116,87 @@ class DeckViewSet(viewsets.ModelViewSet):
     queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
+    
+
+    @action(detail=True, methods=["post"], url_path="next-card")
+    def next_card(self, request, pk=None):
+        deck = self.get_object()
+
+        ser = NextCardRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        job_id = ser.validated_data.get("job_id") or deck.external_job_id
+        if not job_id:
+            return Response(
+                {"detail": "Deck has no external_job_id and job_id was not provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_id = ser.validated_data.get("user_id") or str(request.user.id) or str(uuid.uuid4())
+        last_seq = ser.validated_data.get("last_seq", 0)
+        token = ser.validated_data.get("token", "")
+
+        msg = async_to_sync(ws_get_next_card)(
+            job_id=str(job_id),
+            user_id=str(user_id),
+            last_seq=int(last_seq),
+            token=str(token),
+            timeout_sec=25,
+        )
+
+        mt = msg.get("message_type")
+        if mt == "card":
+            return Response(
+                {
+                    "job_id": str(job_id),
+                    "seq": msg.get("seq"),
+                    "card": msg.get("card"),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if mt == "done":
+            return Response({"job_id": str(job_id), "status": "done"}, status=status.HTTP_200_OK)
+
+        if mt == "error":
+            return Response({"job_id": str(job_id), "status": "error", "detail": msg}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({"job_id": str(job_id), "status": mt, "detail": msg}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="card-feedback")
+    def card_feedback(self, request, pk=None):
+        deck = self.get_object()
+
+        ser = CardFeedbackRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        job_id = ser.validated_data.get("job_id") or deck.external_job_id
+        if not job_id:
+            return Response(
+                {"detail": "Deck has no external_job_id and job_id was not provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_id = ser.validated_data.get("user_id") or str(request.user.id) or str(uuid.uuid4())
+
+        msg = async_to_sync(ws_send_card_feedback)(
+            job_id=str(job_id),
+            user_id=str(user_id),
+            seq=int(ser.validated_data["seq"]),
+            card_id=int(ser.validated_data["card_id"]),
+            rating=int(ser.validated_data["rating"]),
+            time_to_answer_ms=int(ser.validated_data.get("time_to_answer_ms", 500)),
+            token=str(ser.validated_data.get("token", "")),
+            timeout_sec=15,
+        )
+
+        mt = msg.get("message_type")
+        if mt == "ok":
+            return Response({"status": "ok", "detail": msg}, status=status.HTTP_200_OK)
+
+        return Response({"status": mt, "detail": msg}, status=status.HTTP_502_BAD_GATEWAY)
+
+    
 
     def get_queryset(self):
         qs = Deck.objects.filter(owner=self.request.user)

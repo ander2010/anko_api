@@ -1,3 +1,4 @@
+import os
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
@@ -150,6 +151,29 @@ class Subscription(models.Model):
     def __str__(self):
         return f"{self.user} - {self.plan.tier} - {self.status}"
 
+def document_upload_to(instance, filename):
+    """
+    Build the upload path for a document file.
+
+    The final storage path will be:
+        documents/{user_id}/{uuid}_{original_filename}
+
+    The global storage configuration (e.g. AWS_LOCATION="anko")
+    will automatically prefix this path.
+    """
+
+    # Prefer the uploader user if it was set by the view/serializer
+    user_id = getattr(instance, "_uploader_id", None)
+
+    # Fallback to project owner if uploader is not provided
+    if not user_id and instance.project_id:
+        user_id = instance.project.owner_id
+
+    safe_filename = os.path.basename(filename)
+    # unique_filename = f"{uuid.uuid4()}_{safe_filename}"
+    unique_filename = f"{safe_filename}"
+
+    return f"documents/{user_id}/{unique_filename}"
 
 class Project(models.Model):
     title = models.CharField(max_length=255)
@@ -178,7 +202,9 @@ class Document(models.Model):
     ]
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='documents')
     filename = models.CharField(max_length=255)
-    file = models.FileField(upload_to='documents/')
+    # file = models.FileField(upload_to='documents/')
+    file = models.FileField(upload_to=document_upload_to)
+
     type = models.CharField(max_length=10, choices=TYPE_CHOICES)
     size = models.PositiveIntegerField(help_text="Size in bytes")
     uploaded_at = models.DateTimeField(auto_now_add=True)
@@ -195,12 +221,13 @@ class Document(models.Model):
 
     def __str__(self):
         return self.filename
+   
 
 
 class Section(models.Model):
     id = models.BigAutoField(primary_key=True)
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='sections')
-    document_id = models.TextField(db_index=True)  # keep if you already use it; else rely on FK
+    external_document_id = models.TextField(db_index=True, null=True)  # keep if you already use it; else rely on FK
     job_id = models.TextField(null=True, blank=True, db_index=True)
     title = models.TextField(blank=True, default="")
     content = models.TextField(blank=True, default="")
@@ -542,9 +569,9 @@ class Deck(models.Model):
         return f"{self.title} ({self.owner})"
 
 class Flashcard(models.Model):
-    card_id = models.CharField(max_length=255, primary_key=True)  # pipeline PK
-    user_id = models.CharField(max_length=255)
-    job_id = models.CharField(max_length=255)
+    card_id = models.CharField(max_length=255,  null=True)  # pipeline PK
+    user_id = models.CharField(max_length=255,null=True)   # para multi-user en mismo job
+    job_id = models.CharField(max_length=255,null=True, blank=True)
     front = models.TextField()
     back = models.TextField()
     source_doc_id = models.CharField(max_length=255, null=True, blank=True)
@@ -566,7 +593,7 @@ class Flashcard(models.Model):
     notes = models.TextField(blank=True, default="")
 
     class Meta:
-        db_table = "flashcards"
+        
         verbose_name = "Flashcard"
         verbose_name_plural = "Flashcards"
 
