@@ -494,7 +494,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
 
 
-    def _process_document_external(self, stored_file_path: str, doc_id: str):
+    def _process_document_external(self, stored_file_path: str, doc_id: int):
         base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
         base_url = self.normalize_base_url(base_url)
         url = f"{base_url}/process-request"
@@ -614,7 +614,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 stored_path = doc.file.name  # ej: "documents/xxxxx.pdf"
 
                 # ✅ id estable para microservicio (puedes usar doc.id o file_hash)
-                external_doc_id = str(doc.id)
+                external_doc_id = doc.id
 
                 # ✅ llamar al microservicio + ws
                 try:
