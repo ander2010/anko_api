@@ -227,7 +227,6 @@ class Document(models.Model):
 class Section(models.Model):
     id = models.BigAutoField(primary_key=True)
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='sections')
-    external_document_id = models.TextField(db_index=True, null=True)  # keep if you already use it; else rely on FK
     job_id = models.TextField(null=True, blank=True, db_index=True)
     title = models.TextField(blank=True, default="")
     content = models.TextField(blank=True, default="")
@@ -378,20 +377,6 @@ class BatteryAttempt(models.Model):
         self.percent = (total_score / max_score * 100) if max_score else 0
         self.save()
 
-
-
-class Tag(models.Model):
-    document_id = models.TextField(db_index=True)
-    tag = models.TextField()
-
-    created_at = models.DateTimeField(null=True, blank=True)
-    updated_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = "tags"   # 👈 nombre real de tu tabla
-        managed = False        # 👈 NO crea migraciones / NO intenta crear tabla
-
-
 class BatteryAttemptAnswer(models.Model):
     attempt = models.ForeignKey(BatteryAttempt, on_delete=models.CASCADE, related_name="answers")
     question = models.ForeignKey(BatteryQuestion, on_delete=models.CASCADE, related_name="attempt_answers")
@@ -412,37 +397,6 @@ class BatteryAttemptAnswer(models.Model):
     def __str__(self):
         return f"Attempt {self.attempt_id} - Q{self.question_id}"
     
-
-
-
-class QaPair(models.Model):
-    # Si tu tabla tiene un id serial/bigserial, usa AutoField/BigAutoField.
-    # Si NO tiene id, se puede, pero Django siempre prefiere un PK.
-
-    document_id = models.TextField(null=True, blank=True)
-    qa_index = models.IntegerField(null=True, blank=True)
-
-    question = models.TextField(null=True, blank=True)
-    correct_response = models.TextField(null=True, blank=True)
-
-    context = models.TextField(null=True, blank=True)
-    metadata = models.JSONField(null=True, blank=True)
-
-    job_id = models.TextField(db_index=True)  # TEXT en tu error/consulta
-    chunk_id = models.TextField(null=True, blank=True)
-    chunk_index = models.IntegerField(null=True, blank=True)
-
-    created_at = models.DateTimeField(null=True, blank=True)
-    updated_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        managed = False  # ✅ NO MIGRATIONS
-        db_table = 'qa_pairs'  # si está en public, esto funciona
-        # Si de verdad está en otro schema, puedes usar:
-        # db_table = 'public"."qa_pairs'  (si te diera problemas, me dices y lo ajustamos)
-
-    def __str__(self):
-        return f"[{self.job_id}] #{self.qa_index} {self.question[:40] if self.question else ''}"
 
 
 # ==========================================================
@@ -590,7 +544,7 @@ class Flashcard(models.Model):
 
     # Your additions
     deck = models.ForeignKey(Deck, null=True, blank=True, on_delete=models.SET_NULL, related_name="cards")
-    notes = models.TextField(blank=True, default="")
+    notes = models.TextField(blank=True, null=True, default="")
 
     class Meta:
         
@@ -656,3 +610,89 @@ class SupportRequest(models.Model):
 
     def __str__(self):
         return f"{self.user_id} - {self.status} - {self.created_at:%Y-%m-%d}"
+
+class Chunk(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='chunks', db_column='document_id', db_index=True)
+    chunk_index = models.IntegerField()
+    chunk_id = models.CharField(max_length=255, unique=True)
+    text = models.TextField(blank=True, default="")
+    embedding = models.JSONField(default=list)
+    meta = models.JSONField(default=dict)
+    question_ids = models.JSONField(default=list)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict)
+
+    class Meta:
+        db_table = "chunks"
+        managed = True
+        unique_together = (("document", "chunk_index"),)
+
+
+class QaPair(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='qa_pairs', db_column='document_id', db_index=True)
+    qa_index = models.IntegerField()
+    question = models.TextField(null=True, blank=True)
+    correct_response = models.TextField(null=True, blank=True)
+    context = models.TextField(null=True, blank=True)
+    meta = models.JSONField(null=True, blank=True)
+    job_id = models.CharField(max_length=255, db_index=True, null=True, blank=True)
+    chunk_id = models.CharField(max_length=255, null=True, blank=True)
+    chunk_index = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "qa_pairs"
+        managed = True
+        unique_together = (("document", "qa_index"),)
+
+
+    def __str__(self):
+        return f"[{self.job_id}] #{self.qa_index} {self.question[:40] if self.question else ''}"
+
+
+
+# we going to deleted 
+class Tag(models.Model):
+    document_id = models.TextField(db_index=True)
+    tag = models.TextField()
+
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "tags"   # 👈 nombre real de tu tabla
+        managed = False        # 👈 NO crea migraciones / NO intenta crear tabla
+class Notification(models.Model):
+    job_id = models.CharField(max_length=255, primary_key=True)
+    meta = models.JSONField(default=dict)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(null=True, blank=True, default=dict)
+
+    class Meta:
+        db_table = "notifications"
+        managed = False
+
+    def __str__(self):
+        return f"Notification {self.job_id}"
+
+
+class ConversationMessage(models.Model):
+    id = models.AutoField(primary_key=True)
+    session_id = models.CharField(max_length=255)
+    user_id = models.CharField(max_length=255, null=True, blank=True)
+    job_id = models.CharField(max_length=255, null=True, blank=True)
+    question = models.TextField(null=True, blank=True)
+    answer = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "conversation_messages"
+        managed = False
+
+    def __str__(self):
+        return f"{self.session_id} - {self.id}"
