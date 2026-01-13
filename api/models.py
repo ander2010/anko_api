@@ -675,7 +675,7 @@ class Notification(models.Model):
 
     class Meta:
         db_table = "notifications"
-        managed = False
+        managed = True
 
     def __str__(self):
         return f"Notification {self.job_id}"

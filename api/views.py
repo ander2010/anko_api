@@ -591,16 +591,16 @@ class ProjectViewSet(viewsets.ModelViewSet):
                     )
 
                     # ✅ crear 5 secciones temporales (solo si es nuevo doc)
-                    sections = [
-                        Section(
-                            document=doc,
-                            title=f"Section {i}",
-                            content="TEMP CONTENT (will be replaced by external service)",
-                            order=i,
-                        )
-                        for i in range(1, 6)
-                    ]
-                    Section.objects.bulk_create(sections)
+                    # sections = [
+                    #     Section(
+                    #         document=doc,
+                    #         title=f"Section {i}",
+                    #         content="TEMP CONTENT (will be replaced by external service)",
+                    #         order=i,
+                    #     )
+                    #     for i in range(1, 6)
+                    # ]
+                    # Section.objects.bulk_create(sections)
 
                 # Si el doc existía pero pertenece a otro proyecto, lo asociamos a este.
                 # (Esto es un "parche" porque tu hash es unique global.)
@@ -910,55 +910,73 @@ class DocumentViewSet(viewsets.ModelViewSet):
         /api/documents/<id>/tags/
         Copia tags (tabla Tag) -> Section (title/content=tag) sobrescribiendo secciones del documento.
         """
-        document_id = str(pk)  # 👈 usamos el ID de la URL directamente
+        document_id = int(pk)
 
-        # 1️⃣ Obtener tags del documento
-        tags = list(
-        Tag.objects
-        .filter(document_id=document_id)
-        .order_by("created_at")
-        .values_list("tag", flat=True)
-    )
+        sections = Section.objects.filter(document_id=document_id).order_by("order", "id")
 
-        # 2️⃣ Borrar secciones existentes del documento
-        Section.objects.filter(document_id=document_id).delete()
-
-
-        if not tags:
-            return Response(
-                {"document_id": document_id, "deleted_sections": True, "created": 0, "sections": []},
-                status=status.HTTP_200_OK,
-            )
-
-        # 3) crear nuevas secciones desde tags
-        new_sections = []
-        for i, t in enumerate(tags, start=1):
-            if not t:
-                continue
-            new_sections.append(
-                Section(
-                    document_id=document_id,
-                    title=t,
-                    content=t,
-                    order=i,
-                )
-            )
-
-        Section.objects.bulk_create(new_sections)
-
-        # 4) devolver secciones nuevas
-        created_qs = Section.objects.filter(document_id=document_id).order_by("order", "id")
-        ser = SectionSerializer(created_qs, many=True, context={"request": request})
+        serializer = SectionSerializer(
+            sections,
+            many=True,
+            context={"request": request},
+        )
 
         return Response(
             {
                 "document_id": document_id,
-                "deleted_sections": True,
-                "created": created_qs.count(),
-                "sections": ser.data,
+                "count": sections.count(),
+                "sections": serializer.data,
             },
             status=status.HTTP_200_OK,
         )
+    #     document_id = pk  # 👈 usamos el ID de la URL directamente
+
+    #     # 1️⃣ Obtener tags del documento
+    #     tags = list(
+    #     Tag.objects
+    #     .filter(document_id=document_id)
+    #     .order_by("created_at")
+    #     .values_list("tag", flat=True)
+    # )
+
+    #     # 2️⃣ Borrar secciones existentes del documento
+    #     Section.objects.filter(document_id=document_id).delete()
+
+
+    #     if not tags:
+    #         return Response(
+    #             {"document_id": document_id, "deleted_sections": True, "created": 0, "sections": []},
+    #             status=status.HTTP_200_OK,
+    #         )
+
+    #     # 3) crear nuevas secciones desde tags
+    #     new_sections = []
+    #     for i, t in enumerate(tags, start=1):
+    #         if not t:
+    #             continue
+    #         new_sections.append(
+    #             Section(
+    #                 document_id=document_id,
+    #                 title=t,
+    #                 content=t,
+    #                 order=i,
+    #             )
+    #         )
+
+    #     Section.objects.bulk_create(new_sections)
+
+    #     # 4) devolver secciones nuevas
+    #     created_qs = Section.objects.filter(document_id=document_id).order_by("order", "id")
+    #     ser = SectionSerializer(created_qs, many=True, context={"request": request})
+
+    #     return Response(
+    #         {
+    #             "document_id": document_id,
+    #             "deleted_sections": True,
+    #             "created": created_qs.count(),
+    #             "sections": ser.data,
+    #         },
+    #         status=status.HTTP_200_OK,
+    #     )
     
 
 
@@ -1155,14 +1173,14 @@ class BatteryViewSet(viewsets.ModelViewSet):
         # 1) Traer filas de qa_pairs (tuplas)
         with connection.cursor() as cursor:
             cursor.execute(
-                """
-                SELECT document_id, qa_index, question, correct_response, metadata, created_at
-                FROM qa_pairs
-                WHERE job_id = %s
-                ORDER BY qa_index, created_at
-                """,
-                [job_id],
-            )
+            """
+            SELECT document_id, qa_index, question, correct_response, meta, created_at
+            FROM qa_pairs
+            WHERE job_id = %s
+            ORDER BY qa_index, created_at
+            """,
+            [job_id],
+        )
             rows = cursor.fetchall()
 
         if overwrite:
