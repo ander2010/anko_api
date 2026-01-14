@@ -2894,12 +2894,31 @@ class FlashcardViewSet(viewsets.ModelViewSet):
                 has_any = Flashcard.objects.filter(deck=deck).exists()
                 should_sync = not has_any
 
-        # if should_sync:
-        #     inserted = self._sync_from_public_flashcards(
-        #         deck=deck,
-        #         job_id=job_id,
-        #         user_id=str(request.user.id),
-        #     )
+        if should_sync:
+            print("Syncing flashcards into deck", deck.id, "from job", job_id)
+            if deck.owner_id != user.id:
+                return Response({"detail": "Only owner can sync cards into this deck."}, status=403)
+            updated_count = (
+            Flashcard.objects
+            .filter(job_id=job_id)  # si tienes user_id, agrega .filter(user_id=str(user.id))
+            .exclude(deck_id=deck.id)  # evita updates innecesarios
+            .update(
+                deck_id=deck.id,
+                updated_at=timezone.now(),  # si tu modelo tiene updated_at y lo manejas así
+            )
+        )
+            # ✅ SOLO owner puede "escribir" al deck (recomendado)
+        
+
+        # ✅ Actualiza masivamente: todas las flashcards con ese job_id -> asignarlas al deck
+        # (opcional) filtrar también por user si aplica a tu esquema
+       
+
+            # inserted = self._sync_from_public_flashcards(
+            #     deck=deck,
+            #     job_id=job_id,
+            #     user_id=str(request.user.id),
+            # )
 
         # ✅ Si hay job_id y todavía NO lo sincronizaste, copia una vez
         # if job_id:

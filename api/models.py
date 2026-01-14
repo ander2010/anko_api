@@ -539,8 +539,8 @@ class Flashcard(models.Model):
     ease_factor = models.FloatField(default=2.5)
     due_at = models.DateTimeField(null=True, blank=True)
     first_seen_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
 
     # Your additions
     deck = models.ForeignKey(Deck, null=True, blank=True, on_delete=models.SET_NULL, related_name="cards")
