@@ -2585,7 +2585,7 @@ class DeckViewSet(viewsets.ModelViewSet):
         svc_payload = {
         #      "document_ids": ["test"],
         # "tags": ["Barcelona"],
-            "document_ids": document_id_str,            
+            "document_ids": document_ids,            
             "tags": tags,
             "quantity": cards_count,                
             "difficulty": difficulty,
@@ -2894,12 +2894,12 @@ class FlashcardViewSet(viewsets.ModelViewSet):
                 has_any = Flashcard.objects.filter(deck=deck).exists()
                 should_sync = not has_any
 
-        if should_sync:
-            inserted = self._sync_from_public_flashcards(
-                deck=deck,
-                job_id=job_id,
-                user_id=str(request.user.id),
-            )
+        # if should_sync:
+        #     inserted = self._sync_from_public_flashcards(
+        #         deck=deck,
+        #         job_id=job_id,
+        #         user_id=str(request.user.id),
+        #     )
 
         # ✅ Si hay job_id y todavía NO lo sincronizaste, copia una vez
         # if job_id:
@@ -2961,13 +2961,13 @@ class FlashcardViewSet(viewsets.ModelViewSet):
             job_id = getattr(deck, "external_job_id", None)  # o deck.external_job_id, según tu modelo
             if job_id:
                 # Recomendado: envolver en transacción si vas a crear en DB
-                with transaction.atomic():
-                    self._sync_from_public_flashcards(
-                        deck=deck,
-                        job_id=str(job_id),
-                        user_id=str(user.id),
-                        limit=5000,
-                    )
+                # with transaction.atomic():
+                #     self._sync_from_public_flashcards(
+                #         deck=deck,
+                #         job_id=str(job_id),
+                #         user_id=str(user.id),
+                #         limit=5000,
+                #     )
 
                 # Re-query después del sync
                 qs = base_qs.filter(deck_id=deck_id)

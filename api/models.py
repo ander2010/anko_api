@@ -629,29 +629,62 @@ class Chunk(models.Model):
         managed = True
         unique_together = (("document", "chunk_index"),)
 
-
 class QaPair(models.Model):
     id = models.BigAutoField(primary_key=True)
-    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='qa_pairs', db_column='document_id', db_index=True)
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="qa_pairs",
+        db_column="document_id",
+        db_index=True,
+    )
     qa_index = models.IntegerField()
     question = models.TextField(null=True, blank=True)
     correct_response = models.TextField(null=True, blank=True)
     context = models.TextField(null=True, blank=True)
     meta = models.JSONField(null=True, blank=True)
+
     job_id = models.CharField(max_length=255, db_index=True, null=True, blank=True)
     chunk_id = models.CharField(max_length=255, null=True, blank=True)
     chunk_index = models.IntegerField(null=True, blank=True)
+
     created_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "qa_pairs"
         managed = True
-        unique_together = (("document", "qa_index"),)
-
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "qa_index", "job_id"],
+                name="uniq_qapairs_document_qaindex_jobid",
+            )
+        ]
 
     def __str__(self):
         return f"[{self.job_id}] #{self.qa_index} {self.question[:40] if self.question else ''}"
+# class QaPair(models.Model):
+#     id = models.BigAutoField(primary_key=True)
+#     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='qa_pairs', db_column='document_id', db_index=True)
+#     qa_index = models.IntegerField()
+#     question = models.TextField(null=True, blank=True)
+#     correct_response = models.TextField(null=True, blank=True)
+#     context = models.TextField(null=True, blank=True)
+#     meta = models.JSONField(null=True, blank=True)
+#     job_id = models.CharField(max_length=255, db_index=True, null=True, blank=True)
+#     chunk_id = models.CharField(max_length=255, null=True, blank=True)
+#     chunk_index = models.IntegerField(null=True, blank=True)
+#     created_at = models.DateTimeField(null=True, blank=True)
+#     updated_at = models.DateTimeField(null=True, blank=True)
+
+#     class Meta:
+#         db_table = "qa_pairs"
+#         managed = True
+#         unique_together = (("document", "qa_index"),)
+
+
+#     def __str__(self):
+#         return f"[{self.job_id}] #{self.qa_index} {self.question[:40] if self.question else ''}"
 
 
 
