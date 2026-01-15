@@ -62,6 +62,8 @@ from .serializers import (
 import requests
 from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
+
+logging.basicConfig(level=logging.INFO)
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
     serializer_class = UserSerializer
