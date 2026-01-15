@@ -1,4 +1,5 @@
 # from multiprocessing.dummy import connection
+import logging
 from django.db import connection
 
 import os
@@ -498,7 +499,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
         base_url = self.normalize_base_url(base_url)
         url = f"{base_url}/process-request"
-
+        logging.info(f"Calling external process-request at {url}")
         job_id = str(uuid.uuid4())
 
         payload = {
@@ -509,9 +510,10 @@ class ProjectViewSet(viewsets.ModelViewSet):
             "options": {},
         }
 
+        logging.info(f"POST {url} with payload: {json.dumps(payload)}")
         print("➡️ POST", url)
         print("➡️ payload:", json.dumps(payload, indent=2))
-
+        
         r = requests.post(url, json=payload, timeout=60)
         print("✅ external status:", r.status_code)
         print("✅ external raw:", r.text[:2000])
@@ -521,7 +523,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ws_url = f"{ws_base}/ws/progress/{job_id}"
-
+        logging.info(f"External process-request responded with job_id: {job_id}, ws_url: {ws_url}")
         return data, ws_url
 
 
