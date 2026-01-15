@@ -2780,6 +2780,172 @@ class FlashcardViewSet(viewsets.ModelViewSet):
     serializer_class = FlashcardSerializer
     permission_classes = [IsAuthenticated]
 
+    @action(detail=False, methods=["post"], url_path="ws-pull-card", permission_classes=[IsAuthenticated])
+    def ws_pull_card(self, request):
+        """
+        POST /api/flashcards/ws-pull-card/
+        Body:
+        {
+          "deck_id": 123,          (required)
+          "job_id": "...",         (optional; default deck.external_job_id)
+          "user_id": "...",        (optional; default request.user.id)
+          "last_seq": 0,           (optional; default 0)
+          "token": ""              (optional)
+        }
+        """
+        deck_id = request.data.get("deck_id")
+        if not deck_id:
+            return Response({"detail": "deck_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            deck_id_int = int(deck_id)
+        except ValueError:
+            return Response({"detail": "deck_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            deck = Deck.objects.get(id=deck_id_int)
+        except Deck.DoesNotExist:
+            return Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        has_access = (
+            deck.owner_id == user.id
+            or deck.visibility == "public"
+            or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
+
+        job_id = request.data.get("job_id") or deck.external_job_id
+        job_id = str(job_id).strip() if job_id else None
+        if not job_id:
+            return Response({"detail": "job_id is required (or deck must have external_job_id)."}, status=400)
+
+        user_id = request.data.get("user_id") or str(user.id) or str(uuid.uuid4())
+        last_seq = request.data.get("last_seq", 0)
+        token = request.data.get("token", "")
+
+        try:
+            last_seq = int(last_seq)
+        except Exception:
+            last_seq = 0
+
+        msg = async_to_sync(ws_get_next_card)(
+            job_id=str(job_id),
+            user_id=str(user_id),
+            last_seq=int(last_seq),
+            token=str(token),
+            timeout_sec=25,
+        )
+
+        mt = msg.get("message_type")
+        if mt == "card":
+            return Response(
+                {
+                    "message_type": "card",
+                    "job_id": str(job_id),
+                    "seq": msg.get("seq"),
+                    "card": msg.get("card"),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if mt == "done":
+            return Response({"message_type": "done", "job_id": str(job_id)}, status=status.HTTP_200_OK)
+
+        if mt == "error":
+            return Response(
+                {"message_type": "error", "job_id": str(job_id), "detail": msg},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"message_type": mt, "job_id": str(job_id), "detail": msg}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="ws-push-feedback", permission_classes=[IsAuthenticated])
+    def ws_push_feedback(self, request):
+        """
+        POST /api/flashcards/ws-push-feedback/
+        Body:
+        {
+          "deck_id": 123,          (required)
+          "job_id": "...",         (optional; default deck.external_job_id)
+          "user_id": "...",        (optional; default request.user.id)
+          "seq": 10,               (required)
+          "card_id": 999,          (required)
+          "rating": 0|1|2,         (required)
+          "time_to_answer_ms": 500 (optional)
+          "token": ""              (optional)
+        }
+        """
+        deck_id = request.data.get("deck_id")
+        if not deck_id:
+            return Response({"detail": "deck_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            deck_id_int = int(deck_id)
+        except ValueError:
+            return Response({"detail": "deck_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            deck = Deck.objects.get(id=deck_id_int)
+        except Deck.DoesNotExist:
+            return Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        has_access = (
+            deck.owner_id == user.id
+            or deck.visibility == "public"
+            or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
+
+        job_id = request.data.get("job_id") or deck.external_job_id
+        job_id = str(job_id).strip() if job_id else None
+        if not job_id:
+            return Response({"detail": "job_id is required (or deck must have external_job_id)."}, status=400)
+
+        user_id = request.data.get("user_id") or str(user.id) or str(uuid.uuid4())
+
+        seq = request.data.get("seq")
+        card_id = request.data.get("card_id")
+        rating = request.data.get("rating")
+        if seq is None or card_id is None or rating is None:
+            return Response({"detail": "seq, card_id and rating are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            seq = int(seq)
+            card_id = card_id
+            rating = int(rating)
+        except ValueError:
+            return Response({"detail": "seq, card_id, rating must be integers"}, status=400)
+
+        time_to_answer_ms = request.data.get("time_to_answer_ms", 500)
+        try:
+            time_to_answer_ms = int(time_to_answer_ms)
+        except Exception:
+            time_to_answer_ms = 500
+
+        token = str(request.data.get("token", ""))
+
+        msg = async_to_sync(ws_send_card_feedback)(
+            job_id=str(job_id),
+            user_id=str(user_id),
+            seq=seq,
+            card_id=card_id,
+            rating=rating,
+            time_to_answer_ms=time_to_answer_ms,
+            token=token,
+            timeout_sec=15,
+        )
+
+        mt = msg.get("message_type")
+        if mt == "ok":
+            return Response({"message_type": "ok", "detail": msg}, status=status.HTTP_200_OK)
+
+        return Response({"message_type": mt, "detail": msg}, status=status.HTTP_502_BAD_GATEWAY)
+    
+
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="add-card")
     def add_card(self, request, pk=None):
         deck = self.get_object()
