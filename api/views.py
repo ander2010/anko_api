@@ -365,7 +365,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], permission_classes=[AllowAny], url_path="testtowebsockett")
     def testtowebsockett(self, request):
        
-        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+        base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
         base_url = self.normalize_base_url(base_url)
        
 
@@ -495,7 +495,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
 
     def _process_document_external(self, stored_file_path: str, doc_id: int):
-        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+        base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
         base_url = self.normalize_base_url(base_url)
         url = f"{base_url}/process-request"
         logging.info(f"Calling external process-request at {url}")
