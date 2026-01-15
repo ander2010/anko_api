@@ -548,6 +548,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 {"error": "No files provided. Use multipart/form-data with key 'files'."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        logging.info(f"User {request.user.id} is uploading {len(files)} files to project {project.id}")
         PlanGuard.assert_upload_allowed(user=request.user, files=files)
         created_docs = []
         processing = []  # doc + ws_url + respuesta del microservicio
