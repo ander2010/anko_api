@@ -361,7 +361,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], permission_classes=[AllowAny], url_path="testtowebsockett")
     def testtowebsockett(self, request):
-        print("🔥 testtowebsockett endpoint called")
+       
         base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
         base_url = self.normalize_base_url(base_url)
        
@@ -379,19 +379,17 @@ class ProjectViewSet(viewsets.ModelViewSet):
             "options": {},
         }
 
-        print(f"➡️ POST {url}")
-        print("➡️ payload:", json.dumps(payload, indent=2))
+
 
         try:
             response = requests.post(url, json=payload, timeout=60)
-            print(f"POST {url} -> {response.status_code}")
+            
 
             try:
                 data = response.json()
-                print("✅ Response JSON:\n", json.dumps(data, indent=2))
+             
                 job_id = data.get("job_id", job_id)
             except Exception:
-                print("✅ Response TEXT:\n", response.text)
                 return Response(
                     {"success": False, "status_code": response.status_code, "raw_text": response.text},
                     status=status.HTTP_502_BAD_GATEWAY if not response.ok else status.HTTP_200_OK,
@@ -407,8 +405,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
             ws_url = f"{ws_base}/ws/progress/{job_id}"
 
-            print("🔌 Connect to the progress Websocket (e.g., in Postman):")
-            print(ws_url)
+            
 
             # devolvemos todo + ws_url
             return Response(
@@ -420,7 +417,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
         except requests.RequestException as e:
-            print("❌ RequestException:", str(e))
+            
             return Response(
                 {"success": False, "error": str(e)},
                 status=status.HTTP_502_BAD_GATEWAY,
@@ -509,12 +506,10 @@ class ProjectViewSet(viewsets.ModelViewSet):
             "options": {},
         }
 
-        print("➡️ POST", url)
-        print("➡️ payload:", json.dumps(payload, indent=2))
+   
 
         r = requests.post(url, json=payload, timeout=60)
-        print("✅ external status:", r.status_code)
-        print("✅ external raw:", r.text[:2000])
+     
 
         data = r.json()
         job_id = data.get("job_id", job_id)
@@ -2519,8 +2514,7 @@ class DeckViewSet(viewsets.ModelViewSet):
                 )
 
             document_id_str = [str(doc_id) for doc_id in document_ids]
-        # print("Document IDs:", document_ids)
-        # --- Cards count (N) ---
+       
         cards_count = data.get("cards_count", 0)
         try:
             cards_count = int(cards_count)
@@ -2846,11 +2840,15 @@ class FlashcardViewSet(viewsets.ModelViewSet):
             .filter(deck_id=deck.id)
             .update(
                 kind="new",
-                due_at=now,
+                due_at=timezone.now(),
                 status='learning',
-                updated_at=now,
+                updated_at=timezone.now(),
                 interval_days=0,
                 learning_step_index=0,
+                ease_factor=2.5,
+                first_seen_at=None,
+          
+
             )
         )
 
@@ -3093,8 +3091,7 @@ class FlashcardViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="sync-from-job")
     @transaction.atomic
     def sync_from_job(self, request):
-        print("AUTH:", request.user, request.user.is_authenticated)
-        print("HEADERS AUTH:", request.headers.get("Authorization"))
+    
 
         user = request.user
         # user=User.objects.get(id=1)
@@ -3145,7 +3142,7 @@ class FlashcardViewSet(viewsets.ModelViewSet):
                 should_sync = not has_any
 
         if should_sync:
-            print("Syncing flashcards into deck", deck.id, "from job", job_id)
+            
             if deck.owner_id != user.id:
                 return Response({"detail": "Only owner can sync cards into this deck."}, status=403)
             updated_count = (
