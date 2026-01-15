@@ -322,7 +322,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 status=400,
             )
 
-        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
+        base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ws_url = f"{ws_base}/ws/progress/{job_id}"
 
@@ -1357,7 +1357,7 @@ class BatteryViewSet(viewsets.ModelViewSet):
         battery = self.get_object()
         job_id = getattr(battery, "external_job_id", None)
 
-        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
+        base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
 
         def sse_one(event_name: str, payload: dict, http_status=200):
