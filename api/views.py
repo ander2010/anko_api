@@ -2780,6 +2780,90 @@ class FlashcardViewSet(viewsets.ModelViewSet):
     serializer_class = FlashcardSerializer
     permission_classes = [IsAuthenticated]
 
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="shuffle-deck-cards",
+        permission_classes=[IsAuthenticated],
+    )
+    def shuffle_deck_cards(self, request):
+        """
+        POST /api/flashcards/shuffle-deck-cards/
+
+        Body:
+        {
+          "deck_id": 123
+        }
+
+        Effect:
+        - All flashcards in the deck are reset:
+          - kind = "new"
+          - due_at = now()
+        """
+
+        deck_id = request.data.get("deck_id")
+        if not deck_id:
+            return Response(
+                {"detail": "deck_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            deck_id = int(deck_id)
+        except ValueError:
+            return Response(
+                {"detail": "deck_id must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 🔒 Cargar deck y validar permisos
+        try:
+            deck = Deck.objects.get(id=deck_id)
+        except Deck.DoesNotExist:
+            return Response(
+                {"detail": "Deck not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        user = request.user
+        has_access = (
+            deck.owner_id == user.id
+            or deck.visibility == "public"
+            or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
+        )
+        if not has_access:
+            return Response(
+                {"detail": "You do not have access to this deck."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # ⏱️ Timestamp único para toda la operación
+        now = timezone.now()
+
+        # 🔄 Bulk update (rápido y seguro)
+        updated_count = (
+            Flashcard.objects
+            .filter(deck_id=deck.id)
+            .update(
+                kind="new",
+                due_at=now,
+                status='learning',
+                updated_at=now,
+                interval_days=0,
+                learning_step_index=0,
+            )
+        )
+
+        return Response(
+            {
+                "deck_id": deck.id,
+                "cards_updated": updated_count,
+                "kind_set_to": "new",
+                "due_at_set_to": now,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=False, methods=["post"], url_path="ws-pull-card", permission_classes=[IsAuthenticated])
     def ws_pull_card(self, request):
         """
