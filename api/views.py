@@ -525,6 +525,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get", "post"], url_path="documents")
     def documents(self, request, pk=None):
+        logging.info(f"documents action called with method {request.method} by user {request.user.id}")
         project = self.get_object()
 
         # =========================
