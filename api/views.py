@@ -544,6 +544,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         # POST: subir documentos
         # =========================
         files = request.FILES.getlist("files")
+        logging.info(f"Received {len(files)} files for upload")
         if not files:
             return Response(
                 {"error": "No files provided. Use multipart/form-data with key 'files'."},
