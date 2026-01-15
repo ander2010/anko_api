@@ -46,7 +46,7 @@ class Migration(migrations.Migration):
             ],
             options={
                 'db_table': 'notifications',
-                'managed': False,
+                'managed': True,
             },
         ),
         migrations.CreateModel(
