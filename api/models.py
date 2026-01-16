@@ -734,8 +734,6 @@ class ConversationMessage(models.Model):
 class FlashcardReview(models.Model):
     card = models.ForeignKey(
         Flashcard,
-        to_field="card_id",
-        db_column="card_id",
         on_delete=models.CASCADE,
         related_name="reviews",
     )
