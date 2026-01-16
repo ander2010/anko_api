@@ -325,6 +325,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ws_url = f"{ws_base}/ws/progress/{job_id}"
+        logging.info(f"Connecting to WS progress stream at {ws_url} for job_id {job_id}")
 
         def event_stream():
             ws = None
@@ -342,6 +343,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                         yield "event: ping\ndata: {}\n\n"
 
             except Exception as e:
+                logging.error(f"Error in WS progress stream for job_id {job_id}: {e}")
                 yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
             finally:
                 if ws:
