@@ -729,3 +729,22 @@ class ConversationMessage(models.Model):
 
     def __str__(self):
         return f"{self.session_id} - {self.id}"
+
+
+class FlashcardReview(models.Model):
+    card = models.ForeignKey(
+        Flashcard,
+        to_field="card_id",
+        db_column="card_id",
+        on_delete=models.CASCADE,
+        related_name="reviews",
+    )
+    user_id = models.CharField(max_length=255)
+    job_id = models.CharField(max_length=255)
+    rating = models.IntegerField()
+    time_to_answer_ms = models.IntegerField(null=True, blank=True)
+    notes = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "api_flashcardreview"
