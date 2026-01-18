@@ -1,6 +1,8 @@
 # from multiprocessing.dummy import connection
 import logging
+from urllib import request
 from django.db import connection
+from redis import Redis
 
 import os
 import uuid
@@ -121,6 +123,9 @@ class AuthViewSet(viewsets.GenericViewSet):
     #     serializer = UserSerializer(request.user)
     #     return Response(serializer.data)
 
+    
+def flashcard_redis_key(job_id: str) -> str:
+    return f"flashcards:cards:{job_id}"
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
@@ -2784,49 +2789,25 @@ class FlashcardViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     @action(
-        detail=False,
-        methods=["post"],
-        url_path="shuffle-deck-cards",
-        permission_classes=[IsAuthenticated],
-    )
+    detail=False,
+    methods=["post"],
+    url_path="shuffle-deck-cards",
+    permission_classes=[IsAuthenticated],
+)
     def shuffle_deck_cards(self, request):
-        """
-        POST /api/flashcards/shuffle-deck-cards/
-
-        Body:
-        {
-          "deck_id": 123
-        }
-
-        Effect:
-        - All flashcards in the deck are reset:
-          - kind = "new"
-          - due_at = now()
-        """
-
         deck_id = request.data.get("deck_id")
         if not deck_id:
-            return Response(
-                {"detail": "deck_id is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"detail": "deck_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             deck_id = int(deck_id)
-        except ValueError:
-            return Response(
-                {"detail": "deck_id must be an integer"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        except (TypeError, ValueError):
+            return Response({"detail": "deck_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 🔒 Cargar deck y validar permisos
         try:
             deck = Deck.objects.get(id=deck_id)
         except Deck.DoesNotExist:
-            return Response(
-                {"detail": "Deck not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
 
         user = request.user
         has_access = (
@@ -2835,38 +2816,68 @@ class FlashcardViewSet(viewsets.ModelViewSet):
             or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
         )
         if not has_access:
-            return Response(
-                {"detail": "You do not have access to this deck."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
 
-        # ⏱️ Timestamp único para toda la operación
         now = timezone.now()
 
-        # 🔄 Bulk update (rápido y seguro)
-        updated_count = (
-            Flashcard.objects
-            .filter(deck_id=deck.id)
-            .update(
-                kind="new",
-                due_at=timezone.now(),
-                status='learning',
-                updated_at=timezone.now(),
-                interval_days=0,
-                learning_step_index=0,
-                ease_factor=2.5,
-                first_seen_at=None,
-          
+        reset_values = {
+            "kind": "new",
+            "status": "learning",
+            "learning_step_index": 0,
+            "repetition": 0,
+            "interval_days": 0,
+            "ease_factor": 2.5,
+            "due_at": now,
+            "first_seen_at": None,
+            "updated_at": now,
+        }
 
-            )
+        job_ids = list(
+            Flashcard.objects.filter(deck_id=deck.id)
+            .exclude(job_id__isnull=True)
+            .exclude(job_id__exact="")
+            .values_list("job_id", flat=True)
+            .distinct()
         )
+
+        if not job_ids:
+            return Response(
+                {"deck_id": deck.id, "cards_updated": 0, "detail": "No job_id found for flashcards in this deck."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        with transaction.atomic():
+            updated_count = Flashcard.objects.filter(job_id__in=job_ids).update(**reset_values)
+
+        # ✅ Clear progress in Redis (like the script)
+        redis_deleted = {}
+        redis_error = None
+
+        clear_redis = os.getenv("FLASHCARD_CLEAR_REDIS", "1") == "1"
+        if clear_redis:
+            try:
+                
+                redis_url = os.getenv("PROGRESS_REDIS_URL", "redis://localhost:6379/2")
+                client = Redis.from_url(redis_url, decode_responses=True)
+
+                for jid in job_ids:
+                    key = flashcard_redis_key(jid)
+                    redis_deleted[jid] = int(client.delete(key))  # 1 if deleted, 0 if not found
+            except Exception as e:
+                # no rompas el endpoint si redis no está disponible
+                redis_error = str(e)
 
         return Response(
             {
                 "deck_id": deck.id,
+                "job_ids": job_ids,
                 "cards_updated": updated_count,
-                "kind_set_to": "new",
                 "due_at_set_to": now,
+                "redis": {
+                    "enabled": clear_redis,
+                    "deleted": redis_deleted,   # {job_id: 0/1}
+                    "error": redis_error,
+                },
             },
             status=status.HTTP_200_OK,
         )
