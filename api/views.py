@@ -499,14 +499,15 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def _process_document_external(self, stored_file_path: str, doc_id: int):
         base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
         base_url = self.normalize_base_url(base_url)
-        url = f"{os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")}/process-request"
+        url = f"{os.getenv('PROCESS_REQUEST_BASE_URL', 'http://localhost:8080')}/process-request"
+
         logging.info(f"Calling external process-request at {url}")
         job_id = str(uuid.uuid4())
 
         payload = {
             "job_id": job_id,
             "doc_id": doc_id,
-            "file_path": stored_file_path,   # 👈 IMPORTANTÍSIMO
+            "file_path": stored_file_path,   
             "process": "process_pdf",
             "options": {},
         }
