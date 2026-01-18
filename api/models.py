@@ -746,3 +746,17 @@ class FlashcardReview(models.Model):
 
     class Meta:
         db_table = "api_flashcardreview"
+
+class SummaryDocument(models.Model):
+    document = models.OneToOneField(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="summary_document",
+        db_column="document_id",
+    )
+    summary = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "summary_document"
