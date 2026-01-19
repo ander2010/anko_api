@@ -173,7 +173,8 @@ def document_upload_to(instance, filename):
     # unique_filename = f"{uuid.uuid4()}_{safe_filename}"
     unique_filename = f"{safe_filename}"
 
-    return f"anko/documents/{user_id}/{unique_filename}"
+    return f"documents/{user_id}/{unique_filename}"
+
 
 class Project(models.Model):
     title = models.CharField(max_length=255)
@@ -211,7 +212,7 @@ class Document(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     processing_error = models.TextField(null=True, blank=True)
     extracted_text = models.TextField(null=True, blank=True)
-    hash = models.CharField(max_length=64, unique=True, help_text="File hash for deduplication")
+    hash = models.CharField(max_length=64, db_index=True)  # NO unique global
     job_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
     
     def save(self, *args, **kwargs):
@@ -221,6 +222,10 @@ class Document(models.Model):
 
     def __str__(self):
         return self.filename
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["project", "hash"], name="uniq_document_project_hash")
+        ]
    
 
 

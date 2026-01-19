@@ -3,7 +3,7 @@ import logging
 from urllib import request
 from django.db import connection
 from redis import Redis
-
+from django.conf import settings
 import os
 import uuid
 import json
@@ -587,17 +587,21 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
                 # ⚠️ OJO: tu hash es UNIQUE GLOBAL en DB (api_document_hash_key),
                 # así que no filtres por project aquí, busca solo por hash.
-                doc = Document.objects.filter(hash=file_hash).first()
+                # doc = Document.objects.filter(hash=file_hash).first()
+                doc = Document.objects.filter(project=project, hash=file_hash).first()
+
 
                 if not doc:
-                    doc = Document.objects.create(
-                        project=project,
-                        file=f,
-                        filename=getattr(f, "name", "document"),
-                        type="PDF",
-                        size=getattr(f, "size", 0) or 0,
-                        hash=file_hash,
-                    )
+                    doc = Document(
+                    project=project,
+                    file=f,
+                    filename=getattr(f, "name", "document"),
+                    type="PDF",
+                    size=getattr(f, "size", 0) or 0,
+                    hash=file_hash,
+                )
+                    doc._uploader_id = request.user.id  # ✅ ANTES
+                    doc.save()
 
                     # ✅ crear 5 secciones temporales (solo si es nuevo doc)
                     # sections = [
@@ -613,9 +617,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
                 # Si el doc existía pero pertenece a otro proyecto, lo asociamos a este.
                 # (Esto es un "parche" porque tu hash es unique global.)
-                if doc.project_id != project.id:
-                    doc.project = project
-                    doc.save(update_fields=["project"])
+                # if doc.project_id != project.id:
+                #     doc.project = project
+                #     doc.save(update_fields=["project"])
 
                 created_docs.append(doc)
 
@@ -760,7 +764,7 @@ def normalize_base_url(url: str) -> str:
 class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-url")
@@ -790,21 +794,26 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 {"detail": "Invalid mode. Use 'view' or 'download'."},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        raw_key = doc.file.name
+        storage_key = normalize_storage_key(raw_key)
 
-        storage_key = doc.file.name  # ej: "anko/documents/test.pdf"
+        # storage_key = doc.file.name  # ej: "anko/documents/test.pdf"
         # Escapar por si hay espacios o caracteres raros
-        storage_key_q = quote(storage_key, safe="/")
+
         user_token = encrypt_user_id(user.id)
+
         query = urlencode({
-        "file": storage_key_q,
-        "seed": user_token,  # encrypted user id
-})
+            "file": storage_key,
+            "seed": user_token,
+        })
+
+        url = f"https://italk2.me/content_view/{mode}?{query}"
 
 
 
-        base = "https://italk2.me/content_view"
-        # url = f"{base}/{mode}?file={storage_key_q}"
-        url = f"{base}/{mode}?{query}"
+        # base = "https://italk2.me/content_view"
+        # # url = f"{base}/{mode}?file={storage_key_q}"
+        # url = f"{base}/{mode}?{query}"
 
         return Response({
             "id": doc.id,
@@ -1003,7 +1012,7 @@ class SectionViewSet(viewsets.ModelViewSet):
 
    
 class TopicViewSet(viewsets.ModelViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     serializer_class = TopicSerializer
 
     @action(detail=True, methods=["get"], url_path="grouped-sections")
@@ -1058,6 +1067,21 @@ class RuleViewSet(viewsets.ModelViewSet):
         if project_id:
             qs = qs.filter(project_id=project_id)
         return qs
+def normalize_storage_key(key: str) -> str:
+    key = (key or "").lstrip("/")
+
+    bucket = (
+        getattr(settings, "AWS_STORAGE_BUCKET_NAME", "anko")
+        or "anko"
+    ).strip().strip("/")
+
+    
+    if not key.startswith(bucket + "/"):
+        key = f"{bucket}/{key}"
+
+    return key
+
+
 
 class BatteryViewSet(viewsets.ModelViewSet):
     queryset = Battery.objects.all()
