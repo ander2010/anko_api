@@ -71,8 +71,11 @@ INSTALLED_APPS = [
     # ✅ rest auth (social endpoints)
     'dj_rest_auth',
     'dj_rest_auth.registration',
+    "api.apps.ApiConfig",
 
-    'api',
+        # "api.apps.ApiConfig,
+
+    # 'api',
 ]
 
 SITE_ID = 1
