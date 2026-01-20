@@ -8,6 +8,7 @@ import os
 import uuid
 import json
 import hashlib
+from django.db.models import Count, Q
 import time
 from django.utils import timezone
 from api.utils.cripto import encrypt_user_id
@@ -215,7 +216,30 @@ def _ask_via_http(base_url: str, payload: dict) -> Dict[str, Any]:
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
     serializer_class = ProjectSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=True, methods=["GET"], url_path="counts", url_name="project-counts")
+    def counts(self, request, pk=None):
+        """
+        GET /api/projects/{id}/counts/
+
+        Returns counts for decks and batteries for this project.
+        """
+        qs = (
+            Project.objects
+            .filter(id=pk)
+            .annotate(
+                decks_count=Count("decks", distinct=True),
+                batteries_count=Count("batteries", distinct=True),
+            )
+            .values("id", "decks_count", "batteries_count")
+        )
+
+        data = qs.first()
+        if not data:
+            return Response({"detail": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(data, status=status.HTTP_200_OK)
 
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="ask")
