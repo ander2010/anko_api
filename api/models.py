@@ -765,3 +765,34 @@ class SummaryDocument(models.Model):
 
     class Meta:
         db_table = "summary_document"
+
+class UserSession(models.Model):
+    session_id = models.CharField(max_length=255, unique=True)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="sessions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "user_sessions"
+
+
+class ConversationMessage(models.Model):
+    session = models.ForeignKey(
+        UserSession,
+        to_field="session_id",
+        db_column="session_id",
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    user_id = models.CharField(max_length=255, null=True, blank=True)
+    job_id = models.CharField(max_length=255, null=True, blank=True)
+    question = models.TextField(null=True, blank=True)
+    answer = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "conversation_messages"
