@@ -2192,6 +2192,111 @@ class DeckViewSet(viewsets.ModelViewSet):
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
     
+    @action(
+    detail=False,
+    methods=["post"],
+    permission_classes=[IsAuthenticated],
+    url_path="add-flashcards"
+)
+    @transaction.atomic
+    def add_flashcards(self, request):
+        data = request.data or {}
+
+        deck_id = data.get("deck_id")
+        cards = data.get("cards") or []
+
+        if not deck_id:
+            return Response({"detail": "deck_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not isinstance(cards, list) or not cards:
+            return Response(
+                {"detail": "cards must be a non-empty list"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # --------- Load deck ----------
+        try:
+            deck = Deck.objects.get(id=deck_id)
+        except Deck.DoesNotExist:
+            return Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # 🔒 Solo owner puede modificar el deck
+        if deck.owner_id != request.user.id:
+            return Response(
+                {"detail": "Only the deck owner can add flashcards"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if len(cards) > 2000:
+            return Response({"detail": "Too many cards (max 2000)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # --------- Clean cards ----------
+        clean_cards = []
+        for i, c in enumerate(cards):
+            if not isinstance(c, dict):
+                return Response(
+                    {"detail": f"cards[{i}] must be an object"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            front = (c.get("front") or "").strip()
+            back = (c.get("back") or "").strip()
+            notes = c.get("notes") or ""
+
+            if not front or not back:
+                continue
+
+            clean_cards.append(
+                {
+                    "front": front,
+                    "back": back,
+                    "notes": notes,
+                }
+            )
+
+        if not clean_cards:
+            return Response(
+                {"detail": "No valid cards to create"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # --------- job_id ----------
+        # reutiliza el del deck si existe, si no crea uno nuevo
+        job_id = deck.external_job_id or str(uuid.uuid4())
+
+        if not deck.external_job_id:
+            deck.external_job_id = job_id
+            deck.save(update_fields=["external_job_id"])
+
+        # --------- Bulk create ----------
+        now = timezone.now()
+        objs = [
+            Flashcard(
+                deck=deck,
+                front=c["front"],
+                back=c["back"],
+                notes=c["notes"],
+                job_id=job_id,
+                user_id=str(request.user.id),
+                kind="new",
+                status="learning",
+                created_at=now,
+                updated_at=now,
+            )
+            for c in clean_cards
+        ]
+
+        Flashcard.objects.bulk_create(objs, batch_size=1000)
+
+        return Response(
+            {
+                "deck_id": deck.id,
+                "job_id": job_id,
+                "cards_added": len(objs),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
 
     @action(detail=True, methods=["post"], url_path="next-card")
     def next_card(self, request, pk=None):
@@ -2485,7 +2590,7 @@ class DeckViewSet(viewsets.ModelViewSet):
                 # return Response({"detail": f"cards[{i}] front and back are required"}, status=status.HTTP_400_BAD_REQUEST)
 
             clean_cards.append({"front": front, "back": back, "notes": notes})
-
+        job_id = uuid.uuid4()
         # --------- Create deck ----------
         deck = Deck.objects.create(
             project=project,
@@ -2493,13 +2598,30 @@ class DeckViewSet(viewsets.ModelViewSet):
             title=title,
             description=description,
             visibility=visibility,
+            external_job_id=job_id,
+            
         )
 
         if attached_section_ids:
             deck.sections.set(sections_qs)
+        
+
+        
+        objs = [
+        Flashcard(
+            deck=deck,
+            front=c["front"],
+            back=c["back"],
+            notes=c["notes"],
+            job_id=str(job_id),                     # ✅ same for all
+            user_id=str(request.user.id),      # ✅ optional but recommended for your multi-user logic
+           
+        )
+        for c in clean_cards
+    ]
 
         # --------- Bulk create flashcards ----------
-        objs = [Flashcard(deck=deck, front=c["front"], back=c["back"], notes=c["notes"]) for c in clean_cards]
+        # objs = [Flashcard(deck=deck, front=c["front"], back=c["back"], notes=c["notes"]) for c in clean_cards]
         Flashcard.objects.bulk_create(objs)
 
         # --------- Response ----------
@@ -2836,6 +2958,10 @@ class FlashcardViewSet(viewsets.ModelViewSet):
     serializer_class = FlashcardSerializer
     permission_classes = [IsAuthenticated]
 
+    
+
+
+
     @action(
     detail=False,
     methods=["post"],
@@ -3058,7 +3184,8 @@ class FlashcardViewSet(viewsets.ModelViewSet):
         user_id = request.data.get("user_id") or str(user.id) or str(uuid.uuid4())
 
         seq = request.data.get("seq")
-        card_id = request.data.get("card_id")
+        card_id = request.data.get("card_id") or 1
+
         rating = request.data.get("rating")
         if seq is None or card_id is None or rating is None:
             return Response({"detail": "seq, card_id and rating are required"}, status=status.HTTP_400_BAD_REQUEST)
