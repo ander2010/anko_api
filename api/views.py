@@ -33,7 +33,7 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate
-from .models import QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt
+from .models import ConversationMessage, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
@@ -294,10 +294,37 @@ class ProjectViewSet(viewsets.ModelViewSet):
             "user_id": user_id,
         }
 
+        session_obj, created = UserSession.objects.get_or_create(
+        session_id=session_id,
+        defaults={"user": request.user},
+        )
+
+        # Optional safety: prevent session hijacking across users
+        if session_obj.user_id != request.user.id:
+            return Response(
+                {"detail": "session_id does not belong to the authenticated user"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+
         # 1) intenta por WS
         try:
             final_msg = asyncio.run(_ask_via_chat_ws(base_url, payload, session_id))
             job_id = final_msg.get("job_id")
+            answer = final_msg.get("answer")  # <-- from your example payload
+
+        # Save conversation message (don’t block response if saving fails)
+            try:
+                ConversationMessage.objects.create(
+                    session=session_obj,
+                    user_id=user_id,
+                    job_id=job_id,
+                    question=question,
+                    answer=answer,
+                )
+            except Exception:
+                logging.exception("Failed to save ConversationMessage for session_id=%s", session_id)   
+                pass
 
             resp_payload = {
                 "ok": True if not final_msg.get("error") else False,
