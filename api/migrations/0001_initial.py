@@ -32,7 +32,7 @@ class Migration(migrations.Migration):
             ],
             options={
                 'db_table': 'conversation_messages',
-                'managed': False,
+                'managed': True,
             },
         ),
         migrations.CreateModel(
