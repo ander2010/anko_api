@@ -20,6 +20,36 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
+            name='ConversationMessage',
+            fields=[
+                ('id', models.AutoField(primary_key=True, serialize=False)),
+                ('session_id', models.CharField(max_length=255)),
+                ('user_id', models.CharField(blank=True, max_length=255, null=True)),
+                ('job_id', models.CharField(blank=True, max_length=255, null=True)),
+                ('question', models.TextField(blank=True, null=True)),
+                ('answer', models.TextField(blank=True, null=True)),
+                ('created_at', models.DateTimeField(blank=True, null=True)),
+            ],
+            options={
+                'db_table': 'conversation_messages',
+                'managed': True,
+            },
+        ),
+        migrations.CreateModel(
+            name='Notification',
+            fields=[
+                ('job_id', models.CharField(max_length=255, primary_key=True, serialize=False)),
+                ('meta', models.JSONField(default=dict)),
+                ('created_at', models.DateTimeField(blank=True, null=True)),
+                ('updated_at', models.DateTimeField(blank=True, null=True)),
+                ('metadata', models.JSONField(blank=True, default=dict, null=True)),
+            ],
+            options={
+                'db_table': 'notifications',
+                'managed': True,
+            },
+        ),
+        migrations.CreateModel(
             name='Tag',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
