@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
+from .models import ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
 from .models import (
     Resource, Permission, Role,
@@ -534,3 +534,16 @@ class CardFeedbackRequestSerializer(serializers.Serializer):
     rating = serializers.IntegerField(required=True)  # 0 hard, 1 good, 2 easy
     time_to_answer_ms = serializers.IntegerField(required=False, default=500)
     token = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class ConversationMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConversationMessage
+        fields = [
+            "id",
+            "user_id",
+            "job_id",
+            "question",
+            "answer",
+            "created_at",
+        ]

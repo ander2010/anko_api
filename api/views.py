@@ -39,7 +39,7 @@ from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AllowedRoutesSerializer, CardFeedbackRequestSerializer, DocumentWithSectionsSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ConversationMessageSerializer, DocumentWithSectionsSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from urllib.parse import quote, urlencode
@@ -217,6 +217,78 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
+    @action(
+        detail=False,
+        methods=["get"],
+        permission_classes=[IsAuthenticated],
+        url_path="chat/session-messages",
+    )
+    def session_messages(self, request):
+        """
+        GET /api/projects/chat/session-messages/?index=1
+
+        index: 1..5
+          1 => sesión más reciente del usuario
+          2 => anteúltima
+          ...
+        Devuelve 10 últimos mensajes (desc) de esa sesión.
+        """
+
+        # 1) validar index
+        raw_index = request.query_params.get("index", "1")
+        try:
+            index = int(raw_index)
+        except ValueError:
+            return Response(
+                {"detail": "index must be an integer between 1 and 5"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if index < 1 or index > 5:
+            return Response(
+                {"detail": "index must be between 1 and 5"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 2) traer sesiones del usuario (más reciente primero)
+        # Si quieres “última añadida” usa created_at.
+        # Si quieres “más activa recientemente” usa updated_at.
+        sessions_qs = (
+            UserSession.objects
+            .filter(user=request.user)
+            .order_by("-created_at")   # o "-updated_at"
+        )
+
+        offset = index - 1
+        session_obj = sessions_qs[offset:offset + 1].first()
+
+        if not session_obj:
+            return Response(
+                {"detail": f"No session found for index={index}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # 3) últimos 10 mensajes de esa sesión
+        msgs_qs = (
+            ConversationMessage.objects
+            .filter(session=session_obj)
+            .order_by("-created_at")[:10]
+        )
+
+        data = ConversationMessageSerializer(msgs_qs, many=True).data
+
+        return Response(
+            {
+                "index": index,
+                "selected_session_pk": session_obj.id,
+                "selected_session_id": session_obj.session_id,  # tu campo string
+                "messages": data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+
 
     @action(detail=True, methods=["GET"], url_path="counts", url_name="project-counts")
     def counts(self, request, pk=None):
