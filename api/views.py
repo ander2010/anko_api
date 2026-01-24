@@ -61,6 +61,9 @@ from .serializers import (
     DeckSerializer, FlashcardSerializer, DeckShareSerializer, SavedDeckSerializer,
     TagSerializer, QaPairSerializer
 )
+from .models import SummaryDocument
+from django.shortcuts import get_object_or_404
+
 
 import requests
 from websocket import create_connection, WebSocketTimeoutException
@@ -889,6 +892,49 @@ class DocumentViewSet(viewsets.ModelViewSet):
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
     
+    def get_queryset(self):
+        user = self.request.user
+        return Document.objects.filter(
+            Q(project__owner=user) | Q(project__members=user)
+        ).distinct()
+    
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="summary")
+    def summary(self, request, pk=None):
+        """
+        GET /api/documents/<id>/summary/
+
+        Returns:
+        {
+          "document_id": 123,
+          "summary": "...",
+          "created_at": "...",
+          "updated_at": "..."
+        }
+        """
+        doc = self.get_object()  # respeta tu get_queryset() (owner/members)
+
+        # Busca el summary asociado (OneToOne)
+        sd = SummaryDocument.objects.filter(document=doc).only(
+            "summary", "created_at", "updated_at", "document_id"
+        ).first()
+
+        if not sd:
+            return Response(
+                {"detail": "Summary not found for this document", "document_id": doc.id},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "document_id": doc.id,
+                "summary": sd.summary or "",
+                "created_at": sd.created_at,
+                "updated_at": sd.updated_at,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-url")
     def download_url(self, request, pk=None):
@@ -934,9 +980,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
 
 
-        # base = "https://italk2.me/content_view"
-        # # url = f"{base}/{mode}?file={storage_key_q}"
-        # url = f"{base}/{mode}?{query}"
+       
 
         return Response({
             "id": doc.id,
@@ -946,102 +990,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             "url": url,
         })
     
-    # def download_url(self, request, pk=None):
-    #     doc = self.get_object()
-
-    #     # seguridad extra (por si cambias get_queryset)
-    #     user = request.user
-    #     can_view = (
-    #         doc.project.owner_id == user.id
-    #         or doc.project.members.filter(id=user.id).exists()
-    #     )
-    #     if not can_view:
-    #         raise PermissionDenied("You do not have access to this document.")
-
-    #     if not doc.file:
-    #         return Response({"detail": "Document has no file"}, status=status.HTTP_404_NOT_FOUND)
-    #     url = doc.file.storage.url(doc.file.name)
-    #     return Response({
-    #         "id": doc.id,
-    #         "filename": doc.filename,
-    #         "storage_key": doc.file.name,  # ej: "anko/documents/migracion.pdf"
-    #         "url": url,           # ✅ URL pública (si bucket es public)
-    #     })
-    # def generate_questions(self, request, pk=None):
-    #     """
-    #     POST /api/documents/<id>/generate-questions/
-    #     Llama al microservicio con process=generate_question y devuelve job_id + ws_url.
-    #     """
-    #     document_id = pk  # desde la URL
-    #     body = request.data or {}
-
-    #     base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
-    #     url = f"{normalize_base_url(base_url)}/process-request"
-
-    #     # params del frontend
-    #     query_text = body.get("query_text")  # puede ser string o lista
-    #     tags = body.get("tags")              # null o lista
-    #     quantity = int(body.get("quantity", 3))
-    #     difficulty = body.get("difficulty", "medium")
-    #     question_format = body.get("question_format", "true_false")
-    #     top_k = body.get("top_k")
-    #     min_importance = body.get("min_importance")
-
-    #     # job_id único (simple)
-    #     job_id = body.get("job_id") or str(uuid.uuid4())
-
-    #     payload = {
-    #         "job_id": job_id,
-    #         "doc_id": str(document_id),   # 👈 estable: el id del Document
-    #         "process": "generate_question",
-    #         "tags": tags,
-    #         "query_text": query_text,
-    #         "top_k": top_k,
-    #         "min_importance": min_importance,
-    #         "quantity_question": quantity,
-    #         "difficulty": difficulty,
-    #         "question_format": question_format,
-    #         "options": {},
-    #     }
-
-    #     try:
-    #         resp = requests.post(url, json=payload, timeout=120)
-    #     except requests.RequestException as e:
-    #         return Response(
-    #             {"success": False, "error": str(e), "request_url": url},
-    #             status=status.HTTP_502_BAD_GATEWAY,
-    #         )
-
-    #     # intenta parsear json
-    #     try:
-    #         data = resp.json()
-    #     except Exception:
-    #         return Response(
-    #             {
-    #                 "success": False,
-    #                 "status_code": resp.status_code,
-    #                 "request_url": url,
-    #                 "request_payload": payload,
-    #                 "response_text": resp.text,
-    #             },
-    #             status=status.HTTP_502_BAD_GATEWAY if not resp.ok else status.HTTP_200_OK,
-    #         )
-
-    #     # si ok, arma ws_url
-    #     ws_job_id = data.get("job_id") or job_id
-    #     ws_url = build_ws_url(base_url, ws_job_id)
-
-    #     return Response(
-    #         {
-    #             "success": resp.ok,
-    #             "request_url": url,
-    #             "request_payload": payload,
-    #             "response": data,
-    #             "job_id": ws_job_id,
-    #             "ws_url": ws_url,
-    #         },
-    #         status=status.HTTP_200_OK if resp.ok else status.HTTP_502_BAD_GATEWAY,
-    #     )
+    
 
 
     @action(detail=True, methods=["post", "get"], url_path="tags")
