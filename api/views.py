@@ -3026,7 +3026,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
     
 
-class FlashcardViewSet(viewsets.ModelViewSet):
+class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     queryset = Flashcard.objects.select_related("deck").all()
     serializer_class = FlashcardSerializer
     permission_classes = [IsAuthenticated]
@@ -3036,7 +3036,7 @@ class FlashcardViewSet(viewsets.ModelViewSet):
         "retrieve",    # GET /api/flashcards/<id>/
         # agrega aquí si quieres cifrar acciones custom:
         "sync_from_job",
-        # "ws_pull_card",
+        "ws_pull_card",
         # "ws_push_feedback",
         # "shuffle_deck_cards",
     }
