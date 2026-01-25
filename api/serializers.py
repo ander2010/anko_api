@@ -57,6 +57,30 @@ class ProjectSerializer(serializers.ModelSerializer):
         return obj.document_set.count()
 
 
+
+
+class DocumentEsSerializer(serializers.ModelSerializer):
+    
+
+    class Meta:
+        model = Document
+        fields = ["id",
+        "filename",
+        
+        "type",
+        "size",
+        "uploaded_at",
+        "status",
+        "processing_error",
+        "extracted_text",
+        # "hash",
+        # "job_id",
+        "project"]
+        # + agrega filename y url porque son fields extra
+
+
+
+
 class DocumentSerializer(serializers.ModelSerializer):
     filename = serializers.SerializerMethodField()
     url = serializers.SerializerMethodField()

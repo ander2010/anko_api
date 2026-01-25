@@ -39,13 +39,15 @@ from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ConversationMessageSerializer, DocumentWithSectionsSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from urllib.parse import quote, urlencode
 from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
 from .models import Tag
+from api.mixins import EncryptSelectedActionsMixin
+
 from .models import (
     Resource, Permission, Role,
     Plan, PlanLimit, Subscription,
@@ -216,10 +218,18 @@ def _ask_via_http(base_url: str, payload: dict) -> Dict[str, Any]:
     out["ok"] = bool(resp.ok)
     return out
 
-class ProjectViewSet(viewsets.ModelViewSet):
+class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
+    encrypted_actions = {
+        "list",
+        # "retrieve",
+        # "documents",
+        "documents_with_sections",
+        # "session_messages",
+        "counts",
+    }
     @action(
         detail=False,
         methods=["get"],
@@ -671,7 +681,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 if hasattr(project, "documents")
                 else project.document_set.all().order_by("-uploaded_at")
             )
-            ser = DocumentSerializer(qs, many=True, context={"request": request})
+            ser = DocumentEsSerializer(qs, many=True, context={"request": request})
             return Response(ser.data)
 
         # =========================
@@ -767,7 +777,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
                 processing.append(
                     {
-                        "document": DocumentSerializer(doc, context={"request": request}).data,
+                        "document": DocumentEsSerializer(doc, context={"request": request}).data,
                         "ws_url": ws_url,
                         "external": external_data,
                     }
@@ -775,7 +785,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
         return Response(
             {
-                "uploaded": DocumentSerializer(created_docs, many=True, context={"request": request}).data,
+                "uploaded": DocumentEsSerializer(created_docs, many=True, context={"request": request}).data,
                 "processing": processing,
             },
             status=status.HTTP_201_CREATED,
@@ -980,7 +990,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
 
 
-       
+        # base = "https://italk2.me/content_view"
+        # # url = f"{base}/{mode}?file={storage_key_q}"
+        # url = f"{base}/{mode}?{query}"
 
         return Response({
             "id": doc.id,
@@ -1155,15 +1167,23 @@ def normalize_storage_key(key: str) -> str:
 
 
 
-class BatteryViewSet(viewsets.ModelViewSet):
+class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     queryset = Battery.objects.all()
     serializer_class = BatterySerializer
+    permission_classes = [IsAuthenticated]
+
 
 
 
     
 
-
+    encrypted_actions = {
+        "list",          # GET /batteries/
+        "retrieve",      # GET /batteries/{id}/
+        "attempts",      # GET custom action
+        "results",       # GET custom action
+        "stats",         # GET custom action
+    }
     
 
 
@@ -2235,11 +2255,16 @@ class InviteViewSet(viewsets.ModelViewSet):
 # Flashcards
 # ==========================================================
 
-class DeckViewSet(viewsets.ModelViewSet):
+class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
     
+    encrypted_actions = {
+        "list",        # GET /decks/
+        "retrieve",    # GET /decks/{id}/
+    }
+
     @action(
     detail=False,
     methods=["post"],
@@ -3006,7 +3031,15 @@ class FlashcardViewSet(viewsets.ModelViewSet):
     serializer_class = FlashcardSerializer
     permission_classes = [IsAuthenticated]
 
-    
+    encrypted_actions = {
+        "list",        # GET /api/flashcards/?deck=...
+        "retrieve",    # GET /api/flashcards/<id>/
+        # agrega aquí si quieres cifrar acciones custom:
+        "sync_from_job",
+        # "ws_pull_card",
+        # "ws_push_feedback",
+        # "shuffle_deck_cards",
+    }
 
 
 
