@@ -2355,6 +2355,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 status="learning",
                 created_at=now,
                 updated_at=now,
+                card_id = str(uuid.uuid4())
             )
             for c in clean_cards
         ]
