@@ -1,4 +1,5 @@
 # from multiprocessing.dummy import connection
+from datetime import timedelta
 import logging
 from urllib import request
 from django.db import connection
@@ -33,7 +34,7 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate
-from .models import ConversationMessage, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
+from .models import ConversationMessage, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
@@ -65,7 +66,7 @@ from .serializers import (
 )
 from .models import SummaryDocument
 from django.shortcuts import get_object_or_404
-
+from django.core.mail import send_mail
 
 import requests
 from websocket import create_connection, WebSocketTimeoutException
@@ -75,26 +76,110 @@ logging.basicConfig(level=logging.INFO)
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
     serializer_class = UserSerializer
+    @staticmethod
+    def _send_verify_email(user, token):
+        verify_url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+        send_mail(
+            subject="Verify your email",
+            message=f"Click to verify: {verify_url}",
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            fail_silently=False,
+        )
+
+
+    @action(
+    detail=False,
+    methods=["post"],
+    permission_classes=[AllowAny],
+    url_path="verify-email",
+)
+    def verify_email(self, request):
+        token = request.data.get("token")
+
+        if not token:
+            return Response({"detail": "token is required"}, status=400)
+
+        ev = get_object_or_404(EmailVerification, token=token)
+
+        if not ev.is_valid():
+            return Response({"detail": "Token expired or invalid"}, status=400)
+
+        ev.verified_at = timezone.now()
+        ev.save(update_fields=["verified_at"])
+
+        ev.user.email_verified = True
+        ev.user.save(update_fields=["email_verified"])
+
+        return Response({"ok": True}, status=200)
+
 
     @action(detail=False, methods=['post'])
     def register(self, request):
         data = request.data
-        # Ensure we received a JSON object / dict — serializers expect a mapping
+
         if not isinstance(data, dict):
             return Response(
-                {'error': f'Invalid data. Expected a JSON object (dict), but got {type(data).__name__}.'},
+                {'error': 'Invalid data. Expected JSON object.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         serializer = UserSerializer(data=data)
-        if serializer.is_valid():
-            user = serializer.save()
-            # ✅ ASIGNAR ROL CLIENT
-            client_role, _ = Role.objects.get_or_create(name="client")
-            user.roles.add(client_role)
-            token, created = Token.objects.get_or_create(user=user)
-            return Response({'token': token.key, 'user': UserSerializer(user).data}, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        user = serializer.save()
+
+        # 🔒 email NO verificado aún
+        user.email_verified = False
+        user.save(update_fields=["email_verified"])
+
+        # ✅ Rol client
+        client_role, _ = Role.objects.get_or_create(name="client")
+        user.roles.add(client_role)
+
+        # 🔑 Token auth
+        token, _ = Token.objects.get_or_create(user=user)
+
+        # 📧 Crear verificación email
+        ev, _ = EmailVerification.objects.update_or_create(
+            user=user,
+            defaults={
+                "expires_at": timezone.now() + timedelta(hours=24),
+                "verified_at": None,
+            },
+        )
+
+        # 📤 Enviar email
+        self._send_verify_email(user, ev.token)
+
+        return Response(
+            {
+                "token": token.key,
+                "user": UserSerializer(user).data,
+                "email_verification": "sent",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+    # @action(detail=False, methods=['post'])
+    # def register(self, request):
+    #     data = request.data
+    #     # Ensure we received a JSON object / dict — serializers expect a mapping
+    #     if not isinstance(data, dict):
+    #         return Response(
+    #             {'error': f'Invalid data. Expected a JSON object (dict), but got {type(data).__name__}.'},
+    #             status=status.HTTP_400_BAD_REQUEST,
+    #         )
+
+    #     serializer = UserSerializer(data=data)
+    #     if serializer.is_valid():
+    #         user = serializer.save()
+    #         # ✅ ASIGNAR ROL CLIENT
+    #         client_role, _ = Role.objects.get_or_create(name="client")
+    #         user.roles.add(client_role)
+    #         token, created = Token.objects.get_or_create(user=user)
+    #         return Response({'token': token.key, 'user': UserSerializer(user).data}, status=status.HTTP_201_CREATED)
+    #     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['post'])
     def login(self, request):

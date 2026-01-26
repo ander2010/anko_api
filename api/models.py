@@ -6,6 +6,8 @@ from django.conf import settings
 import uuid
 class User(AbstractUser):
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
+    email_verified = models.BooleanField(default=False)  # ✅ ADD THIS
+
      # Nuevo (opcional): RBAC
     roles = models.ManyToManyField("Role", blank=True, related_name="users")
 
@@ -808,5 +810,4 @@ class EmailVerification(models.Model):
 
     def is_valid(self):
         return self.verified_at is None and timezone.now() < self.expires_at
-    
     
