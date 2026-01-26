@@ -74,8 +74,7 @@ def encrypt_payload(data_obj, *, token: str) -> dict:
     ciphertext = aesgcm.encrypt(nonce, plaintext, None)
 
     return {
-        "v": 1,
-        "alg": "AES-256-GCM",
+        
         "nonce": _b64url_encode(nonce),
         "ciphertext": _b64url_encode(ciphertext),
     }

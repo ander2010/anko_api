@@ -797,3 +797,16 @@ class ConversationMessage(models.Model):
 
     class Meta:
         db_table = "conversation_messages"
+
+
+
+class EmailVerification(models.Model):
+    user = models.OneToOneField("api.User", on_delete=models.CASCADE, related_name="email_verification")
+    token = models.UUIDField(default=uuid.uuid4, unique=True)
+    expires_at = models.DateTimeField()
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    def is_valid(self):
+        return self.verified_at is None and timezone.now() < self.expires_at
+    
+    

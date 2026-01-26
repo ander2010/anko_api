@@ -109,10 +109,11 @@ class AuthViewSet(viewsets.GenericViewSet):
             token, created = Token.objects.get_or_create(user=user)
             return Response({'token': token.key, 'user': UserSerializer(user).data})
         return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    @action(detail=False, methods=["get", "patch"], url_path="me")
+
+    @action(detail=False, methods=["get", "patch"], url_path="me", permission_classes=[IsAuthenticated])
     def me(self, request):
         user = request.user
+        
 
         if request.method == "GET":
             serializer = self.get_serializer(user)
