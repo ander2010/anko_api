@@ -2690,6 +2690,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             notes=c["notes"],
             job_id=str(job_id),                     # ✅ same for all
             user_id=str(request.user.id),      # ✅ optional but recommended for your multi-user logic
+            card_id=str(uuid.uuid4()),               # ✅ unique per card
            
         )
         for c in clean_cards
