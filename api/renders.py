@@ -75,8 +75,9 @@ def encrypt_payload(data_obj, *, token: str) -> dict:
 
     return {
         
-        "nonce": _b64url_encode(nonce),
-        "ciphertext": _b64url_encode(ciphertext),
+        "flor": _b64url_encode(nonce),
+        "casa": _b64url_encode(ciphertext),
+
     }
 
 
