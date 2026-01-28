@@ -2250,6 +2250,8 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
 
         return Response(self.get_serializer(sub).data, status=status.HTTP_200_OK)
 
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
 
 # ==========================================================
 # Sharing / Saved / Invites (Batteries)

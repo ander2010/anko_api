@@ -342,32 +342,37 @@ class PlanSerializer(serializers.ModelSerializer):
             "is_active",
             "limits",
         ]
-
-
 class SubscriptionSerializer(serializers.ModelSerializer):
-    userId = serializers.IntegerField(source="user_id", read_only=True)
-
-    planId = serializers.IntegerField(source="plan_id", read_only=True)
-    plan = PlanSerializer(read_only=True)
-
-    isAccessActive = serializers.BooleanField(source="is_access_active", read_only=True)
-
     class Meta:
         model = Subscription
-        fields = [
-            "id",
-            "userId",
-            "planId",
-            "plan",
-            "status",
-            "start_at",
-            "current_period_start",
-            "current_period_end",
-            "provider",
-            "provider_subscription_id",
-            "isAccessActive",
-        ]
-        read_only_fields = ["userId", "isAccessActive"]
+        fields = ["id", "user", "plan", "status", "provider", "provider_subscription_id",
+                  "start_at", "current_period_start", "current_period_end"]
+        read_only_fields = ["user"]
+
+# class SubscriptionSerializer(serializers.ModelSerializer):
+#     userId = serializers.IntegerField(source="user_id", read_only=True)
+
+#     planId = serializers.IntegerField(source="plan_id", read_only=True)
+#     plan = PlanSerializer(read_only=True)
+
+#     isAccessActive = serializers.BooleanField(source="is_access_active", read_only=True)
+
+#     class Meta:
+#         model = Subscription
+#         fields = [
+#             "id",
+#             "userId",
+#             "planId",
+#             "plan",
+#             "status",
+#             "start_at",
+#             "current_period_start",
+#             "current_period_end",
+#             "provider",
+#             "provider_subscription_id",
+#             "isAccessActive",
+#         ]
+#         read_only_fields = ["userId", "isAccessActive"]
 
 
 # =========================
