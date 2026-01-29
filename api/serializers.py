@@ -1,3 +1,4 @@
+from anko_core import settings
 from rest_framework import serializers
 from .models import ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
@@ -9,6 +10,8 @@ from .models import (
     Tag, QaPair
 )
 import uuid
+from dj_rest_auth.serializers import PasswordResetSerializer
+
 User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
@@ -576,3 +579,20 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
             "answer",
             "created_at",
         ]
+
+
+
+
+class FrontendPasswordResetSerializer(PasswordResetSerializer):
+    def get_email_options(self):
+        """
+        Esto controla los params del PasswordResetForm.save().
+        Si pasas `url_generator`, dj-rest-auth usará ESA función para armar el link.
+        """
+        def url_generator(request, user, temp_key):
+            # temp_key es el token
+            uid = user.pk  # en tu email sale "1", o sea esto es lo que estás usando
+            frontend = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+            return f"{frontend}/reset-password/{uid}/{temp_key}"
+
+        return {"url_generator": url_generator}

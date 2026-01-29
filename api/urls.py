@@ -2,13 +2,15 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    AuthViewSet, RBACViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
+    AuthViewSet, FrontendPasswordResetView, RBACViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
     SectionViewSet, TopicViewSet, RuleViewSet, BatteryViewSet,
     ResourceViewSet, PermissionViewSet, RoleViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
     BatteryShareViewSet, SavedBatteryViewSet, InviteViewSet,
     DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet,GoogleLoginView, FacebookLoginView
 )
+from dj_rest_auth.views import PasswordResetView, PasswordResetConfirmView
+
 
 router = DefaultRouter()
 router.register(r'auth', AuthViewSet, basename='auth')
@@ -48,4 +50,19 @@ urlpatterns = [
     path('', include(router.urls)),
     path("auth/google/", GoogleLoginView.as_view(), name="google_login"),
     path("auth/facebook/", FacebookLoginView.as_view(), name="facebook_login"),
+   path("auth/password-reset/", FrontendPasswordResetView.as_view(), name="password_reset"),
+
+ 
+    path(
+        "auth/password-reset-confirm/<uidb64>/<token>/",
+        PasswordResetConfirmView.as_view(),
+        name="password_reset_confirm",
+    ),
+
+
+    path(
+        "auth/password-reset-confirm/",
+        PasswordResetConfirmView.as_view(),
+        name="password_reset_confirm_post",
+    ),
 ]

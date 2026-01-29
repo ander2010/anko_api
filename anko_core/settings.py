@@ -209,4 +209,11 @@ AUTHENTICATION_BACKENDS = [
 
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 DEFAULT_FROM_EMAIL = "no-reply@anko.local"
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+DJ_REST_AUTH = {
+    "PASSWORD_RESET_CONFIRM_URL": "/reset-password/{uid}/{token}",
+}
+
+REST_AUTH_SERIALIZERS = {
+    "PASSWORD_RESET_SERIALIZER": "api.auth.password_reset.CustomPasswordResetSerializer",
+}

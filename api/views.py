@@ -6,6 +6,7 @@ from django.db import connection
 from redis import Redis
 from django.conf import settings
 import os
+from dj_rest_auth.views import PasswordResetView
 import uuid
 import json
 import hashlib
@@ -40,7 +41,7 @@ from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from urllib.parse import quote, urlencode
@@ -3770,3 +3771,8 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         user = self.request.user
         serializer.save(user=user, email=user.email)
+
+
+
+class FrontendPasswordResetView(PasswordResetView):
+    serializer_class = FrontendPasswordResetSerializer
