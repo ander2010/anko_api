@@ -78,52 +78,105 @@ class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
     serializer_class = UserSerializer
     @staticmethod
-    def _send_verify_email(user, token):
+    def _send_verify_email( user, token):
+    # Ajusta a tu frontend real:
         verify_url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+
+        subject = "Verify your email"
+        message = (
+            f"Hi {user.username},\n\n"
+            f"Please verify your email by clicking the link below:\n\n"
+            f"{verify_url}\n\n"
+            f"This link expires in 24 hours.\n"
+        )
+
         send_mail(
-            subject="Verify your email",
-            message=f"Click to verify: {verify_url}",
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [user.email],
             fail_silently=False,
         )
 
 
-    @action(
-    detail=False,
-    methods=["post"],
-    permission_classes=[AllowAny],
-    url_path="verify-email",
-)
+
+
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="resend-verification")
+    def resend_verification(self, request):
+        email = (request.data.get("username") or "").strip().lower()
+        if not email:
+            return Response({"detail": "email is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(username__iexact=email).first()
+
+        # no revelar si existe o no
+        if not user:
+            return Response({"ok": True}, status=status.HTTP_200_OK)
+
+        if user.email_verified:
+            return Response({"detail": "Email already verified"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ✅ FIX: defaults para que no cree con expires_at NULL
+        ev, created = EmailVerification.objects.get_or_create(
+            user=user,
+            defaults={
+                "token": uuid.uuid4(),
+                "expires_at": timezone.now() + timedelta(hours=24),
+                "verified_at": None,
+            },
+        )
+
+        
+        if not created:
+            ev.token = uuid.uuid4()
+            ev.expires_at = timezone.now() + timedelta(hours=24)
+            ev.verified_at = None
+            ev.save(update_fields=["token", "expires_at", "verified_at"])
+
+        self._send_verify_email(user, ev.token)
+        return Response({"ok": True}, status=status.HTTP_200_OK)
+
+
+
+
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="verify-email")
     def verify_email(self, request):
-        token = request.data.get("token")
+        raw_token = request.data.get("token")
 
-        if not token:
-            return Response({"detail": "token is required"}, status=400)
+        if not raw_token:
+            return Response({"detail": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        ev = get_object_or_404(EmailVerification, token=token)
+        # ✅ convertir string -> UUID (evita bugs)
+        try:
+            token_uuid = uuid.UUID(str(raw_token).strip())
+        except Exception:
+            return Response({"detail": "Invalid token format"}, status=status.HTTP_400_BAD_REQUEST)
+
+        ev = get_object_or_404(EmailVerification, token=token_uuid)
 
         if not ev.is_valid():
-            return Response({"detail": "Token expired or invalid"}, status=400)
+            return Response({"detail": "Token expired or already used"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # ✅ marcar verificado
         ev.verified_at = timezone.now()
         ev.save(update_fields=["verified_at"])
 
-        ev.user.email_verified = True
-        ev.user.save(update_fields=["email_verified"])
+        user = ev.user
+        user.email_verified = True
+        user.save(update_fields=["email_verified"])
 
-        return Response({"ok": True}, status=200)
+        # ✅ ahora sí: emitir token auth
+        token_obj, _ = Token.objects.get_or_create(user=user)
+
+        return Response(
+            {"ok": True, "token": token_obj.key, "user": UserSerializer(user).data},
+            status=status.HTTP_200_OK,
+        )
 
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny])
     def register(self, request):
         data = request.data
-
-        if not isinstance(data, dict):
-            return Response(
-                {'error': 'Invalid data. Expected JSON object.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         serializer = UserSerializer(data=data)
         if not serializer.is_valid():
@@ -131,37 +184,111 @@ class AuthViewSet(viewsets.GenericViewSet):
 
         user = serializer.save()
 
-        # 🔒 email NO verificado aún
+        # 🔒 email aún NO verificado
         user.email_verified = False
         user.save(update_fields=["email_verified"])
 
-        # ✅ Rol client
+        # ✅ rol client
         client_role, _ = Role.objects.get_or_create(name="client")
         user.roles.add(client_role)
 
-        # 🔑 Token auth
-        token, _ = Token.objects.get_or_create(user=user)
+        # ❌ importante: elimina token de auth si existiera
+        Token.objects.filter(user=user).delete()
 
-        # 📧 Crear verificación email
-        ev, _ = EmailVerification.objects.update_or_create(
-            user=user,
-            defaults={
-                "expires_at": timezone.now() + timedelta(hours=24),
-                "verified_at": None,
-            },
-        )
+        # ✅ crea o regenera verificación
+        ev, _ = EmailVerification.objects.get_or_create(user=user)
+        ev.token = uuid.uuid4()
+        ev.expires_at = timezone.now() + timedelta(hours=24)
+        ev.verified_at = None
+        ev.save(update_fields=["token", "expires_at", "verified_at"])
 
-        # 📤 Enviar email
         self._send_verify_email(user, ev.token)
 
         return Response(
             {
-                "token": token.key,
+                "ok": True,
+                "detail": "Account created. Please verify your email to login.",
                 "user": UserSerializer(user).data,
-                "email_verification": "sent",
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny])
+    def login(self, request):
+        username = (request.data.get("username") or "").strip()
+        password = (request.data.get("password") or "").strip()
+
+        if not username or not password:
+            return Response(
+                {"error": "username and password are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = authenticate(username=username, password=password)
+        if user is None:
+            return Response({"error": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ✅ BLOQUEO si no verificó
+        if not user.email_verified:
+            return Response(
+                {"error": "Email not verified", "code": "email_not_verified"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response(
+            {"token": token.key, "user": UserSerializer(user).data},
+            status=status.HTTP_200_OK,
+        )
+
+    # @action(detail=False, methods=['post'])
+    # def register(self, request):
+    #     data = request.data
+
+    #     if not isinstance(data, dict):
+    #         return Response(
+    #             {'error': 'Invalid data. Expected JSON object.'},
+    #             status=status.HTTP_400_BAD_REQUEST,
+    #         )
+
+    #     serializer = UserSerializer(data=data)
+    #     if not serializer.is_valid():
+    #         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    #     user = serializer.save()
+
+    #     # 🔒 email NO verificado aún
+    #     user.email_verified = False
+    #     user.save(update_fields=["email_verified"])
+
+    #     # ✅ Rol client
+    #     client_role, _ = Role.objects.get_or_create(name="client")
+    #     user.roles.add(client_role)
+
+    #     # 🔑 Token auth
+    #     token, _ = Token.objects.get_or_create(user=user)
+
+    #     # 📧 Crear verificación email
+    #     ev, _ = EmailVerification.objects.update_or_create(
+    #         user=user,
+    #         defaults={
+    #             "expires_at": timezone.now() + timedelta(hours=24),
+    #             "verified_at": None,
+    #         },
+    #     )
+
+    #     # 📤 Enviar email
+    #     self._send_verify_email(user, ev.token)
+
+    #     return Response(
+    #         {
+    #             "token": token.key,
+    #             "user": UserSerializer(user).data,
+    #             "email_verification": "sent",
+    #         },
+    #         status=status.HTTP_201_CREATED,
+    #     )
     # @action(detail=False, methods=['post'])
     # def register(self, request):
     #     data = request.data
@@ -182,19 +309,19 @@ class AuthViewSet(viewsets.GenericViewSet):
     #         return Response({'token': token.key, 'user': UserSerializer(user).data}, status=status.HTTP_201_CREATED)
     #     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['post'])
-    def login(self, request):
-        username = request.data.get('username')
-        password = request.data.get('password')
-        if username is None or password is None:
-            return Response({'error': 'username and password are required'}, status=status.HTTP_400_BAD_REQUEST)
-        if str(username).strip() == '' or str(password).strip() == '':
-            return Response({'error': 'username and password cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
-        user = authenticate(username=username, password=password)
-        if user is not None:
-            token, created = Token.objects.get_or_create(user=user)
-            return Response({'token': token.key, 'user': UserSerializer(user).data})
-        return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
+    # @action(detail=False, methods=['post'])
+    # def login(self, request):
+    #     username = request.data.get('username')
+    #     password = request.data.get('password')
+    #     if username is None or password is None:
+    #         return Response({'error': 'username and password are required'}, status=status.HTTP_400_BAD_REQUEST)
+    #     if str(username).strip() == '' or str(password).strip() == '':
+    #         return Response({'error': 'username and password cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
+    #     user = authenticate(username=username, password=password)
+    #     if user is not None:
+    #         token, created = Token.objects.get_or_create(user=user)
+    #         return Response({'token': token.key, 'user': UserSerializer(user).data})
+    #     return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=["get", "patch"], url_path="me", permission_classes=[IsAuthenticated])
     def me(self, request):
