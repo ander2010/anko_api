@@ -217,3 +217,19 @@ DJ_REST_AUTH = {
 REST_AUTH_SERIALIZERS = {
     "PASSWORD_RESET_SERIALIZER": "api.auth.password_reset.CustomPasswordResetSerializer",
 }
+
+
+# ===============================
+# EMAIL CONFIG (SMTP)
+# ===============================
+
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+
+EMAIL_HOST = "smtp.hostinger.com"
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+
+EMAIL_HOST_USER = "info@ankard.com"
+EMAIL_HOST_PASSWORD = "BigShark16!"
+
+DEFAULT_FROM_EMAIL = "Ankard <info@ankard.com>"
