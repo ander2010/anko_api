@@ -465,7 +465,7 @@ class Invite(models.Model):
     expires_at = models.DateTimeField(null=True, blank=True)
 
     accepted_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="accepted_invites"
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True, related_name="accepted_invites"
     )
     accepted_at = models.DateTimeField(null=True, blank=True)
 
