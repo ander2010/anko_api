@@ -25,10 +25,19 @@ BEGIN
   LOOP
     EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I;', r.table_name, r.constraint_name);
     EXECUTE format(
-      'ALTER TABLE %s ADD CONSTRAINT %I %s ON DELETE CASCADE;',
+      'ALTER TABLE %s ADD CONSTRAINT %I %s;',
       r.table_name,
       r.constraint_name,
-      regexp_replace(r.definition, ' ON DELETE [A-Z ]+', '')
+      CASE
+        WHEN r.definition ~ ' DEFERRABLE' THEN
+          regexp_replace(
+            regexp_replace(r.definition, ' ON DELETE [A-Z ]+', ''),
+            ' DEFERRABLE',
+            ' ON DELETE CASCADE DEFERRABLE'
+          )
+        ELSE
+          regexp_replace(r.definition, ' ON DELETE [A-Z ]+', '') || ' ON DELETE CASCADE'
+      END
     );
   END LOOP;
 END$$;
