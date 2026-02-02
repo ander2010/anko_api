@@ -9,6 +9,9 @@ from .models import (
     Deck, Flashcard, DeckShare, SavedDeck,
     Tag, QaPair
 )
+
+from django.contrib.auth.password_validation import validate_password
+from django.core import exceptions
 import uuid
 from dj_rest_auth.serializers import PasswordResetSerializer
 
@@ -22,10 +25,20 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'email', 'password', 'avatar', 'first_name', 'last_name','roles']
         read_only_fields = ["id"]
 
+    def validate_password(self, value):
+        try:
+            # Puedes pasar user=None si aún no existe, o cargar el user si es un UPDATE
+            validate_password(value, user=self.instance)
+        except exceptions.ValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
+
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError("A user with this email already exists.")
         return value
+
+
 
     def create(self, validated_data):
         password = validated_data.pop('password')
