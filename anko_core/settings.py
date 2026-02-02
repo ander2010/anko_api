@@ -195,7 +195,7 @@ AUTH_USER_MODEL = 'api.User'
 
 FRONTEND_URLS = [
     url.strip()
-    for url in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")
+    for url in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",")
     if url.strip()
 ]
 
