@@ -222,6 +222,12 @@ REST_AUTH_SERIALIZERS = {
     "PASSWORD_RESET_SERIALIZER": "api.serializers.FrontendPasswordResetSerializer",
 }
 
+# allauth settings
+ACCOUNT_EMAIL_REQUIRED = True
+ACCOUNT_UNIQUE_EMAIL = True
+ACCOUNT_USERNAME_REQUIRED = True
+ACCOUNT_AUTHENTICATION_METHOD = 'username_email' # allow both
+
 
 # ===============================
 # EMAIL CONFIG (SMTP)

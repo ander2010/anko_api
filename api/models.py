@@ -5,6 +5,7 @@ from django.utils import timezone
 from django.conf import settings
 import uuid
 class User(AbstractUser):
+    email = models.EmailField(unique=True)
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
     email_verified = models.BooleanField(default=False)  # ✅ ADD THIS
 
