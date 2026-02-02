@@ -1,4 +1,4 @@
-from anko_core import settings
+from django.conf import settings
 from rest_framework import serializers
 from .models import ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
