@@ -228,6 +228,8 @@ REST_AUTH_SERIALIZERS = {
     "PASSWORD_RESET_SERIALIZER": "api.serializers.FrontendPasswordResetSerializer",
 }
 
+CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",")
+
 # allauth settings
 ACCOUNT_EMAIL_REQUIRED = True
 ACCOUNT_UNIQUE_EMAIL = True

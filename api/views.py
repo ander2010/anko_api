@@ -1,5 +1,5 @@
 from django.conf import settings
-#from django.contrib.auth.views import PasswordResetView
+from django.contrib.auth.views import PasswordResetView
 
 
 # from multiprocessing.dummy import connection
@@ -10,7 +10,7 @@ from django.db import connection
 from redis import Redis
 from django.conf import settings
 import os
-from dj_rest_auth.views import PasswordResetView
+#from dj_rest_auth.views import PasswordResetView
 import uuid
 import json
 import hashlib
