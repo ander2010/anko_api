@@ -38,7 +38,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, login
 from .models import ConversationMessage, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
 from decimal import Decimal
 from django.db.models import Q
@@ -239,6 +239,8 @@ class AuthViewSet(viewsets.GenericViewSet):
                 {"error": "Email not verified", "code": "email_not_verified"},
                 status=status.HTTP_403_FORBIDDEN,
             )
+
+        login(request, user)
 
         token, _ = Token.objects.get_or_create(user=user)
         return Response(
