@@ -5,7 +5,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("api", "0001_initial"),
+        ("api", "0005_alter_user_email"),
     ]
 
     operations = [
