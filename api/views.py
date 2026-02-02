@@ -1115,6 +1115,69 @@ class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=["post"], url_path="register")
+    def register(self, request):
+        project_id = request.data.get("project_id")
+        filename = request.data.get("filename")
+        file_key = request.data.get("file_key")
+        file_size = request.data.get("size")
+        file_type = request.data.get("type", "PDF")
+        file_hash = request.data.get("hash")
+
+        if not all([project_id, filename, file_key, file_hash]):
+            return Response(
+                {"detail": "Missing required fields (project_id, filename, file_key, hash)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        project = get_object_or_404(Project, id=project_id)
+        # Check access
+        if project.owner != request.user and not project.members.filter(id=request.user.id).exists():
+            return Response({"detail": "No access to project"}, status=status.HTTP_403_FORBIDDEN)
+
+        doc = Document.objects.filter(project=project, hash=file_hash).first()
+        if not doc:
+            doc = Document(
+                project=project,
+                filename=filename,
+                type=file_type,
+                size=file_size or 0,
+                hash=file_hash,
+                status='pending'
+            )
+            doc.file.name = file_key
+            doc._uploader_id = request.user.id
+            doc.save()
+        
+        try:
+            base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+            base_url = (base_url or "").rstrip("/")
+            url = f"{os.getenv('PROCESS_REQUEST_BASE_URL', 'http://localhost:8080')}/process-request"
+
+            job_id = str(uuid.uuid4())
+            payload = {
+                "job_id": job_id,
+                "doc_id": doc.id,
+                "file_path": doc.file.name,   
+                "process": "process_pdf",
+                "options": {},
+            }
+            r = requests.post(url, json=payload, timeout=60)
+            data = r.json()
+            job_id = data.get("job_id", job_id)
+
+            ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+            ws_url = f"{ws_base}/ws/progress/{job_id}"
+        except Exception as e:
+            data = {"success": False, "error": str(e)}
+            ws_url = None
+
+        return Response({
+            "document": DocumentSerializer(doc, context={"request": request}).data,
+            "ws_url": ws_url,
+            "external": data,
+        }, status=status.HTTP_201_CREATED)
     
     def get_queryset(self):
         user = self.request.user
