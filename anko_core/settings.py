@@ -193,6 +193,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 AUTH_USER_MODEL = 'api.User'
 
+FRONTEND_URLS = [
+    url.strip()
+    for url in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")
+    if url.strip()
+]
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
@@ -203,7 +209,8 @@ REST_FRAMEWORK = {
     ],
 }
 
-CORS_ALLOW_ALL_ORIGINS = True  # For development
+CORS_ALLOWED_ORIGINS = FRONTEND_URLS
+CORS_ALLOW_CREDENTIALS = True
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -219,7 +226,6 @@ SERVER_EMAIL = "info@ankard.com"
 EMAIL_HOST_USER = "info@ankard.com"
 SITE_NAME = "Ankard"
 DOMAIN = "ankard.com"
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 DJ_REST_AUTH = {
     "PASSWORD_RESET_CONFIRM_URL": "/reset-password/{uid}/{token}",
 }
@@ -228,7 +234,7 @@ REST_AUTH_SERIALIZERS = {
     "PASSWORD_RESET_SERIALIZER": "api.serializers.FrontendPasswordResetSerializer",
 }
 
-CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",")
+CSRF_TRUSTED_ORIGINS = FRONTEND_URLS
 
 # allauth settings
 ACCOUNT_EMAIL_REQUIRED = True

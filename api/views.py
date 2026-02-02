@@ -3971,8 +3971,8 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
 
 class FrontendPasswordResetView(PasswordResetView):
     # serializer_class = FrontendPasswordResetSerializer    class FrontendPasswordResetView(PasswordResetView):
-        email_template_name = 'templates/registration/password_reset_email.html'
-        subject_template_name = 'templates/registration/password_reset_subject.txt'
+        email_template_name = 'registration/password_reset_email.html'
+        subject_template_name = 'registration/password_reset_subject.txt'
     
         def get_email_options(self):
             return {
