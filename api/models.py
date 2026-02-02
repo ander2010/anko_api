@@ -800,12 +800,13 @@ class ConversationMessage(models.Model):
     class Meta:
         db_table = "conversation_messages"
 
-
+def tomorrow():
+    return timezone.now() + timezone.timedelta(days=1)
 
 class EmailVerification(models.Model):
     user = models.OneToOneField("api.User", on_delete=models.CASCADE, related_name="email_verification")
     token = models.UUIDField(default=uuid.uuid4, unique=True)
-    expires_at = models.DateTimeField()
+    expires_at = models.DateTimeField(default=tomorrow)
     verified_at = models.DateTimeField(null=True, blank=True)
 
     def is_valid(self):
