@@ -10,7 +10,7 @@ class User(AbstractUser):
     email_verified = models.BooleanField(default=False)  # ✅ ADD THIS
 
      # Nuevo (opcional): RBAC
-    roles = models.ManyToManyField("Role", blank=True, related_name="users")
+    roles = models.ManyToManyField("Role", blank=True, related_name="users", through="UserRole")
 
     def __str__(self):
         return self.username
@@ -55,6 +55,15 @@ class Role(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class UserRole(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    role = models.ForeignKey(Role, on_delete=models.CASCADE)
+
+    class Meta:
+        db_table = "api_user_roles"
+        unique_together = ("user", "role")
 
 
 # ==========================================================
