@@ -10,7 +10,7 @@ from django.db import connection
 from redis import Redis
 from django.conf import settings
 import os
-from dj_rest_auth.views import PasswordResetView
+# from dj_rest_auth.views import PasswordResetView
 import uuid
 import json
 import hashlib

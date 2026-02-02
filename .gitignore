@@ -59,6 +59,7 @@ staticfiles/
 .env
 .env.*
 .venv/
+/.venv/
 venv/
 ENV/
 env/
