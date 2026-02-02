@@ -1,3 +1,7 @@
+from django.conf import settings
+from django.contrib.auth.views import PasswordResetView
+
+
 # from multiprocessing.dummy import connection
 from datetime import timedelta
 import logging
@@ -3963,6 +3967,26 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
         serializer.save(user=user, email=user.email)
 
 
-
 class FrontendPasswordResetView(PasswordResetView):
-    serializer_class = FrontendPasswordResetSerializer
+    # serializer_class = FrontendPasswordResetSerializer    class FrontendPasswordResetView(PasswordResetView):
+        email_template_name = 'registration/password_reset_email.html'
+        subject_template_name = 'registration/password_reset_subject.txt'
+    
+        def get_email_options(self):
+            return {
+                "domain_override": "ankard.com",
+                "from_email": settings.DEFAULT_FROM_EMAIL,
+                "subject_template_name": self.subject_template_name,
+                "email_template_name": self.email_template_name,
+            }
+
+# class FrontendPasswordResetView(PasswordResetView):
+#     serializer_class = FrontendPasswordResetSerializer
+    
+#     def get_email_options(self):
+#         return {
+#             "domain_override": "ankard.com",
+#             "from_email": settings.DEFAULT_FROM_EMAIL,
+#             "subject_template_name": "registration/password_reset_subject.txt",
+#             "email_template_name": "registration/password_reset_email.html",
+#         }
