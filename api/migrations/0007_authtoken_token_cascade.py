@@ -5,6 +5,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("api", "0006_emailverification_cascade"),
+        ("authtoken", "0001_initial"),
     ]
 
     operations = [
