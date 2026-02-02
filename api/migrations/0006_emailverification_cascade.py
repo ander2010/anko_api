@@ -4,7 +4,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("api", "0005_alter_user_email"),
+        ("api", "0002_user_roles_cascade"),
     ]
 
     operations = [
