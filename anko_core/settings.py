@@ -227,6 +227,7 @@ ACCOUNT_EMAIL_REQUIRED = True
 ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_USERNAME_REQUIRED = True
 ACCOUNT_AUTHENTICATION_METHOD = 'username_email' # allow both
+ACCOUNT_EMAIL_VERIFICATION = 'mandatory'
 
 
 # ===============================
