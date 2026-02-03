@@ -215,11 +215,6 @@ CSRF_TRUSTED_ORIGINS = [
     "https://www.ankard.com",
     "https://italk2.me",
 
-    # 🧪 Desarrollo local
-    "http://localhost:5173",
-    "http://localhost:5175",
-    "http://localhost:5177",
-    "http://localhost:5178",
 ]
 CORS_ALLOWED_ORIGINS = [
     "https://ankard.com",
@@ -285,7 +280,6 @@ ACCOUNT_SIGNUP_FIELDS = [
     "password2*",
 ]
 
-PASSWORD_RESET_USE_SITES_DOMAIN="https://ankard.com"
 
 # ===============================
 # EMAIL CONFIG (SMTP)
