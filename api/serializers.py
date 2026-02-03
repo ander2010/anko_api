@@ -643,3 +643,8 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
             user_count,
         )
         return value
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField()
+    new_password = serializers.CharField(min_length=8)
