@@ -22,13 +22,11 @@ warnings.filterwarnings(
     "ignore",
     message=r"app_settings\.USERNAME_REQUIRED is deprecated",
     category=UserWarning,
-    module=r"allauth\.account\.app_settings",
 )
 warnings.filterwarnings(
     "ignore",
     message=r"app_settings\.EMAIL_REQUIRED is deprecated",
     category=UserWarning,
-    module=r"allauth\.account\.app_settings",
 )
 
 DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
