@@ -49,7 +49,7 @@ from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from urllib.parse import quote, urlencode
@@ -85,6 +85,30 @@ logging.basicConfig(level=logging.INFO)
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
     serializer_class = UserSerializer
+
+
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="change-password")
+    def change_password(self, request):
+        ser = ChangePasswordSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        user = request.user
+        old_password = ser.validated_data["old_password"]
+        new_password = ser.validated_data["new_password"]
+
+        if not user.check_password(old_password):
+            return Response({"detail": "Old password is incorrect"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)  # ✅ HASH
+        user.save(update_fields=["password"])
+
+        # (opcional) invalidar tokens existentes
+        Token.objects.filter(user=user).delete()
+
+        return Response({"ok": True}, status=status.HTTP_200_OK)
+
+        
     @staticmethod
     def _send_verify_email( user, token):
     # Ajusta a tu frontend real:

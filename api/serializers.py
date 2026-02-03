@@ -615,3 +615,8 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
             return f"{frontend}/reset-password/{uid}/{temp_key}"
 
         return {"url_generator": url_generator}
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField()
+    new_password = serializers.CharField(min_length=8)
