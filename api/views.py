@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.contrib.auth.views import PasswordResetView
+# from django.contrib.auth.views import PasswordResetView
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
@@ -12,6 +12,9 @@ from django.db import connection
 from redis import Redis
 from django.conf import settings
 import os
+from dj_rest_auth.views import PasswordResetView
+from rest_framework.permissions import AllowAny
+
 #from dj_rest_auth.views import PasswordResetView
 import uuid
 import json

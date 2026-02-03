@@ -51,7 +51,8 @@ urlpatterns = [
     path('', include(router.urls)),
     path("auth/google/", GoogleLoginView.as_view(), name="google_login"),
     path("auth/facebook/", FacebookLoginView.as_view(), name="facebook_login"),
-   path("auth/password-reset/", csrf_exempt(FrontendPasswordResetView.as_view()), name="password_reset"),
+    path("auth/password-reset/", FrontendPasswordResetView.as_view(), name="password_reset"),
+
 
  
     path(

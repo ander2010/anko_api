@@ -196,10 +196,22 @@ AUTH_USER_MODEL = 'api.User'
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 CSRF_TRUSTED_ORIGINS = [
-    url.strip()
-    for url in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",")
-    if url.strip()
-] + ["http://localhost:5177", "http://localhost:5178", "http://localhost:5175"]
+    # 🔐 Producción
+    "https://ankard.com",
+    "https://www.ankard.com",
+    "https://italk2.me",
+
+    # 🧪 Desarrollo local
+    "http://localhost:5173",
+    "http://localhost:5175",
+    "http://localhost:5177",
+    "http://localhost:5178",
+]
+CORS_ALLOWED_ORIGINS = [
+    "https://ankard.com",
+    "https://www.ankard.com",
+]
+
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
