@@ -11,6 +11,7 @@ from .models import (
     Tag, QaPair
 )
 
+import re
 from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
 import uuid
@@ -18,6 +19,16 @@ import logging
 from dj_rest_auth.serializers import PasswordResetSerializer
 
 User = get_user_model()
+
+def _validate_password_complexity(value):
+    if not re.search(r"[a-z]", value):
+        raise serializers.ValidationError("Must include a lowercase letter.")
+    if not re.search(r"[A-Z]", value):
+        raise serializers.ValidationError("Must include an uppercase letter.")
+    if not re.search(r"\d", value):
+        raise serializers.ValidationError("Must include a number.")
+    if not re.search(r"[^\w\s]", value):
+        raise serializers.ValidationError("Must include a special character.")
 
 class UserSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(required=True)
@@ -30,6 +41,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     def validate_password(self, value):
         try:
+            _validate_password_complexity(value)
             # Puedes pasar user=None si aún no existe, o cargar el user si es un UPDATE
             validate_password(value, user=self.instance)
         except exceptions.ValidationError as e:
@@ -649,3 +661,13 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField()
     new_password = serializers.CharField(min_length=8)
+
+    def validate_new_password(self, value):
+        _validate_password_complexity(value)
+
+        # Avoid info contained in user table (username, email, etc.)
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        validate_password(value, user=user)
+
+        return value
