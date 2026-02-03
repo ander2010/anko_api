@@ -3975,11 +3975,9 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class FrontendPasswordResetView(PasswordResetView):
-    # serializer_class = FrontendPasswordResetSerializer    class FrontendPasswordResetView(PasswordResetView):
         permission_classes = [AllowAny]
-        email_template_name = 'registration/password_reset_email.html'
-        subject_template_name = 'registration/password_reset_subject.txt'
-    
+        authentication_classes = [] 
+           
         def get_email_options(self):
             return {
                 "domain_override": "ankard.com",
