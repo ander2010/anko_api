@@ -285,6 +285,7 @@ ACCOUNT_SIGNUP_FIELDS = [
     "password2*",
 ]
 
+PASSWORD_RESET_USE_SITES_DOMAIN="https://ankard.com"
 
 # ===============================
 # EMAIL CONFIG (SMTP)
