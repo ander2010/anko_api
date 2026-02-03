@@ -465,7 +465,7 @@ class Invite(models.Model):
     expires_at = models.DateTimeField(null=True, blank=True)
 
     accepted_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="accepted_invites"
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True, related_name="accepted_invites"
     )
     accepted_at = models.DateTimeField(null=True, blank=True)
 
@@ -729,23 +729,6 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"Notification {self.job_id}"
-
-
-class ConversationMessage(models.Model):
-    id = models.AutoField(primary_key=True)
-    session_id = models.CharField(max_length=255)
-    user_id = models.CharField(max_length=255, null=True, blank=True)
-    job_id = models.CharField(max_length=255, null=True, blank=True)
-    question = models.TextField(null=True, blank=True)
-    answer = models.TextField(null=True, blank=True)
-    created_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = "conversation_messages"
-        managed = False
-
-    def __str__(self):
-        return f"{self.session_id} - {self.id}"
 
 
 class FlashcardReview(models.Model):

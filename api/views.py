@@ -1,5 +1,7 @@
 from django.conf import settings
 from django.contrib.auth.views import PasswordResetView
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 
 
 # from multiprocessing.dummy import connection
@@ -3969,6 +3971,7 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
         serializer.save(user=user, email=user.email)
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class FrontendPasswordResetView(PasswordResetView):
     # serializer_class = FrontendPasswordResetSerializer    class FrontendPasswordResetView(PasswordResetView):
         email_template_name = 'registration/password_reset_email.html'

@@ -193,7 +193,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 AUTH_USER_MODEL = 'api.User'
 
-FRONTEND_URLS = [
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+CSRF_TRUSTED_ORIGINS = [
     url.strip()
     for url in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",")
     if url.strip()
@@ -209,8 +211,9 @@ REST_FRAMEWORK = {
     ],
 }
 
-CORS_ALLOWED_ORIGINS = FRONTEND_URLS
+CORS_ALLOWED_ORIGINS = CSRF_TRUSTED_ORIGINS
 CORS_ALLOW_CREDENTIALS = True
+
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -234,7 +237,13 @@ REST_AUTH_SERIALIZERS = {
     "PASSWORD_RESET_SERIALIZER": "api.serializers.FrontendPasswordResetSerializer",
 }
 
-CSRF_TRUSTED_ORIGINS = FRONTEND_URLS
+CSRF_TRUSTED_ORIGINS = CSRF_TRUSTED_ORIGINS
+
+# Required for cross-site cookie-based CSRF in modern browsers
+CSRF_COOKIE_SAMESITE = "None"
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SAMESITE = "None"
+SESSION_COOKIE_SECURE = True
 
 # allauth settings
 ACCOUNT_EMAIL_REQUIRED = True
