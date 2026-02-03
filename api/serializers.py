@@ -637,7 +637,7 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
             user_count = len(users)
         except Exception:
             pass
-        logging.getLogger(__name__).info(
+        logging.getLogger("django").warning(
             "password_reset serializer email=%s matched_users=%s",
             email,
             user_count,

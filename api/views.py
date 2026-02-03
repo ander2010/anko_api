@@ -4002,6 +4002,15 @@ class FrontendPasswordResetView(PasswordResetView):
         permission_classes = [AllowAny]
         authentication_classes = [] 
 
+        def dispatch(self, request, *args, **kwargs):
+            logging.getLogger("django").warning(
+                "password_reset dispatch path=%s method=%s content_type=%s",
+                request.path,
+                request.method,
+                request.META.get("CONTENT_TYPE"),
+            )
+            return super().dispatch(request, *args, **kwargs)
+
         def form_valid(self, form):
             # Log diagnostics for password reset requests (email lookup only).
             try:
@@ -4013,7 +4022,7 @@ class FrontendPasswordResetView(PasswordResetView):
                 user_count = len(list(form.get_users(email))) if email else 0
             except Exception:
                 user_count = 0
-            logging.getLogger(__name__).info(
+            logging.getLogger("django").warning(
                 "password_reset request email=%s matched_users=%s",
                 email,
                 user_count,
