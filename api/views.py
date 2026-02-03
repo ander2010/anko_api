@@ -3977,8 +3977,6 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
 class FrontendPasswordResetView(PasswordResetView):
         permission_classes = [AllowAny]
         authentication_classes = [] 
-        email_template_name = "registration/password_reset_email.html"
-        subject_template_name = "registration/password_reset_subject.txt"
 
         def form_valid(self, form):
             # Log diagnostics for password reset requests (email lookup only).
@@ -3997,12 +3995,4 @@ class FrontendPasswordResetView(PasswordResetView):
                 user_count,
             )
             return super().form_valid(form)
-
-        def get_email_options(self):
-            return {
-                "domain_override": "ankard.com",
-                "from_email": settings.DEFAULT_FROM_EMAIL,
-                "subject_template_name": self.subject_template_name,
-                "email_template_name": self.email_template_name,
-            }
 
