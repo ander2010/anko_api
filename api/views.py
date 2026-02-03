@@ -1496,7 +1496,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             return "trueFalse"
         if raw in ["single_choice", "singlechoice", "single"]:
             return "singleChoice"
-        if raw in ["multi_select", "multiselect", "multi"]:
+        if raw in ["multi_select", "multiselect", "multi", "multi_choice", "multiple_choice", "multiple", "checkbox"]:
             return "multiSelect"
         if raw in ["mixed"]:
             # “mixed” lo tratamos como singleChoice por defecto
@@ -1567,7 +1567,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 return "trueFalse"
             if raw in ["single_choice", "singlechoice", "single"]:
                 return "singleChoice"
-            if raw in ["multi_select", "multiselect", "multi"]:
+            if raw in ["multi_select", "multiselect", "multi", "multi_choice", "multiple_choice", "multiple", "checkbox"]:
                 return "multiSelect"
             if raw in ["mixed"]:
                 return "singleChoice"
@@ -1846,7 +1846,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             return "trueFalse"
         if raw in ["single_choice", "singlechoice", "single"]:
             return "singleChoice"
-        if raw in ["multi_select", "multiselect", "multi"]:
+        if raw in ["multi_select", "multiselect", "multi", "multi_choice", "multiple_choice", "multiple", "checkbox"]:
             return "multiSelect"
         # default safe
         return "singleChoice"
