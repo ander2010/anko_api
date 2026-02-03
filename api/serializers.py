@@ -621,9 +621,9 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
 
         return {
             "url_generator": url_generator,
-            "email_template_name": "account/email/password_reset_message.txt",
-            "html_email_template_name": "account/email/password_reset_message.html",
-            "subject_template_name": "account/email/password_reset_subject.txt",
+            "email_template_name": "account/email/password_reset_key_message.txt",
+            "html_email_template_name": "account/email/password_reset_key_message.html",
+            "subject_template_name": "account/email/password_reset_key_subject.txt",
             "domain_override": "ankard.com",
             "site_name": "Ankard",
         }
