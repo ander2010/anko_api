@@ -1,5 +1,5 @@
 from django.conf import settings
-# from django.contrib.auth.views import PasswordResetView
+from django.contrib.auth.views import PasswordResetView
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
@@ -12,10 +12,9 @@ from django.db import connection
 from redis import Redis
 from django.conf import settings
 import os
-from dj_rest_auth.views import PasswordResetView
+#from dj_rest_auth.views import PasswordResetView
 from rest_framework.permissions import AllowAny
 
-#from dj_rest_auth.views import PasswordResetView
 import uuid
 import json
 import hashlib
@@ -3974,14 +3973,29 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
         user = self.request.user
         serializer.save(user=user, email=user.email)
 
-
-@method_decorator(csrf_exempt, name="dispatch")
+@method_decorator(csrf_exempt, name='dispatch')
 class FrontendPasswordResetView(PasswordResetView):
-    # serializer_class = FrontendPasswordResetSerializer    class FrontendPasswordResetView(PasswordResetView):
         permission_classes = [AllowAny]
-        email_template_name = 'registration/password_reset_email.html'
-        subject_template_name = 'registration/password_reset_subject.txt'
-    
+        authentication_classes = [] 
+
+        def form_valid(self, form):
+            # Log diagnostics for password reset requests (email lookup only).
+            try:
+                email = form.cleaned_data.get("email")
+            except Exception:
+                email = None
+            user_count = 0
+            try:
+                user_count = len(list(form.get_users(email))) if email else 0
+            except Exception:
+                user_count = 0
+            logging.getLogger(__name__).info(
+                "password_reset request email=%s matched_users=%s",
+                email,
+                user_count,
+            )
+            return super().form_valid(form)
+           
         def get_email_options(self):
             return {
                 "domain_override": "ankard.com",

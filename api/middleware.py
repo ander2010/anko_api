@@ -1,0 +1,13 @@
+class DisableCsrfOnPasswordResetMiddleware:
+    """
+    Disable CSRF checks for the password reset endpoint.
+    This is explicit and narrow to avoid broad CSRF bypass.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.path.startswith("/api/auth/password-reset/"):
+            request._dont_enforce_csrf_checks = True
+        return self.get_response(request)
