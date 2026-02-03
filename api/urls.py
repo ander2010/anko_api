@@ -48,7 +48,6 @@ router.register(r"rbac", RBACViewSet, basename="rbac")
 
 router.register(r"support-requests", SupportRequestViewSet, basename="support-request")
 urlpatterns = [
-    path('', include(router.urls)),
     path("auth/google/", GoogleLoginView.as_view(), name="google_login"),
     path("auth/facebook/", FacebookLoginView.as_view(), name="facebook_login"),
     path("auth/password-reset/", FrontendPasswordResetView.as_view(), name="password_reset"),
@@ -67,4 +66,5 @@ urlpatterns = [
         PasswordResetConfirmView.as_view(),
         name="password_reset_confirm_post",
     ),
+    path('', include(router.urls)),
 ]

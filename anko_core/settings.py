@@ -12,9 +12,24 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+import warnings
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Silence known third-party deprecation warnings from allauth accessed by dj-rest-auth.
+warnings.filterwarnings(
+    "ignore",
+    message=r"app_settings\.USERNAME_REQUIRED is deprecated",
+    category=UserWarning,
+    module=r"allauth\.account\.app_settings",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"app_settings\.EMAIL_REQUIRED is deprecated",
+    category=UserWarning,
+    module=r"allauth\.account\.app_settings",
+)
 
 DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
 
@@ -264,6 +279,12 @@ ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_USERNAME_REQUIRED = True
 ACCOUNT_AUTHENTICATION_METHOD = 'username_email' # allow both
 ACCOUNT_EMAIL_VERIFICATION = 'mandatory'
+ACCOUNT_SIGNUP_FIELDS = [
+    "email*",
+    "username*",
+    "password1*",
+    "password2*",
+]
 
 
 # ===============================
