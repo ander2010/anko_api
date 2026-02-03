@@ -199,7 +199,7 @@ CSRF_TRUSTED_ORIGINS = [
     url.strip()
     for url in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",")
     if url.strip()
-]
+] + ["http://localhost:5177", "http://localhost:5178", "http://localhost:5175"]
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -231,6 +231,7 @@ SITE_NAME = "Ankard"
 DOMAIN = "ankard.com"
 DJ_REST_AUTH = {
     "PASSWORD_RESET_CONFIRM_URL": "/reset-password/{uid}/{token}",
+    "SESSION_LOGIN": False,
 }
 
 REST_AUTH_SERIALIZERS = {

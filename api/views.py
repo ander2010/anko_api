@@ -214,6 +214,7 @@ class AuthViewSet(viewsets.GenericViewSet):
             {
                 "ok": True,
                 "detail": "Account created. Please verify your email to login.",
+                "email_verification": "sent",
                 "user": UserSerializer(user).data,
             },
             status=status.HTTP_201_CREATED,
