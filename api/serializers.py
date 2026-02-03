@@ -2,6 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 from .models import ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
+from django.contrib.auth.forms import PasswordResetForm
 from .models import (
     Resource, Permission, Role,
     Plan, PlanLimit, Subscription,
@@ -13,6 +14,7 @@ from .models import (
 from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
 import uuid
+import logging
 from dj_rest_auth.serializers import PasswordResetSerializer
 
 User = get_user_model()
@@ -603,10 +605,13 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
 
 
 class FrontendPasswordResetSerializer(PasswordResetSerializer):
+    # Use Django's PasswordResetForm so our registration/* templates are used.
+    password_reset_form_class = PasswordResetForm
+
     def get_email_options(self):
         """
         Esto controla los params del PasswordResetForm.save().
-        Si pasas `url_generator`, dj-rest-auth usará ESA función para armar el link.
+        Si pasas `url_generator`, dj-rest-auth usara ESA funcion para armar el link.
         """
         def url_generator(request, user, temp_key):
             # temp_key es el token
@@ -614,7 +619,30 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
             frontend = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
             return f"{frontend}/reset-password/{uid}/{temp_key}"
 
-        return {"url_generator": url_generator}
+        return {
+            "url_generator": url_generator,
+            "email_template_name": "registration/password_reset_email.html",
+            "subject_template_name": "registration/password_reset_subject.txt",
+            "domain_override": "ankard.com",
+            "site_name": "Ankard",
+        }
+
+    def validate_email(self, value):
+        value = super().validate_email(value)
+        email = None
+        user_count = 0
+        try:
+            email = self.reset_form.cleaned_data.get("email")
+            users = list(self.reset_form.get_users(email)) if email else []
+            user_count = len(users)
+        except Exception:
+            pass
+        logging.getLogger(__name__).info(
+            "password_reset serializer email=%s matched_users=%s",
+            email,
+            user_count,
+        )
+        return value
 
 
 class ChangePasswordSerializer(serializers.Serializer):
