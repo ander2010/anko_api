@@ -616,14 +616,12 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
 
 
 class FrontendPasswordResetSerializer(PasswordResetSerializer):
-    # Use Django's PasswordResetForm so our registration/* templates are used.
-    reset_form = AllAuthPasswordResetForm()
 
     def get_email_options(self):
         """Override this method to change default e-mail options"""
         def url_generator(request, user, temp_key):
             uid = user.pk  
-            frontend = getattr(settings, "FRONTEND_URL", "https://ankard.com").rstrip("/")
+            frontend = settings.FRONTEND_URL or  "https://ankard.com"
             return f"{frontend}/reset-password/{uid}/{temp_key}"
         
         return {"url_generator":url_generator}
