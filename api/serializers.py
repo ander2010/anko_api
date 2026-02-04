@@ -628,7 +628,7 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
         def url_generator(request, user, temp_key):
             # temp_key es el token
             uid = user.pk  # en tu email sale "1", o sea esto es lo que estás usando
-            frontend = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+            frontend = getattr(settings, "FRONTEND_URL", "https://ankard.com").rstrip("/")
             return f"{frontend}/reset-password/{uid}/{temp_key}"
 
         return {

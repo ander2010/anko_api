@@ -250,6 +250,7 @@ SERVER_EMAIL = "info@ankard.com"
 EMAIL_HOST_USER = "info@ankard.com"
 SITE_NAME = "Ankard"
 DOMAIN = "ankard.com"
+ACCOUNT_EMAIL_SUBJECT_PREFIX = ""
 DJ_REST_AUTH = {
     "PASSWORD_RESET_CONFIRM_URL": "/reset-password/{uid}/{token}",
     "SESSION_LOGIN": False,
