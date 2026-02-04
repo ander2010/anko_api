@@ -620,25 +620,25 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
     # Use Django's PasswordResetForm so our registration/* templates are used.
     password_reset_form_class = PasswordResetForm
 
-    def get_email_options(self):
-        """
-        Esto controla los params del PasswordResetForm.save().
-        Si pasas `url_generator`, dj-rest-auth usara ESA funcion para armar el link.
-        """
-        def url_generator(request, user, temp_key):
-            # temp_key es el token
-            uid = user.pk  # en tu email sale "1", o sea esto es lo que estás usando
-            frontend = getattr(settings, "FRONTEND_URL", "https://ankard.com").rstrip("/")
-            return f"{frontend}/reset-password/{uid}/{temp_key}"
+    # def get_email_options(self):
+    #     """
+    #     Esto controla los params del PasswordResetForm.save().
+    #     Si pasas `url_generator`, dj-rest-auth usara ESA funcion para armar el link.
+    #     """
+    #     def url_generator(request, user, temp_key):
+    #         # temp_key es el token
+    #         uid = user.pk  # en tu email sale "1", o sea esto es lo que estás usando
+    #         frontend = getattr(settings, "FRONTEND_URL", "https://ankard.com").rstrip("/")
+    #         return f"{frontend}/reset-password/{uid}/{temp_key}"
 
-        return {
-            "url_generator": url_generator,
-            "email_template_name": "account/email/password_reset_key_message.txt",
-            "html_email_template_name": "account/email/password_reset_key_message.html",
-            "subject_template_name": "account/email/password_reset_key_subject.txt",
-            "domain_override": "ankard.com",
-            "site_name": "Ankard",
-        }
+    #     return {
+    #         "url_generator": url_generator,
+    #         "email_template_name": "account/email/password_reset_key_message.txt",
+    #         "html_email_template_name": "account/email/password_reset_key_message.html",
+    #         "subject_template_name": "account/email/password_reset_key_subject.txt",
+    #         "domain_override": "ankard.com",
+    #         "site_name": "Ankard",
+    #     }
 
     def validate_email(self, value):
         value = super().validate_email(value)
