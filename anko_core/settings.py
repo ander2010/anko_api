@@ -249,12 +249,8 @@ SITE_NAME = "Ankard"
 DOMAIN = "ankard.com"
 EMAIL_SUBJECT_PREFIX = ""
 ACCOUNT_EMAIL_SUBJECT_PREFIX  = ""
-DJ_REST_AUTH = {
-    "PASSWORD_RESET_CONFIRM_URL": "/reset-password/{uid}/{token}",
+REST_AUTH = {
     "SESSION_LOGIN": False,
-}
-
-REST_AUTH_SERIALIZERS = {
     "PASSWORD_RESET_SERIALIZER": "api.serializers.FrontendPasswordResetSerializer",
 }
 
