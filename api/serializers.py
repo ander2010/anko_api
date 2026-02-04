@@ -2,7 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 from .models import ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
-from allauth.account.forms import ResetPasswordForm as PasswordResetForm
+from dj_rest_auth.forms import AllAuthPasswordResetForm
 from .models import (
     Resource, Permission, Role,
     Plan, PlanLimit, Subscription,
@@ -14,7 +14,6 @@ from .models import (
 import re
 from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
-import uuid
 import logging
 from dj_rest_auth.serializers import PasswordResetSerializer
 
@@ -618,7 +617,7 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
 
 class FrontendPasswordResetSerializer(PasswordResetSerializer):
     # Use Django's PasswordResetForm so our registration/* templates are used.
-    password_reset_form_class = PasswordResetForm
+    reset_form = AllAuthPasswordResetForm
 
     def get_email_options(self):
         """Override this method to change default e-mail options"""
