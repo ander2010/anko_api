@@ -2,7 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 from .models import ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
-from django.contrib.auth.forms import PasswordResetForm
+from allauth.account.forms import ResetPasswordForm as PasswordResetForm
 from .models import (
     Resource, Permission, Role,
     Plan, PlanLimit, Subscription,
