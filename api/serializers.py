@@ -617,7 +617,7 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
 
 class FrontendPasswordResetSerializer(PasswordResetSerializer):
     # Use Django's PasswordResetForm so our registration/* templates are used.
-    reset_form = AllAuthPasswordResetForm
+    reset_form = AllAuthPasswordResetForm()
 
     def get_email_options(self):
         """Override this method to change default e-mail options"""
