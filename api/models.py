@@ -3,6 +3,8 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
 from django.conf import settings
+from django.core.validators import RegexValidator
+
 import uuid
 class User(AbstractUser):
     email = models.EmailField(unique=True)
@@ -16,14 +18,15 @@ class User(AbstractUser):
         return self.username
 
 
+key_validator = RegexValidator(
+    regex=r'^[a-zA-Z0-9_.-]+$',
+    message='Use only letters, numbers, underscores, hyphens, or dots.',
+)
 
 class Resource(models.Model):
-    key = models.SlugField(max_length=60, unique=True)
+    key = models.CharField(max_length=60, unique=True, validators=[key_validator])
     name = models.CharField(max_length=120)
     description = models.TextField(blank=True)
-
-    def __str__(self):
-        return self.key
 
 
 class Permission(models.Model):
@@ -226,6 +229,7 @@ class Document(models.Model):
     extracted_text = models.TextField(null=True, blank=True)
     hash = models.CharField(max_length=64, db_index=True)  # NO unique global
     job_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="uploaded_documents")
     
     def save(self, *args, **kwargs):
         if self.file and not self.size:

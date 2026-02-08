@@ -63,6 +63,10 @@ class Command(BaseCommand):
         upsert_limit(free, "can_invite", "bool", bool_value=False)
         upsert_limit(free, "can_collect_batteries", "bool", bool_value=False)
         upsert_limit(free, "can_collect_decks", "bool", bool_value=False)
+        upsert_limit(free, "upload_window_days", "int", int_value=5)
+        upsert_limit(free, "upload_max_files_per_window", "int", int_value=2)
+
+        
 
         # Premium
         upsert_limit(premium, "upload_max_mb", "int", int_value=200)

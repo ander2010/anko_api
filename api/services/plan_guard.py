@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Optional
 
 from django.utils import timezone
@@ -115,30 +116,66 @@ class PlanGuard:
     # =========================
 
     @staticmethod
-    def assert_upload_allowed(*, user, files, plan: Optional[Plan] = None):
+    def assert_upload_allowed(*, user, files, plan: Optional["Plan"] = None):
         """
-        Regla:
+        Reglas:
           - upload_max_mb por archivo (PlanLimit.upload_max_mb)
-          - max_documents total por usuario (Plan.max_documents) (si quieres por proyecto, lo cambiamos)
-          - Free: “al menos 2 docs de 50MB” lo interpretamos como: max_documents=2 y upload_max_mb=50
+          - FREE: máximo 2 documentos cada 5 días (ventana móvil)
+          - Otros planes: si plan.max_documents existe, aplica límite global (como antes)
         """
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
 
         plan = plan or PlanGuard.get_plan_for_user(user)
 
+        # ---------------------------
+        # 1) Límite por tamaño
+        # ---------------------------
         max_mb = PlanGuard.limit_int(plan, "upload_max_mb", default=50)
         max_bytes = (max_mb or 0) * 1024 * 1024
 
-        # tamaño por archivo
         for f in files:
             size = getattr(f, "size", None) or 0
             if max_mb is not None and size > max_bytes:
                 raise PermissionDenied(f"Plan limit: file exceeds upload_max_mb={max_mb}MB.")
 
-        # cantidad total de documentos (global por usuario)
+        # ---------------------------
+        # 2) Límite por ventana (FREE)
+        # ---------------------------
+        # Ajusta cómo identificas el plan FREE:
+        # - si tu Plan tiene tier: "free"
+        # - o name: "Free"
+        tier = (getattr(plan, "tier", "") or "").lower()
+        is_free = tier == "free" or (getattr(plan, "name", "") or "").lower() == "free"
+
+        if is_free:
+            window_days = 5
+            window_limit = 2
+            since = timezone.now() - timedelta(days=window_days)
+
+            # ✅ Cuenta docs subidos por ESTE usuario en la ventana
+            # Requiere Document.uploaded_by y Document.uploaded_at
+            recent_count = (
+                Document.objects
+                .filter(uploaded_by=user, uploaded_at__gte=since)
+                .count()
+            )
+
+            if recent_count + len(files) > window_limit:
+                raise PermissionDenied(
+                    f"Free plan limit: you can upload up to {window_limit} documents every {window_days} days."
+                )
+
+            return  # ✅ Free no usa max_documents global
+
+        # ---------------------------
+        # 3) Otros planes: límite global (como antes)
+        # ---------------------------
         if plan.max_documents is not None:
-            owned_or_member_docs = Document.objects.filter(Q(project__owner=user) | Q(project__members=user)).count()
+            owned_or_member_docs = Document.objects.filter(
+                Q(project__owner=user) | Q(project__members=user)
+            ).count()
+
             if owned_or_member_docs + len(files) > int(plan.max_documents):
                 raise PermissionDenied(f"Plan limit: max_documents={plan.max_documents} reached.")
 

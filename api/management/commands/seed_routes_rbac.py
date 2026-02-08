@@ -13,7 +13,9 @@ DASHBOARD_KEYS = [
     "dashboard.rules",         # "/rules"
     "dashboard.batteries",     # "/batteries"
     "dashboard.sections",      # "/sections"
-
+    "dashboard.my-decks",      # "/my-decks"
+    "dashboard.my-batteries",  # "/my-batteries"
+    
     # Admin group (nested)
     "dashboard.admin.users",            # "/users"
     "dashboard.admin.resources",        # "/resources"
