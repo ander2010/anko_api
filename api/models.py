@@ -809,3 +809,45 @@ class EmailVerification(models.Model):
     def is_valid(self):
         return self.verified_at is None and timezone.now() < self.expires_at
     
+
+
+class DocumentUploadEvent(models.Model):
+    STATUS = [
+        ("success", "Success"),
+        ("rejected", "Rejected"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="document_upload_events",
+        db_index=True,
+    )
+
+    # opcional, pero útil
+    project = models.ForeignKey(
+        "Project",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="upload_events",
+        db_index=True,
+    )
+
+    filename = models.CharField(max_length=255, blank=True, default="")
+    size = models.PositiveIntegerField(default=0)
+    document_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+
+    status = models.CharField(max_length=20, choices=STATUS, db_index=True)
+    reason = models.CharField(max_length=255, blank=True, default="")
+
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = "document_upload_events"
+        indexes = [
+            models.Index(fields=["user", "status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} {self.status} {self.created_at:%Y-%m-%d %H:%M}"

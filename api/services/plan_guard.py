@@ -10,7 +10,7 @@ from django.db.models import Q
 
 from rest_framework.exceptions import PermissionDenied
 
-from api.models import Plan, PlanLimit, Subscription, Document, Battery
+from api.models import DocumentUploadEvent, Plan, PlanLimit, Subscription, Document, Battery
 
 
 @dataclass(frozen=True)
@@ -117,20 +117,11 @@ class PlanGuard:
 
     @staticmethod
     def assert_upload_allowed(*, user, files, plan: Optional["Plan"] = None):
-        """
-        Reglas:
-          - upload_max_mb por archivo (PlanLimit.upload_max_mb)
-          - FREE: máximo 2 documentos cada 5 días (ventana móvil)
-          - Otros planes: si plan.max_documents existe, aplica límite global (como antes)
-        """
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
 
         plan = plan or PlanGuard.get_plan_for_user(user)
-
-        # ---------------------------
-        # 1) Límite por tamaño
-        # ---------------------------
+        # 1) Límite por tamaño (igual que lo tienes)
         max_mb = PlanGuard.limit_int(plan, "upload_max_mb", default=50)
         max_bytes = (max_mb or 0) * 1024 * 1024
 
@@ -139,12 +130,7 @@ class PlanGuard:
             if max_mb is not None and size > max_bytes:
                 raise PermissionDenied(f"Plan limit: file exceeds upload_max_mb={max_mb}MB.")
 
-        # ---------------------------
         # 2) Límite por ventana (FREE)
-        # ---------------------------
-        # Ajusta cómo identificas el plan FREE:
-        # - si tu Plan tiene tier: "free"
-        # - o name: "Free"
         tier = (getattr(plan, "tier", "") or "").lower()
         is_free = tier == "free" or (getattr(plan, "name", "") or "").lower() == "free"
 
@@ -153,20 +139,18 @@ class PlanGuard:
             window_limit = 2
             since = timezone.now() - timedelta(days=window_days)
 
-            # ✅ Cuenta docs subidos por ESTE usuario en la ventana
-            # Requiere Document.uploaded_by y Document.uploaded_at
-            recent_count = (
-                Document.objects
-                .filter(uploaded_by=user, uploaded_at__gte=since)
+            recent_success = (
+                DocumentUploadEvent.objects
+                .filter(user=user, status="success", created_at__gte=since)
                 .count()
             )
 
-            if recent_count + len(files) > window_limit:
+            if recent_success + len(files) > window_limit:
                 raise PermissionDenied(
                     f"Free plan limit: you can upload up to {window_limit} documents every {window_days} days."
                 )
 
-            return  # ✅ Free no usa max_documents global
+            return  # free no usa max_documents
 
         # ---------------------------
         # 3) Otros planes: límite global (como antes)

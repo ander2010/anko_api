@@ -43,7 +43,7 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate, login
-from .models import ConversationMessage, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
+from .models import ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
@@ -1072,6 +1072,15 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 # ✅ nombre real en storage
                 stored_path = doc.file.name  # ej: "documents/xxxxx.pdf"
 
+                DocumentUploadEvent.objects.create(
+                user=request.user,
+                project=project,
+                status="success",
+                filename=getattr(f, "name", "") or "",
+                document_hash=file_hash,
+            )
+
+
                 # ✅ id estable para microservicio (puedes usar doc.id o file_hash)
                 external_doc_id = doc.id
 
@@ -1231,21 +1240,57 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # Check access
         if project.owner != request.user and not project.members.filter(id=request.user.id).exists():
             return Response({"detail": "No access to project"}, status=status.HTTP_403_FORBIDDEN)
+        fake_file = type("F", (), {"size": int(file_size or 0)})()
+        with transaction.atomic():
+            User.objects.select_for_update().get(pk=request.user.pk)
+            PlanGuard.assert_upload_allowed(user=request.user, files=[fake_file])
 
-        doc = Document.objects.filter(project=project, hash=file_hash).first()
-        if not doc:
-            doc = Document(
+            doc = Document.objects.filter(project=project, hash=file_hash).first()
+            if not doc:
+                doc = Document(
+                    project=project,
+                    filename=filename,
+                    type=file_type,
+                    size=file_size or 0,
+                    hash=file_hash,
+                    status="pending",
+                )
+                doc.file.name = file_key
+                doc._uploader_id = request.user.id
+                doc.uploaded_by = request.user
+                doc.save()
+
+            # ✅ Evento SIEMPRE (si aceptaste el request)
+            DocumentUploadEvent.objects.create(
+                user=request.user,
                 project=project,
-                filename=filename,
-                type=file_type,
-                size=file_size or 0,
-                hash=file_hash,
-                status='pending'
+                status="success",
+                filename=filename or "",
+                document_hash=file_hash,
             )
-            doc.file.name = file_key
-            doc._uploader_id = request.user.id
-            doc.uploaded_by = request.user
-            doc.save()
+        # doc = Document.objects.filter(project=project, hash=file_hash).first()
+        # if not doc:
+        #     doc = Document(
+        #         project=project,
+        #         filename=filename,
+        #         type=file_type,
+        #         size=file_size or 0,
+        #         hash=file_hash,
+        #         status='pending'
+        #     )
+        #     doc.file.name = file_key
+        #     doc._uploader_id = request.user.id
+        #     doc.uploaded_by = request.user
+        #     doc.save()
+        #     DocumentUploadEvent.objects.create(
+        #     user=request.user,
+        #     project=project,
+        #     status="success",
+        #     filename=filename or "",
+        #     document_hash=file_hash,
+        # )
+
+
         
         try:
             base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
