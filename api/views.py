@@ -1,4 +1,5 @@
 from django.conf import settings
+from api.utils.subscriptionstouser import ensure_free_subscription_for_user
 from dj_rest_auth.views import PasswordResetView
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -283,6 +284,8 @@ class AuthViewSet(viewsets.GenericViewSet):
         # ✅ rol client
         client_role, _ = Role.objects.get_or_create(name="client")
         user.roles.add(client_role)
+        sub =ensure_free_subscription_for_user(user)
+        print("Free subscription ensured:", sub)
 
         # ❌ importante: elimina token de auth si existiera
         Token.objects.filter(user=user).delete()
@@ -1243,7 +1246,23 @@ class DocumentViewSet(viewsets.ModelViewSet):
         fake_file = type("F", (), {"size": int(file_size or 0)})()
         with transaction.atomic():
             User.objects.select_for_update().get(pk=request.user.pk)
-            PlanGuard.assert_upload_allowed(user=request.user, files=[fake_file])
+            # PlanGuard.assert_upload_allowed(user=request.user, files=[fake_file])
+            try:
+                PlanGuard.assert_upload_allowed(
+                    user=request.user,
+                    files=[fake_file]   # o la lista real
+                  
+                )
+            except PermissionDenied as e:
+                return Response(
+                    {
+                        "ok": False,
+                        "error_code": "PLAN_LIMIT",
+                        "detail": str(e),
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            
 
             doc = Document.objects.filter(project=project, hash=file_hash).first()
             if not doc:
@@ -2554,10 +2573,55 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me")
     def me(self, request):
-        sub = getattr(request.user, "subscription", None)
+        user = request.user
+
+        # ✅ fallback: crea Free si no existe
+        sub = Subscription.objects.select_related("plan").filter(user=user).first()
         if not sub:
-            return Response({"detail": "No subscription found for this user"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(self.get_serializer(sub).data)
+            free_plan = Plan.objects.filter(tier="free", is_active=True).first()
+            if not free_plan:
+                return Response(
+                    {"detail": "Free plan not configured"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+            sub = Subscription.objects.create(
+                user=user,
+                plan=free_plan,
+                status="active",
+                start_at=timezone.now(),
+                current_period_start=timezone.now(),
+                current_period_end=None,
+            )
+
+        plan = sub.plan
+
+        # ✅ respuesta simple para frontend (más útil que serializar todo)
+        return Response(
+            {
+                "user_id": user.id,
+                "subscription": {
+                    "id": sub.id,
+                    "status": sub.status,
+                    "start_at": sub.start_at,
+                    "current_period_start": sub.current_period_start,
+                    "current_period_end": sub.current_period_end,
+                    "is_access_active": sub.is_access_active,
+                },
+                "plan": {
+                    "id": plan.id,
+                    "tier": plan.tier,
+                    "name": plan.name,
+                    "description": plan.description,
+                    "price_cents": plan.price_cents,
+                    "currency": plan.currency,
+                    "billing_period": plan.billing_period,
+                    "max_documents": plan.max_documents,
+                    "max_batteries": plan.max_batteries,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="set-plan")
     def set_plan(self, request):
