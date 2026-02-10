@@ -10,7 +10,7 @@ from django.db.models import Q
 
 from rest_framework.exceptions import PermissionDenied
 
-from api.models import DocumentUploadEvent, Plan, PlanLimit, Subscription, Document, Battery
+from api.models import ConversationMessage, DocumentUploadEvent, Flashcard, Plan, PlanLimit, Subscription, Document, Battery
 
 
 @dataclass(frozen=True)
@@ -183,16 +183,41 @@ class PlanGuard:
     def assert_flashcards_allowed(*, user, plan: Optional[Plan] = None):
         """
         Regla:
-          - can_use_flashcards (PlanLimit)
-          - Free: false
-          - Premium/Ultra: true
+          - can_use_flashcards (bool)
+          - flashcards_max_total (int)
+          - Free: max_total = 2
+          - Premium/Ultra: max_total >= 50 (mínimo)
         """
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
+
         plan = plan or PlanGuard.get_plan_for_user(user)
 
+        # 1) Feature flag base
         if not PlanGuard.limit_bool(plan, "can_use_flashcards", default=False):
             raise PermissionDenied("This feature requires Premium or Ultra (flashcards).")
+
+        # 2) Límite numérico total
+        max_total = PlanGuard.limit_int(plan, "flashcards_max_total", default=0)
+
+        tier = (getattr(plan, "tier", "") or "").lower()
+        name = (getattr(plan, "name", "") or "").lower()
+        is_free = tier == "free" or name == "free"
+
+        # En Premium/Ultra garantizamos que el límite sea al menos 50
+        if not is_free and max_total is not None and max_total < 50:
+            max_total = 50
+
+        # Si max_total es None => ilimitado (si tú lo manejas así)
+        if max_total is None:
+            return
+
+        current = Flashcard.objects.filter(user=user).count()
+        if current >= max_total:
+            raise PermissionDenied(
+                f"Plan limit reached: flashcards_max_total={max_total}. "
+                f"Current={current}."
+            )
 
     @staticmethod
     def assert_explore_topics_allowed(*, user, requested_topics: int, plan: Optional[Plan] = None):
@@ -209,3 +234,47 @@ class PlanGuard:
             return  # ilimitado
         if int(requested_topics) > int(limit):
             raise PermissionDenied(f"Plan limit: explore_topics_limit={limit} topics.")
+
+
+    @staticmethod
+    def assert_ask_allowed(*, user, plan: Optional[Plan] = None):
+        if not user or not user.is_authenticated:
+            raise PermissionDenied("Authentication required.")
+
+        plan = plan or PlanGuard.get_plan_for_user(user)
+
+        tier = (getattr(plan, "tier", "") or "").lower()
+        name = (getattr(plan, "name", "") or "").lower()
+        is_free = tier == "free" or name == "free"
+        is_ultra = tier == "ultra" or name == "ultra"
+        is_premium = tier == "premium" or name == "premium"
+
+        # 1) Define ventana
+        window_days = PlanGuard.limit_int(plan, "ask_window_days", default=5)
+        since = timezone.now() - timedelta(days=window_days or 0)
+
+        # 2) Define límite por plan (Ultra ilimitado)
+        # Si tienes PlanLimit, úsalo; si no, aplica defaults
+        limit = PlanGuard.limit_int(plan, "ask_questions_per_window", default=None)
+
+        if is_ultra:
+            return  # ilimitado
+
+        if limit is None:
+            # defaults si no existe PlanLimit
+            limit = 5 if is_free else 50 if is_premium else 5
+
+        # 3) Cuenta SOLO mensajes con respuesta (para "preguntas con sus respuestas")
+        used = (
+            ConversationMessage.objects.filter(
+                user_id=user.id,
+                created_at__gte=since,
+            )
+            .exclude(Q(answer__isnull=True) | Q(answer=""))
+            .count()
+        )
+
+        if used >= limit:
+            raise PermissionDenied(
+    f"Limit reached ({used}/{limit}). Upgrade to Premium or Ultra to continue asking questions."
+)

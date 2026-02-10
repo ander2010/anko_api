@@ -59,12 +59,17 @@ class Command(BaseCommand):
         upsert_limit(free, "upload_max_mb", "int", int_value=50)
         upsert_limit(free, "questions_per_battery_max", "int", int_value=50)
         upsert_limit(free, "explore_topics_limit", "int", int_value=0)
-        upsert_limit(free, "can_use_flashcards", "bool", bool_value=False)
+        upsert_limit(free, "can_use_flashcards", "bool", bool_value=True)
         upsert_limit(free, "can_invite", "bool", bool_value=False)
         upsert_limit(free, "can_collect_batteries", "bool", bool_value=False)
         upsert_limit(free, "can_collect_decks", "bool", bool_value=False)
         upsert_limit(free, "upload_window_days", "int", int_value=5)
+        upsert_limit(free, "flashcards_max_total", "int", int_value=2)
         upsert_limit(free, "upload_max_files_per_window", "int", int_value=2)
+        upsert_limit(free, "ask_window_days", "int", int_value=5)  # upload_m
+        
+        upsert_limit(free, "ask_questions_per_window", "int", int_value=5)
+        
 
         
 
@@ -76,6 +81,10 @@ class Command(BaseCommand):
         upsert_limit(premium, "can_invite", "bool", bool_value=False)
         upsert_limit(premium, "can_collect_batteries", "bool", bool_value=True)
         upsert_limit(premium, "can_collect_decks", "bool", bool_value=True)
+        upsert_limit(premium, "flashcards_max_total", "int", int_value=50)
+        upsert_limit(premium, "ask_window_days", "int", int_value=5)  # upload_m
+        
+        upsert_limit(premium, "ask_questions_per_window", "int", int_value=50)
 
         # Ultra
         upsert_limit(ultra, "upload_max_mb", "int", int_value=300)
@@ -85,5 +94,6 @@ class Command(BaseCommand):
         upsert_limit(ultra, "can_invite", "bool", bool_value=True)
         upsert_limit(ultra, "can_collect_batteries", "bool", bool_value=True)
         upsert_limit(ultra, "can_collect_decks", "bool", bool_value=True)
+        upsert_limit(ultra, "flashcards_max_total", "int", int_value=99999)  # ilimitado
 
         self.stdout.write(self.style.SUCCESS("✅ Plans + PlanLimits seeded successfully."))

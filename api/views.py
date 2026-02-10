@@ -660,7 +660,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         - Returns job_id + ws_url(progress) + response details
         """
         base_url = os.getenv("ASK_BASE_URL", os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
-
+        PlanGuard.assert_ask_allowed(user=request.user)
         body = request.data or {}
         question = (body.get("question") or "").strip()
         if not question:
@@ -3088,6 +3088,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     @transaction.atomic
     def create_with_flashcards(self, request):
         data = request.data or {}
+        PlanGuard.assert_flashcards_allowed(user=request.user)
 
         # --------- Deck fields ----------
         project_id = data.get("project_id")
@@ -3217,6 +3218,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
         description = data.get("description") or ""
         visibility = data.get("visibility") or "private"
+        
+        PlanGuard.assert_flashcards_allowed(user=request.user)
 
         # --- Optional: section_ids ---
         section_ids = data.get("section_ids") or []
