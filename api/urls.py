@@ -8,7 +8,7 @@ from .views import (
     ResourceViewSet, PermissionViewSet, RoleViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
     BatteryShareViewSet, SavedBatteryViewSet, InviteViewSet,
-    DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet,GoogleLoginView, FacebookLoginView
+    DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet, StatisticsViewSet, GoogleLoginView, FacebookLoginView
 )
 from dj_rest_auth.views import PasswordResetView, PasswordResetConfirmView
 
@@ -42,6 +42,7 @@ router.register(r"flashcards", FlashcardViewSet)
 router.register(r"deck-shares", DeckShareViewSet)
 router.register(r"saved-decks", SavedDeckViewSet)
 router.register(r"rbac", RBACViewSet, basename="rbac")
+router.register(r"statistics", StatisticsViewSet, basename="statistics")
 # opcional
 # router.register(r"tags", TagViewSet, basename="tags")
 # router.register(r"qa-pairs", QaPairViewSet, basename="qa-pairs")

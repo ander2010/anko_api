@@ -44,7 +44,7 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate, login
-from .models import ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
+from .models import ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, UserSession
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
@@ -4088,6 +4088,139 @@ class QaPairViewSet(viewsets.ReadOnlyModelViewSet):
         if job_id:
             qs = qs.filter(job_id=str(job_id))
         return qs.order_by("qa_index", "created_at")
+
+
+class StatisticsViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        user = request.user
+        raw_user_id = request.query_params.get("user_id") or user.id
+
+        try:
+            user_id = int(raw_user_id)
+        except Exception:
+            return Response({"detail": "user_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not (user.is_staff or user.is_superuser or user_id == user.id):
+            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+        projects = Project.objects.filter(Q(owner_id=user_id) | Q(members__id=user_id)).distinct()
+        project_ids = list(projects.values_list("id", flat=True))
+
+        documents = list(
+            Document.objects.filter(project_id__in=project_ids).select_related("project")
+        )
+        doc_ids = [doc.id for doc in documents]
+
+        qa_counts = (
+            QaPair.objects.filter(document_id__in=doc_ids)
+            .values("document_id")
+            .annotate(
+                total=Count("id"),
+                tagged=Count("id", filter=Q(meta__has_key="tags")),
+            )
+        )
+        qa_by_doc = {row["document_id"]: row for row in qa_counts}
+
+        answers = (
+            BatteryAttemptAnswer.objects.filter(attempt__user_id=user_id)
+            .select_related("question", "question__topic")
+            .prefetch_related("question__topic__related_sections")
+        )
+
+        total_tries = 0
+        total_earned = 0
+        per_doc_stats = {}
+
+        for ans in answers:
+            total_tries += 1
+            if ans.is_correct:
+                total_earned += 1
+
+            topic = getattr(ans.question, "topic", None)
+            if not topic:
+                continue
+
+            doc_id_set = {section.document_id for section in topic.related_sections.all()}
+            for doc_id in doc_id_set:
+                stats = per_doc_stats.setdefault(doc_id, {"tries": 0, "earned": 0})
+                stats["tries"] += 1
+                if ans.is_correct:
+                    stats["earned"] += 1
+
+        question_level = {
+            "tries": total_tries,
+            "max_points": total_tries,
+            "earned_points": total_earned,
+            "percent": round((total_earned / total_tries * 100), 2) if total_tries else 0,
+        }
+
+        document_level = []
+        doc_percent_map = {}
+        raw_threshold = request.query_params.get("coverage_threshold", "0.9")
+        try:
+            coverage_threshold = float(raw_threshold)
+        except Exception:
+            coverage_threshold = 0.9
+
+        if coverage_threshold <= 0 or coverage_threshold > 1:
+            coverage_threshold = 0.9
+
+        for doc in documents:
+            qa_row = qa_by_doc.get(doc.id, {"total": 0, "tagged": 0})
+            total_q = qa_row["total"] or 0
+            tagged_q = qa_row["tagged"] or 0
+
+            if total_q > 0:
+                coverage_ratio = tagged_q / (total_q * coverage_threshold)
+                coverage_percent = min(1, coverage_ratio) * 100
+            else:
+                coverage_percent = 0
+
+            stats = per_doc_stats.get(doc.id, {"tries": 0, "earned": 0})
+            tries = stats["tries"]
+            earned = stats["earned"]
+            accuracy_percent = round((earned / tries * 100), 2) if tries else 0
+
+            final_percent = round(accuracy_percent * (coverage_percent / 100), 2)
+            doc_percent_map[doc.id] = final_percent
+
+            document_level.append(
+                {
+                    "document_id": doc.id,
+                    "project_id": doc.project_id,
+                    "coverage_percent": round(coverage_percent, 2),
+                    "accuracy_percent": accuracy_percent,
+                    "final_percent": final_percent,
+                }
+            )
+
+        project_level = []
+        for project in projects:
+            project_docs = [doc for doc in documents if doc.project_id == project.id]
+            if not project_docs:
+                percent = 0
+            else:
+                total = sum(doc_percent_map.get(doc.id, 0) for doc in project_docs)
+                percent = round(total / len(project_docs), 2) if project_docs else 0
+
+            project_level.append(
+                {
+                    "project_id": project.id,
+                    "percent": percent,
+                }
+            )
+
+        return Response(
+            {
+                "user_id": user_id,
+                "question_level": question_level,
+                "document_level": document_level,
+                "project_level": project_level,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class RBACViewSet(viewsets.ViewSet):
