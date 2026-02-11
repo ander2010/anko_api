@@ -1,5 +1,6 @@
 import os
 from django.db import models
+from django.contrib.postgres.indexes import GinIndex
 from django.contrib.auth.models import AbstractUser
 from django.utils import timezone
 from django.conf import settings
@@ -681,6 +682,9 @@ class QaPair(models.Model):
                 fields=["document", "qa_index", "job_id"],
                 name="uniq_qapairs_document_qaindex_jobid",
             )
+        ]
+        indexes = [
+            GinIndex(fields=["meta"], name="qapairs_meta_gin"),
         ]
 
     def __str__(self):
