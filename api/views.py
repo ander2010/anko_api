@@ -4356,14 +4356,15 @@ class PublicBatteryViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return (
-            Battery.objects.filter(visibility="public")
+            Battery.objects.filter(visibility__in=["public", "shared"])
             .annotate(
                 question_count=Count("questions_rel", distinct=True),
                 shared_count=Count("shares", distinct=True),
-                accepted_count=Count("shares", distinct=True),  # accepted == share exists
+                accepted_count=Count("shares", distinct=True),
             )
             .order_by("-created_at")
         )
+
 
 
 class PublicDeckViewSet(viewsets.ReadOnlyModelViewSet):
@@ -4376,7 +4377,7 @@ class PublicDeckViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return (
-            Deck.objects.filter(visibility="public")
+            Deck.objects.filter(visibility__in=["public", "shared"])
             .annotate(
                 card_count=Count("cards", distinct=True),
                 shared_count=Count("shares", distinct=True),
@@ -4433,8 +4434,8 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
         if battery_id:
             battery = Battery.objects.select_related("project__owner").get(id=battery_id)
 
-            if battery.visibility != "public":
-                return Response({"detail": "Battery is not public."}, status=400)
+            if battery.visibility not in ["public", "shared"]:
+                return Response({"detail": "Battery is not public or shared."}, status=400)
 
             owner = battery.project.owner
             if owner_id := owner.id == user.id:
@@ -4472,8 +4473,8 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
 
         # deck
         deck = Deck.objects.select_related("owner").get(id=deck_id)
-        if deck.visibility != "public":
-            return Response({"detail": "Deck is not public."}, status=400)
+        if deck.visibility not in ["public", "shared"]:
+            return Response({"detail": "Deck is not public or shared."}, status=400)
 
         owner = deck.owner
         if owner.id == user.id:

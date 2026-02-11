@@ -693,7 +693,7 @@ class PublicDeckCardSerializer(serializers.ModelSerializer):
     shared_count = serializers.IntegerField(read_only=True)
     accepted_count = serializers.IntegerField(read_only=True)
 
-    owner_id = serializers.IntegerField(source="owner_id", read_only=True)
+    # owner_id = serializers.IntegerField(source="owner_id", read_only=True)
 
     class Meta:
         model = Deck
