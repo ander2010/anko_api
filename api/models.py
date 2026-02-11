@@ -323,6 +323,7 @@ class Battery(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     difficulty = models.CharField(max_length=10, choices=DIFFICULTY_CHOICES)
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default="private")
+    description = models.TextField(blank=True, default="")
 
     # questions = models.JSONField(help_text="Stored generated questions snapshot")
     external_job_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
@@ -851,3 +852,67 @@ class DocumentUploadEvent(models.Model):
 
     def __str__(self):
         return f"{self.user_id} {self.status} {self.created_at:%Y-%m-%d %H:%M}"
+class AccessRequest(models.Model):
+    STATUS = [
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+        ("canceled", "Canceled"),
+    ]
+    RESOURCE = [
+        ("battery", "Battery"),
+        ("deck", "Deck"),
+    ]
+    ACCESS = [
+        ("view", "View Only"),
+        ("copy", "View + Copy"),
+        ("edit", "Edit"),
+    ]
+
+    token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, db_index=True)
+
+    resource_type = models.CharField(max_length=20, choices=RESOURCE)
+    battery = models.ForeignKey(
+        Battery, null=True, blank=True, on_delete=models.CASCADE, related_name="access_requests"
+    )
+    deck = models.ForeignKey(
+        Deck, null=True, blank=True, on_delete=models.CASCADE, related_name="access_requests"
+    )
+
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="access_requests"
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="access_requests_received"
+    )
+
+    requested_access = models.CharField(max_length=20, choices=ACCESS, default="view")
+    message = models.TextField(blank=True, default="")
+
+    status = models.CharField(max_length=20, choices=STATUS, default="pending")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["battery", "requester"], name="uniq_accessreq_battery_requester"),
+            models.UniqueConstraint(fields=["deck", "requester"], name="uniq_accessreq_deck_requester"),
+        ]
+
+    def clean(self):
+        # optional: enforce only one target according to resource_type
+        if self.resource_type == "battery" and not self.battery_id:
+            raise ValueError("battery is required for resource_type=battery")
+        if self.resource_type == "deck" and not self.deck_id:
+            raise ValueError("deck is required for resource_type=deck")
+        if self.battery_id and self.deck_id:
+            raise ValueError("Only one of battery/deck can be set")
+
+    def is_pending(self) -> bool:
+        return self.status == "pending"
+
+    def mark_decided(self, status: str):
+        self.status = status
+        self.decided_at = timezone.now()
+        self.save(update_fields=["status", "decided_at"])

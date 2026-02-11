@@ -1,6 +1,6 @@
 from django.conf import settings
 from rest_framework import serializers
-from .models import ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
+from .models import AccessRequest, ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
 from dj_rest_auth.forms import AllAuthPasswordResetForm
 from .models import (
@@ -657,3 +657,94 @@ class ChangePasswordSerializer(serializers.Serializer):
         validate_password(value, user=user)
 
         return value
+
+
+# api/serializers/access.py
+# from django.db.models import Count
+# from rest_framework import serializers
+# from api.models import Battery, Deck, AccessRequest, BatteryShare, DeckShare
+
+
+class PublicBatteryCardSerializer(serializers.ModelSerializer):
+    question_count = serializers.IntegerField(read_only=True)
+    shared_count = serializers.IntegerField(read_only=True)
+    accepted_count = serializers.IntegerField(read_only=True)  # we’ll treat “share exists” as accepted
+
+    owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
+
+    class Meta:
+        model = Battery
+        fields = [
+            "id",
+            "name",
+            "description",
+            "difficulty",
+            "visibility",
+            "created_at",
+            "owner_id",
+            "question_count",
+            "shared_count",
+            "accepted_count",
+        ]
+
+
+class PublicDeckCardSerializer(serializers.ModelSerializer):
+    card_count = serializers.IntegerField(read_only=True)
+    shared_count = serializers.IntegerField(read_only=True)
+    accepted_count = serializers.IntegerField(read_only=True)
+
+    owner_id = serializers.IntegerField(source="owner_id", read_only=True)
+
+    class Meta:
+        model = Deck
+        fields = [
+            "id",
+            "title",
+            "description",
+            "visibility",
+            "created_at",
+            "owner_id",
+            "card_count",
+            "shared_count",
+            "accepted_count",
+        ]
+
+
+class AccessRequestCreateSerializer(serializers.Serializer):
+    battery_id = serializers.IntegerField(required=False)
+    deck_id = serializers.IntegerField(required=False)
+    requested_access = serializers.ChoiceField(choices=AccessRequest.ACCESS, default="view")
+    message = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        battery_id = attrs.get("battery_id")
+        deck_id = attrs.get("deck_id")
+        if bool(battery_id) == bool(deck_id):
+            raise serializers.ValidationError("Provide exactly one of battery_id or deck_id.")
+        return attrs
+
+
+class AccessRequestSerializer(serializers.ModelSerializer):
+    # helpful display fields
+    battery_name = serializers.CharField(source="battery.name", read_only=True)
+    deck_title = serializers.CharField(source="deck.title", read_only=True)
+
+    class Meta:
+        model = AccessRequest
+        fields = [
+            "id",
+            "token",
+            "resource_type",
+            "battery",
+            "deck",
+            "battery_name",
+            "deck_title",
+            "requester",
+            "owner",
+            "requested_access",
+            "message",
+            "status",
+            "created_at",
+            "decided_at",
+        ]
+        read_only_fields = ["id", "token", "resource_type", "requester", "owner", "status", "created_at", "decided_at"]

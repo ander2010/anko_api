@@ -212,6 +212,13 @@ CSRF_TRUSTED_ORIGINS = [
     "https://www.ankard.com",
     "https://italk2.me",
 
+    # 🧪 Desarrollo local
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:5176",
+    "http://localhost:5177",
+    "http://localhost:5178",
 ]
 CORS_ALLOWED_ORIGINS = [
     "https://ankard.com",

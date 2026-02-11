@@ -44,13 +44,13 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate, login
-from .models import ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
+from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, UserSession
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from urllib.parse import quote, urlencode
@@ -77,7 +77,11 @@ from .serializers import (
 from .models import SummaryDocument
 from django.shortcuts import get_object_or_404
 from django.core.mail import send_mail
-
+from api.emails.access_requests import (
+    build_owner_action_links,
+    send_access_request_email_to_owner,
+    send_access_decision_email_to_requester,
+)
 import requests
 from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
@@ -4203,3 +4207,270 @@ class FrontendPasswordResetView(PasswordResetView):
             )
             return super().form_valid(form)
 
+
+
+
+# -------------------------
+# Public Catalog (read-only)
+# -------------------------
+class PublicBatteryViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/public/batteries/
+    GET /api/public/batteries/{id}/
+    """
+    permission_classes = [AllowAny]
+    serializer_class = PublicBatteryCardSerializer
+
+    def get_queryset(self):
+        return (
+            Battery.objects.filter(visibility="public")
+            .annotate(
+                question_count=Count("questions_rel", distinct=True),
+                shared_count=Count("shares", distinct=True),
+                accepted_count=Count("shares", distinct=True),  # accepted == share exists
+            )
+            .order_by("-created_at")
+        )
+
+
+class PublicDeckViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/public/decks/
+    GET /api/public/decks/{id}/
+    """
+    permission_classes = [AllowAny]
+    serializer_class = PublicDeckCardSerializer
+
+    def get_queryset(self):
+        return (
+            Deck.objects.filter(visibility="public")
+            .annotate(
+                card_count=Count("cards", distinct=True),
+                shared_count=Count("shares", distinct=True),
+                accepted_count=Count("shares", distinct=True),
+            )
+            .order_by("-created_at")
+        )
+
+
+# ---------------------------------------
+# Access Requests (requester + owner inbox)
+# ---------------------------------------
+class AccessRequestViewSet(viewsets.ModelViewSet):
+    """
+    - Requester can:
+        POST /api/access-requests/ (create)
+        GET  /api/access-requests/mine/ (list mine)
+    - Owner can:
+        GET  /api/access-requests/inbox/ (list requests I received)
+        POST /api/access-requests/{id}/approve/
+        POST /api/access-requests/{id}/reject/
+        POST /api/access-requests/{id}/cancel/  (requester cancel)
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = AccessRequestSerializer
+    queryset = AccessRequest.objects.select_related(
+        "requester",
+        "owner",
+        "battery__project__owner",
+        "deck__owner",
+    ).order_by("-created_at")
+
+    def get_queryset(self):
+        # default: owner inbox (safer)
+        user = self.request.user
+        return super().get_queryset().filter(owner=user)
+
+    def create(self, request, *args, **kwargs):
+        """
+        POST body:
+          { "battery_id": 123, "requested_access": "view", "message": "..." }
+        OR
+          { "deck_id": 456, "requested_access": "copy", "message": "..." }
+        """
+        ser = AccessRequestCreateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        user = request.user
+        battery_id = ser.validated_data.get("battery_id")
+        deck_id = ser.validated_data.get("deck_id")
+        requested_access = ser.validated_data.get("requested_access", "view")
+        message = ser.validated_data.get("message", "")
+
+        if battery_id:
+            battery = Battery.objects.select_related("project__owner").get(id=battery_id)
+
+            if battery.visibility != "public":
+                return Response({"detail": "Battery is not public."}, status=400)
+
+            owner = battery.project.owner
+            if owner_id := owner.id == user.id:
+                return Response({"detail": "You already own this battery."}, status=400)
+
+            if BatteryShare.objects.filter(battery=battery, shared_with=user).exists():
+                return Response({"detail": "You already have access."}, status=400)
+
+            ar, created = AccessRequest.objects.get_or_create(
+                battery=battery,
+                requester=user,
+                defaults={
+                    "resource_type": "battery",
+                    "owner": owner,
+                    "requested_access": requested_access,
+                    "message": message,
+                },
+            )
+
+            # if exists:
+            if not created:
+                if ar.status == "pending":
+                    return Response(AccessRequestSerializer(ar).data, status=200)
+                return Response({"detail": f"Request already {ar.status}."}, status=400)
+
+            approve_url, reject_url = build_owner_action_links(token=str(ar.token))
+            send_access_request_email_to_owner(
+                owner_email=owner.email,
+                requester_email=user.email,
+                title=f"Battery: {battery.name}",
+                approve_url=approve_url,
+                reject_url=reject_url,
+            )
+            return Response(AccessRequestSerializer(ar).data, status=201)
+
+        # deck
+        deck = Deck.objects.select_related("owner").get(id=deck_id)
+        if deck.visibility != "public":
+            return Response({"detail": "Deck is not public."}, status=400)
+
+        owner = deck.owner
+        if owner.id == user.id:
+            return Response({"detail": "You already own this deck."}, status=400)
+
+        if DeckShare.objects.filter(deck=deck, shared_with=user).exists():
+            return Response({"detail": "You already have access."}, status=400)
+
+        ar, created = AccessRequest.objects.get_or_create(
+            deck=deck,
+            requester=user,
+            defaults={
+                "resource_type": "deck",
+                "owner": owner,
+                "requested_access": requested_access,
+                "message": message,
+            },
+        )
+
+        if not created:
+            if ar.status == "pending":
+                return Response(AccessRequestSerializer(ar).data, status=200)
+            return Response({"detail": f"Request already {ar.status}."}, status=400)
+
+        approve_url, reject_url = build_owner_action_links(token=str(ar.token))
+        send_access_request_email_to_owner(
+            owner_email=owner.email,
+            requester_email=user.email,
+            title=f"Deck: {deck.title}",
+            approve_url=approve_url,
+            reject_url=reject_url,
+        )
+        return Response(AccessRequestSerializer(ar).data, status=201)
+
+    # ---------
+    # Lists
+    # ---------
+    @action(detail=False, methods=["get"], url_path="mine", permission_classes=[IsAuthenticated])
+    def mine(self, request):
+        """Requests I created."""
+        qs = AccessRequest.objects.select_related("battery", "deck", "owner").filter(requester=request.user).order_by("-created_at")
+        status_filter = request.query_params.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return Response(AccessRequestSerializer(qs, many=True).data)
+
+    @action(detail=False, methods=["get"], url_path="inbox", permission_classes=[IsAuthenticated])
+    def inbox(self, request):
+        """Requests sent to me as owner."""
+        qs = AccessRequest.objects.select_related("battery", "deck", "requester").filter(owner=request.user).order_by("-created_at")
+        status_filter = request.query_params.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return Response(AccessRequestSerializer(qs, many=True).data)
+
+    # -----------------
+    # Owner decisions
+    # -----------------
+    def _ensure_owner_pending(self, request, ar: AccessRequest):
+        if ar.owner_id != request.user.id:
+            return Response({"detail": "Not allowed."}, status=403)
+        if ar.status != "pending":
+            return Response({"detail": f"Request is already {ar.status}."}, status=400)
+        return None
+
+    @action(detail=True, methods=["post"], url_path="approve", permission_classes=[IsAuthenticated])
+    def approve(self, request, pk=None):
+        ar = self.get_object()
+        err = self._ensure_owner_pending(request, ar)
+        if err:
+            return err
+
+        if ar.resource_type == "battery":
+            BatteryShare.objects.update_or_create(
+                battery=ar.battery,
+                shared_with=ar.requester,
+                defaults={"access": ar.requested_access},
+            )
+            title = f"Battery: {ar.battery.name}"
+        else:
+            DeckShare.objects.update_or_create(
+                deck=ar.deck,
+                shared_with=ar.requester,
+                defaults={"access": ar.requested_access},
+            )
+            title = f"Deck: {ar.deck.title}"
+
+        ar.status = "approved"
+        ar.decided_at = timezone.now()
+        ar.save(update_fields=["status", "decided_at"])
+
+        send_access_decision_email_to_requester(
+            requester_email=ar.requester.email,
+            title=title,
+            approved=True,
+        )
+        return Response(AccessRequestSerializer(ar).data, status=200)
+
+    @action(detail=True, methods=["post"], url_path="reject", permission_classes=[IsAuthenticated])
+    def reject(self, request, pk=None):
+        ar = self.get_object()
+        err = self._ensure_owner_pending(request, ar)
+        if err:
+            return err
+
+        title = f"Battery: {ar.battery.name}" if ar.resource_type == "battery" else f"Deck: {ar.deck.title}"
+
+        ar.status = "rejected"
+        ar.decided_at = timezone.now()
+        ar.save(update_fields=["status", "decided_at"])
+
+        send_access_decision_email_to_requester(
+            requester_email=ar.requester.email,
+            title=title,
+            approved=False,
+        )
+        return Response(AccessRequestSerializer(ar).data, status=200)
+
+    # -----------------
+    # Requester cancel
+    # -----------------
+    @action(detail=True, methods=["post"], url_path="cancel", permission_classes=[IsAuthenticated])
+    def cancel(self, request, pk=None):
+        ar = self.get_object()
+        if ar.requester_id != request.user.id:
+            return Response({"detail": "Not allowed."}, status=403)
+        if ar.status != "pending":
+            return Response({"detail": f"Request is already {ar.status}."}, status=400)
+
+        ar.status = "canceled"
+        ar.decided_at = timezone.now()
+        ar.save(update_fields=["status", "decided_at"])
+        return Response(AccessRequestSerializer(ar).data, status=200)

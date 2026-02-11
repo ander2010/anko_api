@@ -3,7 +3,7 @@ from django.views.decorators.csrf import csrf_exempt
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    AuthViewSet, FrontendPasswordResetView, RBACViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
+    AccessRequestViewSet, AuthViewSet, FrontendPasswordResetView, PublicBatteryViewSet, PublicDeckViewSet, RBACViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet, 
     SectionViewSet, TopicViewSet, RuleViewSet, BatteryViewSet,
     ResourceViewSet, PermissionViewSet, RoleViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
@@ -42,6 +42,9 @@ router.register(r"flashcards", FlashcardViewSet)
 router.register(r"deck-shares", DeckShareViewSet)
 router.register(r"saved-decks", SavedDeckViewSet)
 router.register(r"rbac", RBACViewSet, basename="rbac")
+router.register(r"public/batteries", PublicBatteryViewSet, basename="public-batteries")
+router.register(r"public/decks", PublicDeckViewSet, basename="public-decks")
+router.register(r"access-requests", AccessRequestViewSet, basename="access-requests")
 # opcional
 # router.register(r"tags", TagViewSet, basename="tags")
 # router.register(r"qa-pairs", QaPairViewSet, basename="qa-pairs")
