@@ -1657,6 +1657,59 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         return "singleChoice"
 
 
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my")
+    def my(self, request):
+        """
+        GET /api/batteries/my/
+
+        Devuelve baterías del usuario:
+        - Owner: batteries de TODOS los proyectos donde project.owner = request.user
+        - Shared: batteries donde BatteryShare.shared_with = request.user
+
+        Query params opcionales:
+        - active=true|false  (default true) -> filtra project.archived=False
+        - status=Ready|Draft (opcional)
+        - visibility=private|shared|public (opcional)
+        - include_counts=true|false (default true)
+        """
+        user = request.user
+
+        qs = Battery.objects.select_related("project", "project__owner").filter(
+            Q(project__owner=user) | Q(shares__shared_with=user)
+        ).distinct()
+
+        # ✅ activos (ajústalo a tu definición)
+        active = (request.query_params.get("active", "true") or "").lower() == "true"
+        if active:
+            qs = qs.filter(project__archived=False)
+
+        status_filter = request.query_params.get("status")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        visibility_filter = request.query_params.get("visibility")
+        if visibility_filter:
+            qs = qs.filter(visibility=visibility_filter)
+
+        include_counts = (request.query_params.get("include_counts", "true") or "").lower() == "true"
+        if include_counts:
+            qs = qs.annotate(
+                question_count=Count("questions_rel", distinct=True),
+                shared_count=Count("shares", distinct=True),
+            )
+
+        qs = qs.order_by("-created_at")
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            ser = self.get_serializer(page, many=True, context={"request": request})
+            return self.get_paginated_response(ser.data)
+
+        ser = self.get_serializer(qs, many=True, context={"request": request})
+        return Response(ser.data)
+
+
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="save-questions-from-qa")
     def save_questions_from_qa(self, request, pk=None):
         battery = self.get_object()
@@ -4542,7 +4595,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="approve", permission_classes=[IsAuthenticated])
     def approve(self, request, pk=None):
-        ar = self.get_object()
+        ar = AccessRequest.objects.select_related("battery", "deck", "requester").get(token=pk)
         err = self._ensure_owner_pending(request, ar)
         if err:
             return err
@@ -4575,7 +4628,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="reject", permission_classes=[IsAuthenticated])
     def reject(self, request, pk=None):
-        ar = self.get_object()
+        ar = AccessRequest.objects.select_related("battery", "deck", "requester").get(token=pk)
         err = self._ensure_owner_pending(request, ar)
         if err:
             return err

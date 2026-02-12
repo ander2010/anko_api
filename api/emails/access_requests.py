@@ -4,7 +4,7 @@ from django.core.mail import send_mail
 
 
 def _build_link(path: str) -> str:
-    base = getattr(settings, "FRONTEND_BASE_URL", "").rstrip("/")
+    base = getattr(settings, "FRONTEND_URL", "").rstrip("/")
     return f"{base}{path}" if base else path
 
 
