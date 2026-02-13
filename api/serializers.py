@@ -259,9 +259,25 @@ class BatterySerializer(serializers.ModelSerializer):
     attempts_count = serializers.SerializerMethodField()
     last_attempt = serializers.SerializerMethodField()
 
+    owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
     class Meta:
         model = Battery
-        fields = "__all__"
+        fields = [
+            "id",
+            "project",
+            "rule",
+            "name",
+            "status",
+            "created_at",
+            "difficulty",
+            "visibility",
+            "description",
+            "external_job_id",
+            "questions",
+            "attempts_count",
+            "last_attempt",
+            "owner_id",
+        ]
 
     def get_attempts_count(self, obj):
         request = self.context.get("request")
@@ -493,7 +509,7 @@ class DeckSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Deck
-        fields = ["id", "ownerId", "title", "visibility", "created_at", "cardsCount", "cards","project","sections","external_job_id"]
+        fields = ["id", "ownerId", "title", "visibility", "created_at", "description", "cardsCount", "cards","project","sections","external_job_id"]
         read_only_fields = ["created_at", "ownerId", "cardsCount", "cards","external_job_id"]
 
     def get_cardsCount(self, obj):

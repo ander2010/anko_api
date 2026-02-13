@@ -2807,6 +2807,71 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         "retrieve",    # GET /decks/{id}/
     }
 
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my")
+    def my(self, request):
+        """
+        GET /api/decks/my/
+
+        Devuelve:
+        - Decks que yo soy owner
+        - Decks compartidos conmigo via DeckShare
+
+        Query params opcionales:
+        - project=<id>
+        - active=true|false (default true) -> project.archived=False (si tu Project tiene archived)
+        - visibility=private|shared|public
+        - include_counts=true|false (default true)
+        - user_id=<id>  (SOLO staff) para consultar decks de otro usuario
+        """
+        # ---- target user (seguro) ----
+        target_user_id = request.query_params.get("user_id")
+        if target_user_id:
+            # Solo staff puede consultar otro user
+            if not (request.user.is_staff or request.user.is_superuser):
+                return Response({"detail": "Not allowed to query other users."}, status=status.HTTP_403_FORBIDDEN)
+            user_id = target_user_id
+        else:
+            user_id = request.user.id
+
+        qs = Deck.objects.select_related("owner", "project").prefetch_related("cards").filter(
+            Q(owner_id=user_id) | Q(shares__shared_with_id=user_id)
+        ).distinct()
+
+        # ---- filtros opcionales ----
+        project_id = request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+
+        # activos: si Project tiene archived
+        active = (request.query_params.get("active", "true") or "").lower() == "true"
+        if active:
+            # si tu Project no tiene archived, quita esta línea
+            qs = qs.filter(project__archived=False)
+
+        visibility = request.query_params.get("visibility")
+        if visibility:
+            qs = qs.filter(visibility=visibility)
+
+        include_counts = (request.query_params.get("include_counts", "true") or "").lower() == "true"
+        if include_counts:
+            qs = qs.annotate(
+                card_count=Count("cards", distinct=True),
+                shared_count=Count("shares", distinct=True),
+            )
+
+        qs = qs.order_by("-created_at")
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            ser = self.get_serializer(page, many=True, context={"request": request})
+            return self.get_paginated_response(ser.data)
+
+        ser = self.get_serializer(qs, many=True, context={"request": request})
+        return Response(ser.data)
+
+        
+
     @action(
     detail=False,
     methods=["post"],

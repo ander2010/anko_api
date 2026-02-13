@@ -212,7 +212,7 @@ class PlanGuard:
         if max_total is None:
             return
 
-        current = Flashcard.objects.filter(user=user).count()
+        current = Flashcard.objects.filter(user_id=user.id).count()
         if current >= max_total:
             raise PermissionDenied(
                 f"Plan limit reached: flashcards_max_total={max_total}. "
