@@ -4164,6 +4164,7 @@ class StatisticsViewSet(viewsets.ViewSet):
 
         projects = Project.objects.filter(Q(owner_id=user_id) | Q(members__id=user_id)).distinct()
         project_ids = list(projects.values_list("id", flat=True))
+        project_by_id = {p.id: p for p in projects}
 
         documents = list(
             Document.objects.filter(project_id__in=project_ids).select_related("project")
@@ -4246,8 +4247,12 @@ class StatisticsViewSet(viewsets.ViewSet):
             document_level.append(
                 {
                     "document_id": doc.id,
+                    "document_name": doc.filename,
                     "project_id": doc.project_id,
+                    "project_name": project_by_id.get(doc.project_id).title if doc.project_id in project_by_id else None,
                     "coverage_percent": round(coverage_percent, 2),
+                    "tries": tries,
+                    "earned": earned,
                     "accuracy_percent": accuracy_percent,
                     "final_percent": final_percent,
                 }
@@ -4265,6 +4270,8 @@ class StatisticsViewSet(viewsets.ViewSet):
             project_level.append(
                 {
                     "project_id": project.id,
+                    "project_name": project.title,
+                    "documents_count": len(project_docs),
                     "percent": percent,
                 }
             )
