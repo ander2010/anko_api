@@ -74,6 +74,7 @@ from .serializers import (
     DeckSerializer, FlashcardSerializer, DeckShareSerializer, SavedDeckSerializer,
     TagSerializer, QaPairSerializer
 )
+from rest_framework.pagination import PageNumberPagination
 from .models import SummaryDocument
 from django.shortcuts import get_object_or_404
 from django.core.mail import send_mail
@@ -87,6 +88,13 @@ from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
 SECRET_TOKEN = "andelef"
 logging.basicConfig(level=logging.INFO)
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"   # 👈 acepta ?page_size=1
+    max_page_size = 200
+
+
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
     serializer_class = UserSerializer
@@ -1613,6 +1621,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     queryset = Battery.objects.all()
     serializer_class = BatterySerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
 
 
@@ -1661,7 +1670,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my")
     def my(self, request):
         """
-        GET /api/batteries/my/
+        GET /api/batteries/my/?page=2&page_size=1
 
         Devuelve baterías del usuario:
         - Owner: batteries de TODOS los proyectos donde project.owner = request.user
@@ -1672,14 +1681,17 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         - status=Ready|Draft (opcional)
         - visibility=private|shared|public (opcional)
         - include_counts=true|false (default true)
+        - page=<int>
+        - page_size=<int>
         """
         user = request.user
 
-        qs = Battery.objects.select_related("project", "project__owner").filter(
-            Q(project__owner=user) | Q(shares__shared_with=user)
-        ).distinct()
+        qs = (
+            Battery.objects.select_related("project", "project__owner")
+            .filter(Q(project__owner=user) | Q(shares__shared_with=user))
+            .distinct()
+        )
 
-        # ✅ activos (ajústalo a tu definición)
         active = (request.query_params.get("active", "true") or "").lower() == "true"
         if active:
             qs = qs.filter(project__archived=False)
@@ -1743,7 +1755,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        
+            
 
     @staticmethod
     @transaction.atomic
@@ -2801,6 +2813,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
+    PaginationClass = StandardResultsSetPagination
+
     
     encrypted_actions = {
         "list",        # GET /decks/
