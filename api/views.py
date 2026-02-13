@@ -19,7 +19,7 @@ from rest_framework.permissions import AllowAny
 import uuid
 import json
 import hashlib
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 import time
 from django.utils import timezone
 from api.utils.cripto import encrypt_user_id
@@ -4229,6 +4229,7 @@ class StatisticsViewSet(viewsets.ViewSet):
 
         projects = Project.objects.filter(Q(owner_id=user_id) | Q(members__id=user_id)).distinct()
         project_ids = list(projects.values_list("id", flat=True))
+        project_by_id = {p.id: p for p in projects}
 
         documents = list(
             Document.objects.filter(project_id__in=project_ids).select_related("project")
@@ -4245,37 +4246,38 @@ class StatisticsViewSet(viewsets.ViewSet):
         )
         qa_by_doc = {row["document_id"]: row for row in qa_counts}
 
+        attempts_agg = BatteryAttempt.objects.filter(user_id=user_id).aggregate(
+            total_questions=Sum("total_questions"),
+            correct_count=Sum("correct_count"),
+        )
+        total_questions = attempts_agg["total_questions"] or 0
+        correct_count = attempts_agg["correct_count"] or 0
+        accuracy = round((correct_count / total_questions * 100), 2) if total_questions else 0
+
         answers = (
             BatteryAttemptAnswer.objects.filter(attempt__user_id=user_id)
             .select_related("question", "question__topic")
             .prefetch_related("question__topic__related_sections")
         )
 
-        total_tries = 0
-        total_earned = 0
         per_doc_stats = {}
 
         for ans in answers:
-            total_tries += 1
-            if ans.is_correct:
-                total_earned += 1
-
             topic = getattr(ans.question, "topic", None)
             if not topic:
                 continue
 
             doc_id_set = {section.document_id for section in topic.related_sections.all()}
             for doc_id in doc_id_set:
-                stats = per_doc_stats.setdefault(doc_id, {"tries": 0, "earned": 0})
-                stats["tries"] += 1
+                stats = per_doc_stats.setdefault(doc_id, {"total_questions": 0, "correct_count": 0})
+                stats["total_questions"] += 1
                 if ans.is_correct:
-                    stats["earned"] += 1
+                    stats["correct_count"] += 1
 
         question_level = {
-            "tries": total_tries,
-            "max_points": total_tries,
-            "earned_points": total_earned,
-            "percent": round((total_earned / total_tries * 100), 2) if total_tries else 0,
+            "total_questions": total_questions,
+            "correct_count": correct_count,
+            "accuracy": accuracy,
         }
 
         document_level = []
@@ -4300,9 +4302,9 @@ class StatisticsViewSet(viewsets.ViewSet):
             else:
                 coverage_percent = 0
 
-            stats = per_doc_stats.get(doc.id, {"tries": 0, "earned": 0})
-            tries = stats["tries"]
-            earned = stats["earned"]
+            stats = per_doc_stats.get(doc.id, {"total_questions": 0, "correct_count": 0})
+            tries = stats["total_questions"]
+            earned = stats["correct_count"]
             accuracy_percent = round((earned / tries * 100), 2) if tries else 0
 
             final_percent = round(accuracy_percent * (coverage_percent / 100), 2)
@@ -4311,9 +4313,13 @@ class StatisticsViewSet(viewsets.ViewSet):
             document_level.append(
                 {
                     "document_id": doc.id,
+                    "document_name": doc.filename,
                     "project_id": doc.project_id,
+                    "project_name": project_by_id.get(doc.project_id).title if doc.project_id in project_by_id else None,
                     "coverage_percent": round(coverage_percent, 2),
-                    "accuracy_percent": accuracy_percent,
+                    "total_questions": tries,
+                    "correct_count": earned,
+                    "accuracy": accuracy_percent,
                     "final_percent": final_percent,
                 }
             )
@@ -4330,6 +4336,8 @@ class StatisticsViewSet(viewsets.ViewSet):
             project_level.append(
                 {
                     "project_id": project.id,
+                    "project_name": project.title,
+                    "documents_count": len(project_docs),
                     "percent": percent,
                 }
             )
