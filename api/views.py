@@ -74,6 +74,7 @@ from .serializers import (
     DeckSerializer, FlashcardSerializer, DeckShareSerializer, SavedDeckSerializer,
     TagSerializer, QaPairSerializer
 )
+from rest_framework.pagination import PageNumberPagination
 from .models import SummaryDocument
 from django.shortcuts import get_object_or_404
 from django.core.mail import send_mail
@@ -87,6 +88,13 @@ from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
 SECRET_TOKEN = "andelef"
 logging.basicConfig(level=logging.INFO)
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"   # 👈 acepta ?page_size=1
+    max_page_size = 200
+
+
 class AuthViewSet(viewsets.GenericViewSet):
     permission_classes = [AllowAny]
     serializer_class = UserSerializer
@@ -1613,6 +1621,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     queryset = Battery.objects.all()
     serializer_class = BatterySerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
 
 
@@ -1661,7 +1670,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my")
     def my(self, request):
         """
-        GET /api/batteries/my/
+        GET /api/batteries/my/?page=2&page_size=1
 
         Devuelve baterías del usuario:
         - Owner: batteries de TODOS los proyectos donde project.owner = request.user
@@ -1672,14 +1681,17 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         - status=Ready|Draft (opcional)
         - visibility=private|shared|public (opcional)
         - include_counts=true|false (default true)
+        - page=<int>
+        - page_size=<int>
         """
         user = request.user
 
-        qs = Battery.objects.select_related("project", "project__owner").filter(
-            Q(project__owner=user) | Q(shares__shared_with=user)
-        ).distinct()
+        qs = (
+            Battery.objects.select_related("project", "project__owner")
+            .filter(Q(project__owner=user) | Q(shares__shared_with=user))
+            .distinct()
+        )
 
-        # ✅ activos (ajústalo a tu definición)
         active = (request.query_params.get("active", "true") or "").lower() == "true"
         if active:
             qs = qs.filter(project__archived=False)
@@ -1743,7 +1755,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        
+            
 
     @staticmethod
     @transaction.atomic
@@ -2801,11 +2813,78 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
+    PaginationClass = StandardResultsSetPagination
+
     
     encrypted_actions = {
         "list",        # GET /decks/
         "retrieve",    # GET /decks/{id}/
     }
+
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my")
+    def my(self, request):
+        """
+        GET /api/decks/my/
+
+        Devuelve:
+        - Decks que yo soy owner
+        - Decks compartidos conmigo via DeckShare
+
+        Query params opcionales:
+        - project=<id>
+        - active=true|false (default true) -> project.archived=False (si tu Project tiene archived)
+        - visibility=private|shared|public
+        - include_counts=true|false (default true)
+        - user_id=<id>  (SOLO staff) para consultar decks de otro usuario
+        """
+        # ---- target user (seguro) ----
+        target_user_id = request.query_params.get("user_id")
+        if target_user_id:
+            # Solo staff puede consultar otro user
+            if not (request.user.is_staff or request.user.is_superuser):
+                return Response({"detail": "Not allowed to query other users."}, status=status.HTTP_403_FORBIDDEN)
+            user_id = target_user_id
+        else:
+            user_id = request.user.id
+
+        qs = Deck.objects.select_related("owner", "project").prefetch_related("cards").filter(
+            Q(owner_id=user_id) | Q(shares__shared_with_id=user_id)
+        ).distinct()
+
+        # ---- filtros opcionales ----
+        project_id = request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+
+        # activos: si Project tiene archived
+        active = (request.query_params.get("active", "true") or "").lower() == "true"
+        if active:
+            # si tu Project no tiene archived, quita esta línea
+            qs = qs.filter(project__archived=False)
+
+        visibility = request.query_params.get("visibility")
+        if visibility:
+            qs = qs.filter(visibility=visibility)
+
+        include_counts = (request.query_params.get("include_counts", "true") or "").lower() == "true"
+        if include_counts:
+            qs = qs.annotate(
+                card_count=Count("cards", distinct=True),
+                shared_count=Count("shares", distinct=True),
+            )
+
+        qs = qs.order_by("-created_at")
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            ser = self.get_serializer(page, many=True, context={"request": request})
+            return self.get_paginated_response(ser.data)
+
+        ser = self.get_serializer(qs, many=True, context={"request": request})
+        return Response(ser.data)
+
+        
 
     @action(
     detail=False,
