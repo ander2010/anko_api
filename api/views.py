@@ -4337,13 +4337,18 @@ class StatisticsViewSet(viewsets.ViewSet):
         )
         doc_ids = [doc.id for doc in documents]
 
-        # Build distinct tag sets per document and per project from QaPair.meta["tags"]
+        # Build distinct tag sets per document from QaPair.meta["tags"]
         doc_tag_sets = {doc_id: set() for doc_id in doc_ids}
-        project_tag_sets = {p.id: set() for p in projects}
-
-        for doc_id, project_id, meta in (
+        qa_counts = (
             QaPair.objects.filter(document_id__in=doc_ids)
-            .values_list("document_id", "document__project_id", "meta")
+            .values("document_id")
+            .annotate(total=Count("id"))
+        )
+        qa_total_by_doc = {row["document_id"]: row["total"] for row in qa_counts}
+
+        for doc_id, meta in (
+            QaPair.objects.filter(document_id__in=doc_ids)
+            .values_list("document_id", "meta")
         ):
             if not meta:
                 continue
@@ -4352,7 +4357,6 @@ class StatisticsViewSet(viewsets.ViewSet):
                 continue
             for tag in tags:
                 doc_tag_sets.setdefault(doc_id, set()).add(tag)
-                project_tag_sets.setdefault(project_id, set()).add(tag)
 
         attempts_agg = BatteryAttempt.objects.filter(user_id=user_id).aggregate(
             total_questions=Sum("total_questions"),
@@ -4402,10 +4406,10 @@ class StatisticsViewSet(viewsets.ViewSet):
 
         for doc in documents:
             doc_distinct_tags = len(doc_tag_sets.get(doc.id, set()))
-            project_total_tags = len(project_tag_sets.get(doc.project_id, set()))
+            total_q = qa_total_by_doc.get(doc.id, 0)
 
-            if project_total_tags > 0:
-                coverage_ratio = doc_distinct_tags / (project_total_tags * coverage_threshold)
+            if total_q > 0:
+                coverage_ratio = doc_distinct_tags / (total_q * coverage_threshold)
                 coverage_percent = min(1, coverage_ratio) * 100
             else:
                 coverage_percent = 0
@@ -4427,7 +4431,7 @@ class StatisticsViewSet(viewsets.ViewSet):
                     "project_name": project_by_id.get(doc.project_id).title if doc.project_id in project_by_id else None,
                     "coverage_percent": round(coverage_percent, 2),
                     "doc_distinct_tags": doc_distinct_tags,
-                    "project_total_tags": project_total_tags,
+                    "doc_total_questions": total_q,
                     "coverage_threshold": coverage_threshold,
                     "total_questions": tries,
                     "correct_count": earned,
@@ -4465,7 +4469,7 @@ class StatisticsViewSet(viewsets.ViewSet):
                     1 for doc in project_docs if per_doc_stats.get(doc.id, {}).get("total_questions", 0) > 0
                 )
 
-            project_total_tags = len(project_tag_sets.get(project.id, set()))
+            project_total_tags = sum(len(doc_tag_sets.get(doc.id, set())) for doc in project_docs)
             docs_with_tags = sum(1 for doc in project_docs if len(doc_tag_sets.get(doc.id, set())) > 0)
             avg_accuracy_percent = round(
                 (total_correct / total_questions_attempted * 100), 2
