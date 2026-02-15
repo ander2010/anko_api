@@ -4254,15 +4254,22 @@ class StatisticsViewSet(viewsets.ViewSet):
         )
         doc_ids = [doc.id for doc in documents]
 
-        qa_counts = (
+        # Build distinct tag sets per document and per project from QaPair.meta["tags"]
+        doc_tag_sets = {doc_id: set() for doc_id in doc_ids}
+        project_tag_sets = {p.id: set() for p in projects}
+
+        for doc_id, project_id, meta in (
             QaPair.objects.filter(document_id__in=doc_ids)
-            .values("document_id")
-            .annotate(
-                total=Count("id"),
-                tagged=Count("id", filter=Q(meta__has_key="tags")),
-            )
-        )
-        qa_by_doc = {row["document_id"]: row for row in qa_counts}
+            .values_list("document_id", "document__project_id", "meta")
+        ):
+            if not meta:
+                continue
+            tags = meta.get("tags") if isinstance(meta, dict) else None
+            if not tags:
+                continue
+            for tag in tags:
+                doc_tag_sets.setdefault(doc_id, set()).add(tag)
+                project_tag_sets.setdefault(project_id, set()).add(tag)
 
         attempts_agg = BatteryAttempt.objects.filter(user_id=user_id).aggregate(
             total_questions=Sum("total_questions"),
@@ -4300,6 +4307,7 @@ class StatisticsViewSet(viewsets.ViewSet):
 
         document_level = []
         doc_percent_map = {}
+        doc_coverage_map = {}
         raw_threshold = request.query_params.get("coverage_threshold", "0.9")
         try:
             coverage_threshold = float(raw_threshold)
@@ -4310,12 +4318,11 @@ class StatisticsViewSet(viewsets.ViewSet):
             coverage_threshold = 0.9
 
         for doc in documents:
-            qa_row = qa_by_doc.get(doc.id, {"total": 0, "tagged": 0})
-            total_q = qa_row["total"] or 0
-            tagged_q = qa_row["tagged"] or 0
+            doc_distinct_tags = len(doc_tag_sets.get(doc.id, set()))
+            project_total_tags = len(project_tag_sets.get(doc.project_id, set()))
 
-            if total_q > 0:
-                coverage_ratio = tagged_q / (total_q * coverage_threshold)
+            if project_total_tags > 0:
+                coverage_ratio = doc_distinct_tags / (project_total_tags * coverage_threshold)
                 coverage_percent = min(1, coverage_ratio) * 100
             else:
                 coverage_percent = 0
@@ -4327,6 +4334,7 @@ class StatisticsViewSet(viewsets.ViewSet):
 
             final_percent = round(accuracy_percent * (coverage_percent / 100), 2)
             doc_percent_map[doc.id] = final_percent
+            doc_coverage_map[doc.id] = round(coverage_percent, 2)
 
             document_level.append(
                 {
@@ -4335,6 +4343,9 @@ class StatisticsViewSet(viewsets.ViewSet):
                     "project_id": doc.project_id,
                     "project_name": project_by_id.get(doc.project_id).title if doc.project_id in project_by_id else None,
                     "coverage_percent": round(coverage_percent, 2),
+                    "doc_distinct_tags": doc_distinct_tags,
+                    "project_total_tags": project_total_tags,
+                    "coverage_threshold": coverage_threshold,
                     "total_questions": tries,
                     "correct_count": earned,
                     "accuracy": accuracy_percent,
@@ -4347,9 +4358,35 @@ class StatisticsViewSet(viewsets.ViewSet):
             project_docs = [doc for doc in documents if doc.project_id == project.id]
             if not project_docs:
                 percent = 0
+                avg_doc_distinct_tags = 0
+                avg_coverage_percent = 0
+                docs_with_attempts = 0
+                total_questions_attempted = 0
+                total_correct = 0
             else:
                 total = sum(doc_percent_map.get(doc.id, 0) for doc in project_docs)
                 percent = round(total / len(project_docs), 2) if project_docs else 0
+                avg_doc_distinct_tags = round(
+                    sum(len(doc_tag_sets.get(doc.id, set())) for doc in project_docs) / len(project_docs), 2
+                )
+                avg_coverage_percent = round(
+                    sum(doc_coverage_map.get(doc.id, 0) for doc in project_docs) / len(project_docs), 2
+                )
+                total_questions_attempted = sum(
+                    per_doc_stats.get(doc.id, {}).get("total_questions", 0) for doc in project_docs
+                )
+                total_correct = sum(
+                    per_doc_stats.get(doc.id, {}).get("correct_count", 0) for doc in project_docs
+                )
+                docs_with_attempts = sum(
+                    1 for doc in project_docs if per_doc_stats.get(doc.id, {}).get("total_questions", 0) > 0
+                )
+
+            project_total_tags = len(project_tag_sets.get(project.id, set()))
+            docs_with_tags = sum(1 for doc in project_docs if len(doc_tag_sets.get(doc.id, set())) > 0)
+            avg_accuracy_percent = round(
+                (total_correct / total_questions_attempted * 100), 2
+            ) if total_questions_attempted else 0
 
             project_level.append(
                 {
@@ -4357,6 +4394,16 @@ class StatisticsViewSet(viewsets.ViewSet):
                     "project_name": project.title,
                     "documents_count": len(project_docs),
                     "percent": percent,
+                    "project_total_tags": project_total_tags,
+                    "avg_doc_distinct_tags": avg_doc_distinct_tags,
+                    "avg_coverage_percent": avg_coverage_percent,
+                    "docs_with_tags": docs_with_tags,
+                    "docs_without_tags": len(project_docs) - docs_with_tags,
+                    "coverage_threshold": coverage_threshold,
+                    "docs_with_attempts": docs_with_attempts,
+                    "avg_accuracy_percent": avg_accuracy_percent,
+                    "total_questions_attempted": total_questions_attempted,
+                    "total_correct": total_correct,
                 }
             )
 
