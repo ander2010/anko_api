@@ -4337,8 +4337,9 @@ class StatisticsViewSet(viewsets.ViewSet):
         )
         doc_ids = [doc.id for doc in documents]
 
-        # Build distinct tag sets per document from QaPair.meta["tags"]
+        # Build tag stats per document from QaPair.meta["tags"]
         doc_tag_sets = {doc_id: set() for doc_id in doc_ids}
+        doc_tag_counts = {doc_id: 0 for doc_id in doc_ids}
         qa_counts = (
             QaPair.objects.filter(document_id__in=doc_ids)
             .values("document_id")
@@ -4357,6 +4358,7 @@ class StatisticsViewSet(viewsets.ViewSet):
                 continue
             for tag in tags:
                 doc_tag_sets.setdefault(doc_id, set()).add(tag)
+                doc_tag_counts[doc_id] = doc_tag_counts.get(doc_id, 0) + 1
 
         attempts_agg = BatteryAttempt.objects.filter(user_id=user_id).aggregate(
             total_questions=Sum("total_questions"),
@@ -4368,7 +4370,7 @@ class StatisticsViewSet(viewsets.ViewSet):
 
         answers = (
             BatteryAttemptAnswer.objects.filter(attempt__user_id=user_id)
-            .select_related("question", "question__topic")
+            .select_related("attempt", "question", "question__topic")
             .prefetch_related("question__topic__related_sections")
         )
 
@@ -4381,10 +4383,27 @@ class StatisticsViewSet(viewsets.ViewSet):
 
             doc_id_set = {section.document_id for section in topic.related_sections.all()}
             for doc_id in doc_id_set:
-                stats = per_doc_stats.setdefault(doc_id, {"total_questions": 0, "correct_count": 0})
+                stats = per_doc_stats.setdefault(
+                    doc_id,
+                    {
+                        "total_questions": 0,
+                        "correct_count": 0,
+                        "first_attempt_at": None,
+                        "last_attempt_at": None,
+                    },
+                )
                 stats["total_questions"] += 1
                 if ans.is_correct:
                     stats["correct_count"] += 1
+                attempt = ans.attempt
+                started_at = getattr(attempt, "started_at", None)
+                finished_at = getattr(attempt, "finished_at", None)
+                if started_at:
+                    if not stats["first_attempt_at"] or started_at < stats["first_attempt_at"]:
+                        stats["first_attempt_at"] = started_at
+                if finished_at:
+                    if not stats["last_attempt_at"] or finished_at > stats["last_attempt_at"]:
+                        stats["last_attempt_at"] = finished_at
 
         question_level = {
             "total_questions": total_questions,
@@ -4415,9 +4434,16 @@ class StatisticsViewSet(viewsets.ViewSet):
                 coverage_percent = 0
 
             stats = per_doc_stats.get(doc.id, {"total_questions": 0, "correct_count": 0})
-            tries = stats["total_questions"]
+            attempts_questions = stats["total_questions"]
             earned = stats["correct_count"]
-            accuracy_percent = round((earned / tries * 100), 2) if tries else 0
+            accuracy_percent = round((earned / attempts_questions * 100), 2) if attempts_questions else 0
+            first_attempt_at = stats.get("first_attempt_at")
+            last_attempt_at = stats.get("last_attempt_at")
+            study_seconds = (
+                int((last_attempt_at - first_attempt_at).total_seconds())
+                if first_attempt_at and last_attempt_at
+                else 0
+            )
 
             final_percent = round(accuracy_percent * (coverage_percent / 100), 2)
             doc_percent_map[doc.id] = final_percent
@@ -4432,10 +4458,15 @@ class StatisticsViewSet(viewsets.ViewSet):
                     "coverage_percent": round(coverage_percent, 2),
                     "doc_distinct_tags": doc_distinct_tags,
                     "doc_total_questions": total_q,
+                    "doc_total_tags": doc_tag_counts.get(doc.id, 0),
                     "coverage_threshold": coverage_threshold,
-                    "total_questions": tries,
+                    "total_questions": total_q,
+                    "attempted_questions": attempts_questions,
                     "correct_count": earned,
                     "accuracy": accuracy_percent,
+                    "first_attempt_at": first_attempt_at,
+                    "last_attempt_at": last_attempt_at,
+                    "study_seconds": study_seconds,
                     "final_percent": final_percent,
                 }
             )
