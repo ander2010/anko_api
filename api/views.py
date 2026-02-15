@@ -4360,6 +4360,49 @@ class StatisticsViewSet(viewsets.ViewSet):
                 doc_tag_sets.setdefault(doc_id, set()).add(tag)
                 doc_tag_counts[doc_id] = doc_tag_counts.get(doc_id, 0) + 1
 
+        # Build battery associations per document
+        doc_to_battery_ids = {doc_id: set() for doc_id in doc_ids}
+        battery_q_counts = {}
+        for doc_id, battery_id, total in (
+            BatteryQuestion.objects.filter(topic__related_sections__document_id__in=doc_ids)
+            .values("topic__related_sections__document_id", "battery_id")
+            .annotate(total=Count("id", distinct=True))
+            .values_list("topic__related_sections__document_id", "battery_id", "total")
+        ):
+            doc_to_battery_ids.setdefault(doc_id, set()).add(battery_id)
+            battery_q_counts[(doc_id, battery_id)] = total
+
+        all_battery_ids = {bid for bids in doc_to_battery_ids.values() for bid in bids}
+        battery_attempt_counts = {
+            row["battery_id"]: row["attempts"]
+            for row in BatteryAttempt.objects.filter(user_id=user_id, battery_id__in=all_battery_ids)
+            .values("battery_id")
+            .annotate(attempts=Count("id"))
+        }
+        battery_created_at = {
+            bid: created_at
+            for bid, created_at in Battery.objects.filter(id__in=all_battery_ids).values_list("id", "created_at")
+        }
+
+        doc_first_battery_created_at = {}
+        for doc_id, battery_ids in doc_to_battery_ids.items():
+            created_list = [battery_created_at.get(bid) for bid in battery_ids if battery_created_at.get(bid)]
+            doc_first_battery_created_at[doc_id] = min(created_list) if created_list else None
+
+        doc_last_attempt_finished_at = {}
+        for battery_id, finished_at in (
+            BatteryAttempt.objects.filter(
+                user_id=user_id,
+                battery_id__in=all_battery_ids,
+                finished_at__isnull=False,
+            ).values_list("battery_id", "finished_at")
+        ):
+            for doc_id, battery_ids in doc_to_battery_ids.items():
+                if battery_id in battery_ids:
+                    current = doc_last_attempt_finished_at.get(doc_id)
+                    if not current or finished_at > current:
+                        doc_last_attempt_finished_at[doc_id] = finished_at
+
         attempts_agg = BatteryAttempt.objects.filter(user_id=user_id).aggregate(
             total_questions=Sum("total_questions"),
             correct_count=Sum("correct_count"),
@@ -4388,22 +4431,13 @@ class StatisticsViewSet(viewsets.ViewSet):
                     {
                         "total_questions": 0,
                         "correct_count": 0,
-                        "first_attempt_at": None,
-                        "last_attempt_at": None,
+                        "earned_points": 0,
                     },
                 )
                 stats["total_questions"] += 1
                 if ans.is_correct:
                     stats["correct_count"] += 1
-                attempt = ans.attempt
-                started_at = getattr(attempt, "started_at", None)
-                finished_at = getattr(attempt, "finished_at", None)
-                if started_at:
-                    if not stats["first_attempt_at"] or started_at < stats["first_attempt_at"]:
-                        stats["first_attempt_at"] = started_at
-                if finished_at:
-                    if not stats["last_attempt_at"] or finished_at > stats["last_attempt_at"]:
-                        stats["last_attempt_at"] = finished_at
+                stats["earned_points"] += float(ans.points_earned or 0)
 
         question_level = {
             "total_questions": total_questions,
@@ -4433,12 +4467,17 @@ class StatisticsViewSet(viewsets.ViewSet):
             else:
                 coverage_percent = 0
 
-            stats = per_doc_stats.get(doc.id, {"total_questions": 0, "correct_count": 0})
-            attempts_questions = stats["total_questions"]
+            stats = per_doc_stats.get(doc.id, {"total_questions": 0, "correct_count": 0, "earned_points": 0})
             earned = stats["correct_count"]
-            accuracy_percent = round((earned / attempts_questions * 100), 2) if attempts_questions else 0
-            first_attempt_at = stats.get("first_attempt_at")
-            last_attempt_at = stats.get("last_attempt_at")
+            earned_points = stats["earned_points"]
+            total_possible_points = 0
+            for battery_id in doc_to_battery_ids.get(doc.id, set()):
+                questions_in_battery = battery_q_counts.get((doc.id, battery_id), 0)
+                attempts = battery_attempt_counts.get(battery_id, 0)
+                total_possible_points += questions_in_battery * attempts
+            accuracy_percent = round((earned_points / total_possible_points * 100), 2) if total_possible_points else 0
+            first_attempt_at = doc_first_battery_created_at.get(doc.id)
+            last_attempt_at = doc_last_attempt_finished_at.get(doc.id)
             study_seconds = (
                 int((last_attempt_at - first_attempt_at).total_seconds())
                 if first_attempt_at and last_attempt_at
@@ -4461,8 +4500,9 @@ class StatisticsViewSet(viewsets.ViewSet):
                     "doc_total_tags": doc_tag_counts.get(doc.id, 0),
                     "coverage_threshold": coverage_threshold,
                     "total_questions": total_q,
-                    "attempted_questions": attempts_questions,
                     "correct_count": earned,
+                    "total_possible_points": total_possible_points,
+                    "total_earned_points": round(earned_points, 2),
                     "accuracy": accuracy_percent,
                     "first_attempt_at": first_attempt_at,
                     "last_attempt_at": last_attempt_at,
