@@ -260,6 +260,9 @@ class BatterySerializer(serializers.ModelSerializer):
     last_attempt = serializers.SerializerMethodField()
 
     owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
+    approved_count = serializers.SerializerMethodField()
+    rejected_count = serializers.SerializerMethodField()
+
     class Meta:
         model = Battery
         fields = [
@@ -277,7 +280,15 @@ class BatterySerializer(serializers.ModelSerializer):
             "attempts_count",
             "last_attempt",
             "owner_id",
+            "approved_count",
+            "rejected_count",
         ]
+
+    def get_approved_count(self, obj):
+        return obj.access_requests.filter(status="approved").count()
+
+    def get_rejected_count(self, obj):
+        return obj.access_requests.filter(status="rejected").count()
 
     def get_attempts_count(self, obj):
         request = self.context.get("request")
@@ -506,14 +517,22 @@ class DeckSerializer(serializers.ModelSerializer):
     ownerId = serializers.IntegerField(source="owner_id", read_only=True)
     cardsCount = serializers.SerializerMethodField()
     cards = FlashcardSerializer(many=True, read_only=True)
+    approved_count = serializers.SerializerMethodField()
+    rejected_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Deck
-        fields = ["id", "ownerId", "title", "visibility", "created_at", "description", "cardsCount", "cards","project","sections","external_job_id"]
+        fields = ["id", "ownerId", "title", "visibility", "created_at", "description", "cardsCount", "cards","project","sections","external_job_id", "approved_count", "rejected_count"]
         read_only_fields = ["created_at", "ownerId", "cardsCount", "cards","external_job_id"]
 
     def get_cardsCount(self, obj):
         return obj.cards.count()
+
+    def get_approved_count(self, obj):
+        return obj.access_requests.filter(status="approved").count()
+
+    def get_rejected_count(self, obj):
+        return obj.access_requests.filter(status="rejected").count()
 
 
 class DeckShareSerializer(serializers.ModelSerializer):

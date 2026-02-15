@@ -546,6 +546,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination  # ✅
     encrypted_actions = {
         "list",
         # "retrieve",
@@ -1235,6 +1236,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination  # ✅
 
     @action(detail=False, methods=["post"], url_path="register")
     def register(self, request):
@@ -1548,6 +1550,7 @@ class SectionViewSet(viewsets.ModelViewSet):
 class TopicViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = TopicSerializer
+    pagination_class = StandardResultsSetPagination  # ✅
 
     @action(detail=True, methods=["get"], url_path="grouped-sections")
     def grouped_sections(self, request, pk=None):
@@ -1594,6 +1597,7 @@ class TopicViewSet(viewsets.ModelViewSet):
 
 class RuleViewSet(viewsets.ModelViewSet):
     serializer_class = RuleSerializer
+    pagination_class = StandardResultsSetPagination  # ✅
 
     def get_queryset(self):
         qs = Rule.objects.all()
@@ -2813,7 +2817,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
-    PaginationClass = StandardResultsSetPagination
+    pagination_class = StandardResultsSetPagination  # ✅
 
     
     encrypted_actions = {

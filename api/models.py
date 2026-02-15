@@ -301,6 +301,9 @@ class Rule(models.Model):
 
     def __str__(self):
         return self.name
+    
+    class Meta:
+        ordering = [ "-id"]
 
 class Battery(models.Model):
     VISIBILITY_CHOICES = [
@@ -330,6 +333,8 @@ class Battery(models.Model):
     external_job_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     def __str__(self):
         return self.name
+    class Meta:
+        ordering = ["-created_at", "-id"]
 
 class BatteryQuestion(models.Model):
     QUESTION_TYPE_CHOICES = [
