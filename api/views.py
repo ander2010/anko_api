@@ -2523,6 +2523,89 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         return Response(self.get_serializer(battery).data)
     
 
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="answer")
+    @transaction.atomic
+    def answer(self, request, pk=None):
+        battery = self.get_object()
+
+        attempt_id = request.data.get("attempt_id")
+        question_id = request.data.get("question_id")
+        selected_option_id = request.data.get("selected_option_id")      # para trueFalse/singleChoice
+        selected_option_ids = request.data.get("selected_option_ids")    # para multiSelect (lista)
+
+        if not attempt_id or not question_id:
+            return Response({"detail": "attempt_id and question_id are required"}, status=400)
+
+        attempt = BatteryAttempt.objects.filter(
+            id=attempt_id, battery=battery, user=request.user
+        ).first()
+        if not attempt:
+            return Response({"detail": "Attempt not found"}, status=404)
+
+        if attempt.status != "in_progress":
+            return Response({"detail": "Attempt is not in progress"}, status=400)
+
+        q = BatteryQuestion.objects.filter(id=question_id, battery=battery).prefetch_related("options").first()
+        if not q:
+            return Response({"detail": "Question not found for this battery"}, status=404)
+
+        # crea/obtiene la respuesta
+        ans, _ = BatteryAttemptAnswer.objects.get_or_create(
+            attempt=attempt,
+            question=q,
+            defaults={"is_correct": False, "points_earned": 0},
+        )
+
+        # limpiar selección previa
+        ans.selected_option = None
+        ans.selected_options.clear()
+
+        # set según tipo
+        if q.type in ("singleChoice", "trueFalse"):
+            if not selected_option_id:
+                return Response({"detail": "selected_option_id is required for singleChoice/trueFalse"}, status=400)
+
+            opt = BatteryOption.objects.filter(id=selected_option_id, question=q).first()
+            if not opt:
+                return Response({"detail": "Option not found for this question"}, status=404)
+
+            ans.selected_option = opt
+            ans.is_correct = bool(opt.correct)
+            ans.points_earned = q.points if ans.is_correct else 0
+            ans.save(update_fields=["selected_option", "is_correct", "points_earned"])
+
+        elif q.type == "multiSelect":
+            if not isinstance(selected_option_ids, list) or not selected_option_ids:
+                return Response({"detail": "selected_option_ids (list) is required for multiSelect"}, status=400)
+
+            opts = list(BatteryOption.objects.filter(id__in=selected_option_ids, question=q))
+            if len(opts) != len(set(selected_option_ids)):
+                return Response({"detail": "One or more options are invalid for this question"}, status=400)
+
+            ans.save()  # debe existir antes del m2m
+            ans.selected_options.add(*opts)
+
+            correct_ids = set(BatteryOption.objects.filter(question=q, correct=True).values_list("id", flat=True))
+            chosen_ids = set(o.id for o in opts)
+
+            ans.is_correct = (chosen_ids == correct_ids)
+            ans.points_earned = q.points if ans.is_correct else 0
+            ans.save(update_fields=["is_correct", "points_earned"])
+
+        else:
+            return Response({"detail": f"Unsupported question type: {q.type}"}, status=400)
+
+        return Response({
+            "ok": True,
+            "attempt_id": attempt.id,
+            "question_id": q.id,
+            "is_correct": ans.is_correct,
+            "points_earned": str(ans.points_earned),
+        }, status=200)
+
+
+
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
     def start_attempt(self, request, pk=None):
         battery = self.get_object()
