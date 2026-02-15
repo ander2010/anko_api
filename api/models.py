@@ -775,6 +775,31 @@ class SummaryDocument(models.Model):
     class Meta:
         db_table = "summary_document"
 
+class SummaryJob(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    job_id = models.CharField(max_length=255)
+    item_type = models.CharField(max_length=255)
+    user_id = models.CharField(max_length=255, null=True, blank=True)
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="summary_jobs",
+    )
+    summary = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "summary_job"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job_id", "item_type"],
+                name="uix_summary_job_type",
+            )
+        ]
+
 class UserSession(models.Model):
     session_id = models.CharField(max_length=255, unique=True,null=True)
     user = models.ForeignKey(
