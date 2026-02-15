@@ -4432,12 +4432,15 @@ class StatisticsViewSet(viewsets.ViewSet):
                         "total_questions": 0,
                         "correct_count": 0,
                         "earned_points": 0,
+                        "attempt_ids": set(),
                     },
                 )
                 stats["total_questions"] += 1
                 if ans.is_correct:
                     stats["correct_count"] += 1
                 stats["earned_points"] += float(ans.points_earned or 0)
+                if ans.attempt_id:
+                    stats["attempt_ids"].add(ans.attempt_id)
 
         question_level = {
             "total_questions": total_questions,
@@ -4467,7 +4470,10 @@ class StatisticsViewSet(viewsets.ViewSet):
             else:
                 coverage_percent = 0
 
-            stats = per_doc_stats.get(doc.id, {"total_questions": 0, "correct_count": 0, "earned_points": 0})
+            stats = per_doc_stats.get(
+                doc.id,
+                {"total_questions": 0, "correct_count": 0, "earned_points": 0, "attempt_ids": set()},
+            )
             earned = stats["correct_count"]
             earned_points = stats["earned_points"]
             total_possible_points = 0
@@ -4504,6 +4510,7 @@ class StatisticsViewSet(viewsets.ViewSet):
                     "total_possible_points": total_possible_points,
                     "total_earned_points": round(earned_points, 2),
                     "accuracy": accuracy_percent,
+                    "attempts_count": len(stats["attempt_ids"]),
                     "first_attempt_at": first_attempt_at,
                     "last_attempt_at": last_attempt_at,
                     "study_seconds": study_seconds,
