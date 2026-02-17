@@ -24,7 +24,7 @@ import time
 from django.utils import timezone
 from api.utils.cripto import encrypt_user_id
 import websockets
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 import re
 import asyncio
 from dj_rest_auth.registration.views import SocialLoginView
@@ -2166,6 +2166,14 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             difficulty=difficulty_db,
             # external_doc_id=str(document_id),
         )
+        project=Project.objects.filter(id=project_id).first()  # para asegurar que existe y evitar error en topic creation
+        topic = ensure_topic_for_flashcards(
+        project=project,
+        name=battery.name,                 # el título principal
+        description=battery.description,     # si existe
+        question_count_target=int(request.data.get("quantity", 3)),
+        sections=sections_qs,
+    )
 
         base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
         url = f"{normalize_base_url(base_url)}/process-request"
@@ -2896,6 +2904,38 @@ class InviteViewSet(viewsets.ModelViewSet):
 # Flashcards
 # ==========================================================
 
+
+
+def ensure_topic_for_flashcards(
+    *,
+    project: Project,
+    name: str,
+    question_count_target: int,
+    description: str = "",
+    sections: Optional[Iterable[Section]] = None,
+) -> Topic:
+    """
+    Crea un Topic 'active' cada vez que vayas a crear/generar flashcards.
+    - name: título principal (ej: título de la batería/deck)
+    - description: descripción (si existe)
+    - question_count_target: cantidad objetivo de preguntas/flashcards
+    - sections: se asignan como related_sections (opcional)
+    """
+    topic = Topic.objects.create(
+        project=project,
+        name=(name or "").strip()[:255],
+        description=description or "",
+        status="active",
+        question_count_target=max(int(question_count_target or 0), 1),
+    )
+
+    if sections:
+        topic.related_sections.set(sections)
+
+    return topic
+
+
+
 class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
     serializer_class = DeckSerializer
@@ -3167,7 +3207,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if project_id:
             qs = qs.filter(project_id=project_id)
 
-        return qs
+        return qs.order_by("-id")  # o "-created_at"
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -3226,6 +3266,15 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             visibility=visibility,
         )
 
+        topic = ensure_topic_for_flashcards(
+        project=project,
+        name=deck.title,                 # el título principal
+        description=deck.description,     # si existe
+        question_count_target=cards_count,
+        sections=section_ids,
+    )
+        
+
         # --- Attach Sections (optional) ---
         attached_section_ids = []
         if section_ids:
@@ -3250,6 +3299,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             return Response({"detail": "tags must be a list (or omitted)"}, status=status.HTTP_400_BAD_REQUEST)
 
         difficulty = data.get("difficulty") or "medium"
+        job_id = str(uuid.uuid4())
+        print("Generated job_id:", job_id)
 
         svc_payload = {
             "document_ids": document_ids,
@@ -3257,6 +3308,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             "quantity": cards_count,
             "difficulty": difficulty,
             "user_id": str(request.user.id),
+            "job_id":job_id,
         }
 
         # --- Call microservice ---
@@ -3269,8 +3321,11 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 {"detail": "Failed calling flashcards service", "error": str(e)},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+        
+        print("Flashcards service response:", job_id)
 
         job_id = svc_data.get("job_id")
+        print("Flashcards service responded with job_id:", job_id)
         if not job_id:
             return Response({"detail": "flashcards service did not return job_id", "service_response": svc_data},
                             status=status.HTTP_502_BAD_GATEWAY)
@@ -3515,6 +3570,14 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             visibility=visibility,
         )
 
+
+        topic = ensure_topic_for_flashcards(
+            project=project,
+            name=deck.title,                 # el título principal
+            description=deck.description,     # si existe
+            question_count_target=cards_count,
+            sections=section_ids,
+        )
         # --- Attach Sections (optional) ---
         attached_section_ids = []
         tags = []  # 👈 ahora tags sale de sections
@@ -3545,7 +3608,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             tags = data.get("tags") or []
         
         difficulty = (data.get("difficulty") or "medium").lower()
-
+        job_id = str(uuid.uuid4())
+        print("Generated job_id:", job_id)
         svc_payload = {
         #      "document_ids": ["test"],
         # "tags": ["Barcelona"],
@@ -3553,7 +3617,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             "tags": tags,
             "quantity": cards_count,                
             "difficulty": difficulty,
-            "user_id": str(request.user.id),          
+            "user_id": str(request.user.id),   
+            "job_id": job_id,       
         }
 
         # --- Call microservice ---
@@ -3569,6 +3634,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             )
 
         job_id = svc_data.get("job_id")
+        print("Flashcards service responded with job_id:", job_id)
         if not job_id:
             return Response(
                 {"detail": "flashcards service did not return job_id", "service_response": svc_data},
