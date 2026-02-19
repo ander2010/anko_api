@@ -1591,7 +1591,7 @@ class TopicViewSet(viewsets.ModelViewSet):
         qs = Topic.objects.all()
         project_id = self.request.query_params.get("project")
         if project_id:
-            qs = qs.filter(project_id=project_id)
+            qs = qs.filter(project_id=project_id).filter(is_visible=True)
         return qs
 
 
@@ -1861,11 +1861,12 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
             qtype = _map_question_type(meta_type) if meta_type else qtype_default
             order_val = int(qa_index) if qa_index is not None else idx
+            topic = Topic.objects.filter(project=battery.project).last()
 
             q_objs.append(
                 BatteryQuestion(
                     battery=battery,
-                    topic=None,
+                    topic=topic,  # asignamos a un topic genérico del proyecto (puedes mejorar esto luego)
                     type=qtype,
                     question=question_text,
                     explanation=_safe_str(meta.get("explanation") if isinstance(meta, dict) else ""),
@@ -2927,6 +2928,7 @@ def ensure_topic_for_flashcards(
         description=description or "",
         status="active",
         question_count_target=max(int(question_count_target or 0), 1),
+        is_visible=False,  # no queremos que aparezca en la lista de topics normales (opcional, depende de tu modelo    
     )
 
     if sections:
@@ -3257,6 +3259,18 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if hasattr(project, "owner_id") and project.owner_id != request.user.id:
             return Response({"detail": "You do not own this project."}, status=status.HTTP_403_FORBIDDEN)
 
+
+        topic = ensure_topic_for_flashcards(
+        project=project,
+        name=title,                 # el título principal
+        description=description,     # si existe
+        question_count_target=cards_count,
+        sections=section_ids,
+     
+
+    )
+
+
         # --- Create Deck ---
         deck = Deck.objects.create(
             project=project,
@@ -3264,15 +3278,10 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             title=title,
             description=description,
             visibility=visibility,
+            topic=topic,  # asociamos el topic creado al deck (si tu modelo Deck tiene este campo; si no, puedes omitirlo o manejarlo como mejor te sirva   
         )
 
-        topic = ensure_topic_for_flashcards(
-        project=project,
-        name=deck.title,                 # el título principal
-        description=deck.description,     # si existe
-        question_count_target=cards_count,
-        sections=section_ids,
-    )
+       
         
 
         # --- Attach Sections (optional) ---
@@ -3323,17 +3332,22 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             )
         
         print("Flashcards service response:", job_id)
-
         job_id = svc_data.get("job_id")
-        print("Flashcards service responded with job_id:", job_id)
         if not job_id:
-            return Response({"detail": "flashcards service did not return job_id", "service_response": svc_data},
-                            status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"detail": "flashcards service did not return job_id", "service_response": svc_data},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
-        # construir ws urls
+        # ✅ GUARDA job_id EN EL DECK (clave)
+        deck.external_job_id = str(job_id)
+        deck.save(update_fields=["external_job_id"])
+
+        # construir ws urls (ws / wss según protocolo del base_url)
         host = base_url.split("://", 1)[-1].lstrip("/")
-        ws_flashcards = f"ws://{host}/ws/flashcards/{job_id}"
-        ws_progress = f"ws://{host}/ws/progress/{job_id}"
+        ws_scheme = "wss" if base_url.startswith("https://") else "ws"
+        ws_flashcards = f"{ws_scheme}://{host}/ws/flashcards/{job_id}"
+        ws_progress = f"{ws_scheme}://{host}/ws/progress/{job_id}"
 
         return Response(
             {
@@ -3346,20 +3360,58 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     "owner_id": deck.owner_id,
                     "section_ids": attached_section_ids,
                     "sections_count": len(attached_section_ids),
+                    "external_job_id": str(job_id),
                 },
                 "job": {
-                    "job_id": job_id,
+                    "job_id": str(job_id),
                     "ws_flashcards": ws_flashcards,
                     "ws_progress": ws_progress,
-                    # por si te sirve guardar request
                     "requested_quantity": cards_count,
                     "difficulty": difficulty,
                     "tags": tags,
                     "document_ids": document_ids,
                 },
             },
-            status=status.HTTP_201_CREATED
+            status=status.HTTP_201_CREATED,
         )
+
+
+        # job_id = svc_data.get("job_id")
+        # print("Flashcards service responded with job_id:", job_id)
+        # if not job_id:
+        #     return Response({"detail": "flashcards service did not return job_id", "service_response": svc_data},
+        #                     status=status.HTTP_502_BAD_GATEWAY)
+
+        # # construir ws urls
+        # host = base_url.split("://", 1)[-1].lstrip("/")
+        # ws_flashcards = f"ws://{host}/ws/flashcards/{job_id}"
+        # ws_progress = f"ws://{host}/ws/progress/{job_id}"
+
+        # return Response(
+        #     {
+        #         "project_id": project_id,
+        #         "deck": {
+        #             "id": deck.id,
+        #             "title": deck.title,
+        #             "description": deck.description,
+        #             "visibility": deck.visibility,
+        #             "owner_id": deck.owner_id,
+        #             "section_ids": attached_section_ids,
+        #             "sections_count": len(attached_section_ids),
+        #         },
+        #         "job": {
+        #             "job_id": job_id,
+        #             "ws_flashcards": ws_flashcards,
+        #             "ws_progress": ws_progress,
+        #             # por si te sirve guardar request
+        #             "requested_quantity": cards_count,
+        #             "difficulty": difficulty,
+        #             "tags": tags,
+        #             "document_ids": document_ids,
+        #         },
+        #     },
+        #     status=status.HTTP_201_CREATED
+        # )
     
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="create-with-flashcards")
@@ -3429,6 +3481,17 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
             clean_cards.append({"front": front, "back": back, "notes": notes})
         job_id = uuid.uuid4()
+
+        topic = ensure_topic_for_flashcards(
+            project=project,
+            name=title,                 # el título principal
+            description=description,     # si existe
+            question_count_target=len(clean_cards),
+            sections=section_ids,
+          
+        )
+
+
         # --------- Create deck ----------
         deck = Deck.objects.create(
             project=project,
@@ -3437,6 +3500,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             description=description,
             visibility=visibility,
             external_job_id=job_id,
+            topic=topic,  # asociamos el topic creado al deck (si tu modelo Deck tiene este campo; si no, puedes omitirlo o manejarlo como mejor te sirva   
             
         )
 
@@ -3561,6 +3625,18 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if hasattr(project, "owner_id") and project.owner_id != request.user.id:
             return Response({"detail": "You do not own this project."}, status=status.HTTP_403_FORBIDDEN)
 
+
+
+        topic = ensure_topic_for_flashcards(
+            project=project,
+            name=title,                 # el título principal
+            description=description,     # si existe
+            question_count_target=cards_count,
+            sections=section_ids,
+           
+        )
+
+
         # --- Create Deck ---
         deck = Deck.objects.create(
             project=project,
@@ -3568,16 +3644,11 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             title=title,
             description=description,
             visibility=visibility,
+            topic=topic,
         )
 
 
-        topic = ensure_topic_for_flashcards(
-            project=project,
-            name=deck.title,                 # el título principal
-            description=deck.description,     # si existe
-            question_count_target=cards_count,
-            sections=section_ids,
-        )
+        
         # --- Attach Sections (optional) ---
         attached_section_ids = []
         tags = []  # 👈 ahora tags sale de sections

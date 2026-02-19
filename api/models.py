@@ -275,6 +275,7 @@ class Topic(models.Model):
         blank=True,
     )
     question_count_target = models.PositiveIntegerField(default=20)
+    is_visible = models.BooleanField(default=True)
 
     def __str__(self):
         return self.name
@@ -545,6 +546,7 @@ class Deck(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+    topic = models.ForeignKey(Topic, on_delete=models.SET_NULL, null=True, blank=True)
     # ✅ Job externo asociado (último o actual)
     external_job_id = models.CharField(max_length=64, blank=True, null=True, db_index=True)
     def __str__(self):
