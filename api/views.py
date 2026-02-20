@@ -44,13 +44,13 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate, login
-from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, UserSession
+from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, UserSession
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
+    AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SummaryJobSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
     SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from urllib.parse import quote, urlencode
@@ -5101,3 +5101,123 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
         ar.decided_at = timezone.now()
         ar.save(update_fields=["status", "decided_at"])
         return Response(AccessRequestSerializer(ar).data, status=200)
+
+
+
+class SummaryJobViewSet(viewsets.ModelViewSet):
+    """
+    CRUD endpoints for SummaryJob.
+
+    Examples:
+      GET /api/summary-jobs/?job_id=...&item_type=deck
+      GET /api/summary-jobs/?search=4b4461c8
+      GET /api/summary-jobs/?ordering=-created_at
+    """
+
+    queryset = SummaryJob.objects.all()
+    serializer_class = SummaryJobSerializer
+
+    @action(detail=False, methods=["get"], url_path=r"by-deck/(?P<deck_id>\d+)")
+    def by_deck(self, request, deck_id=None):
+        """
+        GET /api/summary-jobs/by-deck/<deck_id>/
+
+        - Finds Deck by id
+        - Reads deck.external_job_id
+        - Looks up SummaryJob where job_id == external_job_id
+        - Returns summary_job_id and summary if found
+        """
+        try:
+            deck = Deck.objects.only("id", "external_job_id").get(id=deck_id)
+        except Deck.DoesNotExist:
+            return Response(
+                {"detail": f"Deck with id={deck_id} not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        job_id = (deck.external_job_id or "").strip()
+        if not job_id:
+            return Response(
+                {"detail": "Deck has no external_job_id."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sj = (
+            SummaryJob.objects.filter(job_id=job_id)
+            .only("id", "job_id", "summary", "item_type", "updated_at", "created_at")
+            .order_by("-updated_at")
+            .first()
+        )
+
+        if not sj:
+            return Response(
+                {"detail": f"No SummaryJob found for job_id={job_id}."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "deck_id": deck.id,
+                "job_id": job_id,
+                "summary_job_id": sj.id,
+                "item_type": sj.item_type,
+                "summary": sj.summary,
+                "created_at": sj.created_at,
+                "updated_at": sj.updated_at,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["get"], url_path=r"by-battery/(?P<battery_id>\d+)")
+    def by_battery(self, request, battery_id=None):
+        """
+        GET /api/summary-jobs/by-battery/<battery_id>/
+
+        - Finds Battery by id
+        - Reads battery.external_job_id
+        - Looks up SummaryJob where job_id == external_job_id
+        - Returns summary_job_id and summary if found
+        """
+        try:
+            battery = Battery.objects.only("id", "external_job_id").get(id=battery_id)
+        except Battery.DoesNotExist:
+            return Response(
+                {"detail": f"Battery with id={battery_id} not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        job_id = (battery.external_job_id or "").strip()
+        if not job_id:
+            return Response(
+                {"detail": "Battery has no external_job_id."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sj = (
+            SummaryJob.objects.filter(job_id=job_id)
+            .only("id", "job_id", "summary", "item_type", "updated_at", "created_at")
+            .order_by("-updated_at")
+            .first()
+        )
+
+        if not sj:
+            return Response(
+                {"detail": f"No SummaryJob found for job_id={job_id}."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "battery_id": battery.id,
+                "job_id": job_id,
+                "summary_job_id": sj.id,
+                "item_type": sj.item_type,
+                "summary": sj.summary,
+                "created_at": sj.created_at,
+                "updated_at": sj.updated_at,
+            },
+            status=status.HTTP_200_OK,
+        )
+    
+
+    

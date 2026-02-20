@@ -1,6 +1,6 @@
 from django.conf import settings
 from rest_framework import serializers
-from .models import AccessRequest, ConversationMessage, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
+from .models import AccessRequest, ConversationMessage, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
 from dj_rest_auth.forms import AllAuthPasswordResetForm
 from .models import (
@@ -783,3 +783,32 @@ class AccessRequestSerializer(serializers.ModelSerializer):
             "decided_at",
         ]
         read_only_fields = ["id", "token", "resource_type", "requester", "owner", "status", "created_at", "decided_at"]
+
+
+
+class SummaryJobSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SummaryJob
+        fields = [
+            "id",
+            "job_id",
+            "item_type",
+            "user_id",
+            "document",
+            "summary",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_job_id(self, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("job_id is required.")
+        return value
+
+    def validate_item_type(self, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("item_type is required.")
+        return value
