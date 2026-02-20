@@ -1238,6 +1238,124 @@ class DocumentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination  # ✅
 
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="related-learning")
+    def related_learning(self, request, pk=None):
+        """
+        GET /api/documents/{id}/related-learning/
+
+        Devuelve todo lo relacionado a este documento:
+          - Topics que incluyen secciones de este documento
+          - Rules del project (globales + los que apuntan a esos topics)
+          - Batteries del project (y opcionalmente filtradas por rules/topics)
+          - Decks que usan secciones del doc o que apuntan a topics del doc
+        """
+        # 1) Documento
+        try:
+            doc = Document.objects.select_related("project").get(id=pk)
+        except Document.DoesNotExist:
+            return Response({"detail": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        project = doc.project
+        user = request.user
+
+        # 2) Permisos: owner o member del project
+        is_owner = getattr(project, "owner_id", None) == user.id
+        is_member = Project.objects.filter(id=project.id, members__id=user.id).exists()
+        if not (is_owner or is_member or user.is_staff or user.is_superuser):
+            return Response({"detail": "You do not have access to this project/document."}, status=status.HTTP_403_FORBIDDEN)
+
+        # 3) Topics relacionados al documento (por sections)
+        topics_qs = (
+            Topic.objects
+            .filter(project_id=project.id, related_sections__document_id=doc.id)
+            .distinct()
+            .order_by("-id")
+        )
+        topic_ids = list(topics_qs.values_list("id", flat=True))
+
+        # 4) Rules relacionados:
+        #    - rules que apuntan a esos topics (topic_scope)
+        #    - + rules globales del project (topic_scope NULL)
+        rules_qs = (
+            Rule.objects
+            .filter(project_id=project.id)
+            .filter(Q(topic_scope__isnull=True) | Q(topic_scope_id__in=topic_ids))
+            .distinct()
+            .order_by("-id")
+        )
+        rule_ids = list(rules_qs.values_list("id", flat=True))
+
+        # 5) Batteries relacionadas:
+        #    - baterías del project
+        #    - opcional: si quieres solo las que usan esas rules, filtra por rule_id__in
+        batteries_qs = (
+            Battery.objects
+            .filter(project_id=project.id)
+            .filter(Q(rule__isnull=True) | Q(rule_id__in=rule_ids))
+            .distinct()
+            .order_by("-created_at", "-id")
+        )
+
+        # 6) Decks relacionadas:
+        #    - decks del project con sections del doc
+        #    - o decks cuyo topic está en esos topics
+        decks_qs = (
+            Deck.objects
+            .filter(project_id=project.id)
+            .filter(Q(sections__document_id=doc.id) | Q(topic_id__in=topic_ids))
+            .distinct()
+            .order_by("-created_at", "-id")
+        )
+
+        # 7) Serialización simple (sin depender de tus serializers)
+        topics_data = list(
+            topics_qs.values(
+                "id", "name", "description", "status", "question_count_target", "is_visible", "project_id"
+            )
+        )
+
+        rules_data = list(
+            rules_qs.values(
+                "id", "name", "project_id", "topic_scope_id", "global_count", "time_limit", "distribution_strategy", "difficulty"
+            )
+        )
+
+        batteries_data = list(
+            batteries_qs.values(
+                "id", "name", "project_id", "rule_id", "status", "difficulty", "visibility", "description", "created_at"
+            )
+        )
+
+        decks_data = list(
+            decks_qs.values(
+                "id", "title", "project_id", "owner_id", "visibility", "description", "created_at", "topic_id", "external_job_id"
+            )
+        )
+
+        return Response(
+            {
+                "document": {
+                    "id": doc.id,
+                    "filename": doc.filename,
+                    "project_id": project.id,
+                    "project_title": project.title,
+                },
+                "topics": topics_data,
+                "rules": rules_data,
+                "batteries": batteries_data,
+                "decks": decks_data,
+                "counts": {
+                    "topics": len(topics_data),
+                    "rules": len(rules_data),
+                    "batteries": len(batteries_data),
+                    "decks": len(decks_data),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+    
+
     @action(detail=False, methods=["post"], url_path="register")
     def register(self, request):
         project_id = request.data.get("project_id")
