@@ -32,34 +32,60 @@ def _validate_password_complexity(value):
 class UserSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(required=True)
     last_name = serializers.CharField(required=False, allow_blank=True)
+    roles = serializers.PrimaryKeyRelatedField(
+        queryset=Role.objects.all(),
+        many=True,
+        required=False
+    )
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'password', 'avatar', 'first_name', 'last_name','roles']
+        fields = ['id', 'username', 'email', 'avatar', 'first_name', 'last_name','is_active', 'is_staff', 'roles']
         read_only_fields = ["id"]
 
-    def validate_password(self, value):
-        try:
-            _validate_password_complexity(value)
-            # Puedes pasar user=None si aún no existe, o cargar el user si es un UPDATE
-            validate_password(value, user=self.instance)
-        except exceptions.ValidationError as e:
-            raise serializers.ValidationError(list(e.messages))
-        return value
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        # Convert roles from IDs to full objects for the frontend table/accessor
+        ret['roles'] = RoleSerializer(instance.roles.all(), many=True).data
+        return ret
 
     def validate_email(self, value):
+        # Normalize email
+        value = value.lower().strip()
+        # If we are updating and the email hasn't changed, ignore validation
+        if self.instance and self.instance.email.lower() == value:
+            return value
+            
         if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError("A user with this email already exists.")
         return value
 
-
-
     def create(self, validated_data):
-        password = validated_data.pop('password')
+        roles_data = validated_data.pop('roles', None)
+        password = validated_data.pop('password', None)
         user = User.objects.create_user(**validated_data)
-        user.set_password(password)   
-        user.save()
+        if password:
+            user.set_password(password)   
+            user.save()
+        if roles_data is not None:
+            user.roles.set(roles_data)
         return user
+
+    def update(self, instance, validated_data):
+        roles_data = validated_data.pop('roles', None)
+        password = validated_data.pop('password', None)
+        
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+            
+        if password:
+            instance.set_password(password)
+        instance.save()
+        
+        if roles_data is not None:
+            instance.roles.set(roles_data)
+            
+        return instance
 
 class ProjectSerializer(serializers.ModelSerializer):
     owner = serializers.SerializerMethodField(read_only=True)
