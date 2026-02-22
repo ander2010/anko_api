@@ -86,6 +86,7 @@ from api.emails.access_requests import (
 import requests
 from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
+from api.services.progressfc_ws import ws_get_latest_progress  # ajusta import
 SECRET_TOKEN = "andelef"
 logging.basicConfig(level=logging.INFO)
 
@@ -3061,6 +3062,47 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination  # ✅
+
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="job-progress")
+    def job_progress(self, request, pk=None):
+        deck = self.get_object()
+
+        # permisos iguales a los tuyos
+        user = request.user
+        has_access = (
+            deck.owner_id == user.id
+            or deck.visibility == "public"
+            or deck.shares.filter(shared_with=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
+
+        job_id = (request.data.get("job_id") or deck.external_job_id or "").strip()
+        if not job_id:
+            return Response({"detail": "Deck has no external_job_id and job_id was not provided."}, status=400)
+
+        timeout_sec = request.data.get("timeout_sec", 6)
+        try:
+            timeout_sec = int(timeout_sec)
+        except Exception:
+            timeout_sec = 6
+
+        # tu env var debe apuntar al microservicio real (no localhost en prod)
+        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
+        # construye PROGRESS_WS_BASE a partir de base_url si quieres:
+        # os.environ["FLASHCARD_PROGRESS_WS_BASE"] = base_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws/progress"
+
+        msg = async_to_sync(ws_get_latest_progress)(
+            job_id=str(job_id),
+            user_id=str(user.id),
+            timeout_sec=max(1, min(timeout_sec, 25)),
+            reconnects=2,
+            send_subscribe=False,  # <- si ves que no llega nada, prueba True
+        )
+
+        return Response({"job_id": str(job_id), "progress": msg}, status=200)
+
 
     
     encrypted_actions = {

@@ -10,7 +10,7 @@ from django.db.models import Q
 
 from rest_framework.exceptions import PermissionDenied
 
-from api.models import ConversationMessage, DocumentUploadEvent, Flashcard, Plan, PlanLimit, Subscription, Document, Battery
+from api.models import ConversationMessage, Deck, DocumentUploadEvent, Flashcard, Plan, PlanLimit, Subscription, Document, Battery
 
 
 @dataclass(frozen=True)
@@ -213,9 +213,8 @@ class PlanGuard:
             return
 
         # Flashcard stores user_id as string (not FK). Keep deck__owner for legacy rows.
-        current = Flashcard.objects.filter(
-            Q(user_id=str(user.id)) | Q(deck__owner=user)
-        ).count()
+        # 
+        current = Deck.objects.filter(owner=user).count()
         if current >= max_total:
             raise PermissionDenied(
                 f"Plan limit reached: flashcards_max_total={max_total}. "
