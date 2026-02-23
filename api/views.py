@@ -1291,12 +1291,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
         #    - baterías del project
         #    - opcional: si quieres solo las que usan esas rules, filtra por rule_id__in
         batteries_qs = (
-            Battery.objects
-            .filter(project_id=project.id)
-            .filter(Q(rule__isnull=True) | Q(rule_id__in=rule_ids))
-            .distinct()
-            .order_by("-created_at", "-id")
-        )
+        Battery.objects
+        .filter(project_id=project.id)
+        .filter(Q(rule__isnull=True) | Q(rule_id__in=rule_ids))
+        .filter(Q(sections__document_id=doc.id) )
+        .distinct()
+        .order_by("-created_at", "-id")
+    )
 
         # 6) Decks relacionadas:
         #    - decks del project con sections del doc
@@ -2284,8 +2285,10 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             name=request.data.get("name") or (f"Battery - {rule.name}" if rule else "Battery - Generated"),
             status="Draft",
             difficulty=difficulty_db,
+     
             # external_doc_id=str(document_id),
         )
+        battery.sections.set(section_ids)
         project=Project.objects.filter(id=project_id).first()  # para asegurar que existe y evitar error en topic creation
         topic = ensure_topic_for_flashcards(
         project=project,
@@ -2583,6 +2586,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             name=name,
             status="Draft",
             difficulty=difficulty_final,
+            # sections=sectionz-ifd
         )
 
         count = int(rule.global_count or 0)

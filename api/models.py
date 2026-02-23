@@ -279,6 +279,8 @@ class Topic(models.Model):
 
     def __str__(self):
         return self.name
+    class Meta:
+        ordering = ["-id"]
 
 class Rule(models.Model):
     STRATEGY_CHOICES = [
@@ -329,6 +331,11 @@ class Battery(models.Model):
     difficulty = models.CharField(max_length=10, choices=DIFFICULTY_CHOICES)
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default="private")
     description = models.TextField(blank=True, default="")
+    sections = models.ManyToManyField(
+        "Section",
+        related_name="batteries",
+        blank=True
+    )
 
     # questions = models.JSONField(help_text="Stored generated questions snapshot")
     external_job_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
