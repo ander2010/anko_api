@@ -1269,7 +1269,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # 3) Topics relacionados al documento (por sections)
         topics_qs = (
             Topic.objects
-            .filter(project_id=project.id, related_sections__document_id=doc.id)
+            .filter( related_sections__document_id=doc.id,is_visible=True )  # solo topics visibles relacionados al doc
             .distinct()
             .order_by("-id")
         )
@@ -1313,7 +1313,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # 7) Serialización simple (sin depender de tus serializers)
         topics_data = list(
             topics_qs.values(
-                "id", "name", "description", "status", "question_count_target", "is_visible", "project_id"
+                "id", "name", "description", "status", "question_count_target", "is_visible", "project_id",
             )
         )
 
@@ -2108,10 +2108,19 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
 
     
-    @action(detail=True, methods=["get"], permission_classes=[AllowAny], renderer_classes=[SSERenderer], url_path="progress-stream-bat")
-    def progress_stream_bat(self, request, pk=None):
-        battery = self.get_object()
-        job_id = getattr(battery, "external_job_id", None)
+    @action(detail=False, methods=["get"], permission_classes=[AllowAny], renderer_classes=[SSERenderer], url_path="progress-stream-bat")
+    def progress_stream_bat(self, request):
+        battery_id = request.query_params.get("battery_id") or request.query_params.get("pk")
+        if not battery_id:
+             # Si no hay battery_id, tal vez busquen por job_id directamente
+             job_id = request.query_params.get("job_id")
+             if not job_id:
+                 return StreamingHttpResponse("event: error\ndata: job_id or battery_id required\n\n", content_type="text/event-stream", status=400)
+             battery = Battery.objects.filter(external_job_id=job_id).first()
+        else:
+             battery = get_object_or_404(Battery, pk=battery_id)
+
+        job_id = request.query_params.get("job_id") or getattr(battery, "external_job_id", None)
 
         base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
@@ -3106,6 +3115,86 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         )
 
         return Response({"job_id": str(job_id), "progress": msg}, status=200)
+
+    @action(detail=False, methods=["get"], permission_classes=[AllowAny], renderer_classes=[SSERenderer], url_path="progress-stream-deck")
+    def progress_stream_deck(self, request):
+        deck_id = request.query_params.get("deck_id") or request.query_params.get("pk")
+        if not deck_id:
+             job_id = request.query_params.get("job_id")
+             if not job_id:
+                 return StreamingHttpResponse("event: error\ndata: job_id or deck_id required\n\n", content_type="text/event-stream", status=400)
+             deck = Deck.objects.filter(external_job_id=job_id).first()
+        else:
+             deck = get_object_or_404(Deck, pk=deck_id)
+
+        job_id = request.query_params.get("job_id") or getattr(deck, "external_job_id", None)
+
+        base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
+        ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+
+        def sse_one(event_name: str, payload: dict, http_status=200):
+            def gen():
+                yield f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
+            resp = StreamingHttpResponse(gen(), content_type="text/event-stream", status=http_status)
+            resp["Cache-Control"] = "no-cache"
+            resp["X-Accel-Buffering"] = "no"
+            return resp
+
+        if not job_id:
+            return sse_one(
+                "error",
+                {"detail": "Deck has no external_job_id. Start the job first.", "deck_id": deck.id},
+                http_status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ws_url = f"{ws_base}/ws/progress/{job_id}"
+
+        def event_stream():
+            yield f"event: init\ndata: {json.dumps({'deck_id': deck.id, 'job_id': job_id, 'ws_url': ws_url})}\n\n"
+
+            try:
+                ws = create_connection(ws_url, timeout=20)
+            except Exception as e:
+                yield f"event: error\ndata: {json.dumps({'error': 'failed_to_connect_ws', 'detail': str(e), 'ws_url': ws_url})}\n\n"
+                return
+
+            last_keepalive = time.time()
+            try:
+                while True:
+                    if time.time() - last_keepalive > 15:
+                        yield "event: ping\ndata: {}\n\n"
+                        last_keepalive = time.time()
+
+                    try:
+                        msg = ws.recv()
+                    except WebSocketConnectionClosedException:
+                        yield f"event: end\ndata: {json.dumps({'status': 'ws_closed'})}\n\n"
+                        break
+                    except Exception as e:
+                        yield f"event: error\ndata: {json.dumps({'error': 'ws_recv_failed', 'detail': str(e)})}\n\n"
+                        break
+
+                    try:
+                        payload = json.loads(msg) if isinstance(msg, str) else msg
+                    except Exception:
+                        payload = {"raw": msg}
+
+                    yield f"event: progress\ndata: {json.dumps(payload)}\n\n"
+
+                    status_val = str(payload.get("status", "")).upper()
+                    if status_val in {"DONE", "COMPLETED", "FINISHED", "SUCCESS", "FAILED", "ERROR"}:
+                        yield f"event: end\ndata: {json.dumps({'final_status': status_val})}\n\n"
+                        break
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        resp = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
 
 
     
