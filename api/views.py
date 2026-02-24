@@ -1280,7 +1280,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         #    - + rules globales del project (topic_scope NULL)
         rules_qs = (
             Rule.objects
-            .filter(project_id=project.id)
+            
             .filter(Q(topic_scope__isnull=True) | Q(topic_scope_id__in=topic_ids))
             .distinct()
             .order_by("-id")
