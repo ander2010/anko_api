@@ -29,48 +29,43 @@ class Migration(migrations.Migration):
                         "db_table": "notifications",
                     },
                 ),
-            ],
-            database_operations=[],
-        ),
-        migrations.CreateModel(
-            name="UserNotification",
-            fields=[
-                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
-                ("channel", models.CharField(choices=[("in_app", "In App"), ("socket", "Socket"), ("email", "Email"), ("push", "Push")], db_index=True, default="in_app", max_length=20)),
-                ("status", models.CharField(choices=[("pending", "Pending"), ("sent", "Sent"), ("failed", "Failed")], db_index=True, default="pending", max_length=20)),
-                ("title", models.CharField(max_length=200)),
-                ("body", models.TextField(blank=True, default="")),
-                ("payload", models.JSONField(blank=True, default=dict)),
-                ("sent_at", models.DateTimeField(blank=True, null=True)),
-                ("read_at", models.DateTimeField(blank=True, null=True)),
-                ("dismissed_at", models.DateTimeField(blank=True, null=True)),
-                ("created_at", models.DateTimeField(auto_now_add=True)),
-                ("notification", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="user_notifications", to="api.notification")),
-                ("user", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="notifications", to=settings.AUTH_USER_MODEL)),
-            ],
-            options={
-                "db_table": "user_notifications",
-            },
-        ),
-        migrations.SeparateDatabaseAndState(
-            state_operations=[
+                migrations.CreateModel(
+                    name="UserNotification",
+                    fields=[
+                        ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                        ("channel", models.CharField(choices=[("in_app", "In App"), ("socket", "Socket"), ("email", "Email"), ("push", "Push")], db_index=True, default="in_app", max_length=20)),
+                        ("status", models.CharField(choices=[("pending", "Pending"), ("sent", "Sent"), ("failed", "Failed")], db_index=True, default="pending", max_length=20)),
+                        ("title", models.CharField(max_length=200)),
+                        ("body", models.TextField(blank=True, default="")),
+                        ("payload", models.JSONField(blank=True, default=dict)),
+                        ("sent_at", models.DateTimeField(blank=True, null=True)),
+                        ("read_at", models.DateTimeField(blank=True, null=True)),
+                        ("dismissed_at", models.DateTimeField(blank=True, null=True)),
+                        ("created_at", models.DateTimeField(auto_now_add=True)),
+                        ("notification", models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name="user_notifications", to="api.notification")),
+                        ("user", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="notifications", to=settings.AUTH_USER_MODEL)),
+                    ],
+                    options={
+                        "db_table": "user_notifications",
+                    },
+                ),
                 migrations.AddIndex(
                     model_name="notification",
                     index=models.Index(fields=["key", "created_at"], name="notificatio_key_1d38d4_idx"),
                 ),
+                migrations.AddIndex(
+                    model_name="usernotification",
+                    index=models.Index(fields=["user", "created_at"], name="user_notif_user_id_87c8e3_idx"),
+                ),
+                migrations.AddIndex(
+                    model_name="usernotification",
+                    index=models.Index(fields=["user", "dismissed_at"], name="user_notif_user_id_9b1a90_idx"),
+                ),
+                migrations.AddIndex(
+                    model_name="usernotification",
+                    index=models.Index(fields=["user", "read_at"], name="user_notif_user_id_4b6a3c_idx"),
+                ),
             ],
             database_operations=[],
-        ),
-        migrations.AddIndex(
-            model_name="usernotification",
-            index=models.Index(fields=["user", "created_at"], name="user_notif_user_id_87c8e3_idx"),
-        ),
-        migrations.AddIndex(
-            model_name="usernotification",
-            index=models.Index(fields=["user", "dismissed_at"], name="user_notif_user_id_9b1a90_idx"),
-        ),
-        migrations.AddIndex(
-            model_name="usernotification",
-            index=models.Index(fields=["user", "read_at"], name="user_notif_user_id_4b6a3c_idx"),
         ),
     ]
