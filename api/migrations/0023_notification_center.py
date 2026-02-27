@@ -52,9 +52,14 @@ class Migration(migrations.Migration):
                 "db_table": "user_notifications",
             },
         ),
-        migrations.AddIndex(
-            model_name="notification",
-            index=models.Index(fields=["key", "created_at"], name="notificatio_key_1d38d4_idx"),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddIndex(
+                    model_name="notification",
+                    index=models.Index(fields=["key", "created_at"], name="notificatio_key_1d38d4_idx"),
+                ),
+            ],
+            database_operations=[],
         ),
         migrations.AddIndex(
             model_name="usernotification",
