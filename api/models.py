@@ -740,18 +740,91 @@ class Tag(models.Model):
         db_table = "tags"   # 👈 nombre real de tu tabla
         managed = False        # 👈 NO crea migraciones / NO intenta crear tabla
 class Notification(models.Model):
-    job_id = models.CharField(max_length=255, primary_key=True)
-    meta = models.JSONField(default=dict)
-    created_at = models.DateTimeField(null=True, blank=True)
-    updated_at = models.DateTimeField(null=True, blank=True)
-    metadata = models.JSONField(null=True, blank=True, default=dict)
+    LEVEL = [
+        ("info", "Info"),
+        ("success", "Success"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+    ]
+
+    key = models.SlugField(max_length=80, db_index=True)
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True, default="")
+    level = models.CharField(max_length=20, choices=LEVEL, default="info")
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "notifications"
-        managed = True
+        indexes = [
+            models.Index(fields=["key", "created_at"]),
+        ]
 
     def __str__(self):
-        return f"Notification {self.job_id}"
+        return f"{self.key}: {self.title}"
+
+
+class UserNotification(models.Model):
+    CHANNEL = [
+        ("in_app", "In App"),
+        ("socket", "Socket"),
+        ("email", "Email"),
+        ("push", "Push"),
+    ]
+    STATUS = [
+        ("pending", "Pending"),
+        ("sent", "Sent"),
+        ("failed", "Failed"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        db_index=True,
+    )
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="user_notifications",
+    )
+
+    channel = models.CharField(max_length=20, choices=CHANNEL, default="in_app", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="pending", db_index=True)
+
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+
+    sent_at = models.DateTimeField(null=True, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "user_notifications"
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["user", "dismissed_at"]),
+            models.Index(fields=["user", "read_at"]),
+        ]
+
+    def mark_sent(self):
+        self.status = "sent"
+        self.sent_at = timezone.now()
+        self.save(update_fields=["status", "sent_at"])
+
+    def mark_read(self):
+        if not self.read_at:
+            self.read_at = timezone.now()
+            self.save(update_fields=["read_at"])
+
+    def dismiss(self):
+        if not self.dismissed_at:
+            self.dismissed_at = timezone.now()
+            self.save(update_fields=["dismissed_at"])
 
 
 class FlashcardReview(models.Model):

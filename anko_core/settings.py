@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'channels',
     'rest_framework',
     'rest_framework.authtoken',
      # ✅ required for allauth
@@ -126,6 +127,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'anko_core.wsgi.application'
+ASGI_APPLICATION = 'anko_core.asgi.application'
 
 
 # Database
@@ -239,6 +241,17 @@ REST_FRAMEWORK = {
 
 CORS_ALLOWED_ORIGINS = CSRF_TRUSTED_ORIGINS
 CORS_ALLOW_CREDENTIALS = True
+
+# ===============================
+# CHANNELS (WebSocket)
+# ===============================
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [REDIS_URL]},
+    },
+}
 
 
 MEDIA_URL = '/media/'
