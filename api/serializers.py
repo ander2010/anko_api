@@ -11,6 +11,7 @@ from .models import (
     Tag, QaPair
 )
 
+import json
 import re
 from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
@@ -639,7 +640,10 @@ class SupportRequestSerializer(serializers.ModelSerializer):
 
     def validate_message(self, value: str):
         if len(value.strip()) < 10:
-            raise serializers.ValidationError("Describe el problema con más detalle.")
+            raise serializers.ValidationError(json.dumps({
+                "es": "Describe el problema con más detalle.",
+                "en": "Describe the problem in more detail.",
+            }))
         return value
 
 

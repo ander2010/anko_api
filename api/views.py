@@ -44,6 +44,8 @@ from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate, login
+
+from api.services.translate import post_translate
 from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, UserSession
 from decimal import Decimal
 from django.db.models import Q
@@ -298,7 +300,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         client_role, _ = Role.objects.get_or_create(name="client")
         user.roles.add(client_role)
         sub =ensure_free_subscription_for_user(user)
-        print("Free subscription ensured:", sub)
+        
 
         # ❌ importante: elimina token de auth si existiera
         Token.objects.filter(user=user).delete()
@@ -3167,6 +3169,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
                     try:
                         msg = ws.recv()
+                       
                     except WebSocketConnectionClosedException:
                         yield f"event: end\ndata: {json.dumps({'status': 'ws_closed'})}\n\n"
                         break
@@ -3562,7 +3565,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
         difficulty = data.get("difficulty") or "medium"
         job_id = str(uuid.uuid4())
-        print("Generated job_id:", job_id)
+       
 
         svc_payload = {
             "document_ids": document_ids,
@@ -3584,7 +3587,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         
-        print("Flashcards service response:", job_id)
+
         job_id = svc_data.get("job_id")
         if not job_id:
             return Response(
@@ -3933,7 +3936,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         
         difficulty = (data.get("difficulty") or "medium").lower()
         job_id = str(uuid.uuid4())
-        print("Generated job_id:", job_id)
+      
         svc_payload = {
         #      "document_ids": ["test"],
         # "tags": ["Barcelona"],
@@ -3958,7 +3961,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             )
 
         job_id = svc_data.get("job_id")
-        print("Flashcards service responded with job_id:", job_id)
+
         if not job_id:
             return Response(
                 {"detail": "flashcards service did not return job_id", "service_response": svc_data},
@@ -5407,7 +5410,8 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
                 {"detail": f"No SummaryJob found for job_id={job_id}."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-
+        translated = post_translate(str(sj.summary))
+        
         return Response(
             {
                 "deck_id": deck.id,
@@ -5415,6 +5419,7 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
                 "summary_job_id": sj.id,
                 "item_type": sj.item_type,
                 "summary": sj.summary,
+                "translated_summary": translated,
                 "created_at": sj.created_at,
                 "updated_at": sj.updated_at,
             },
@@ -5458,6 +5463,9 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
                 {"detail": f"No SummaryJob found for job_id={job_id}."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        translated = post_translate(str(sj.summary))
+        
+
 
         return Response(
             {
@@ -5466,6 +5474,7 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
                 "summary_job_id": sj.id,
                 "item_type": sj.item_type,
                 "summary": sj.summary,
+                "translated_summary": translated,
                 "created_at": sj.created_at,
                 "updated_at": sj.updated_at,
             },
