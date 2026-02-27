@@ -12,7 +12,9 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunSQL(
             sql="""
-            DROP TABLE IF EXISTS notifications CASCADE;
+            DROP TABLE IF EXISTS user_notifications;
+            DROP TABLE IF EXISTS notifications;
+
             CREATE TABLE notifications (
                 id BIGSERIAL PRIMARY KEY,
                 key VARCHAR(80) NOT NULL,
@@ -22,11 +24,44 @@ class Migration(migrations.Migration):
                 data JSONB NOT NULL DEFAULT '{}'::jsonb,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-            CREATE INDEX IF NOT EXISTS notifications_key_created_at_idx
+            CREATE INDEX notifications_key_created_at_idx
                 ON notifications (key, created_at);
+
+            CREATE TABLE user_notifications (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                notification_id BIGINT NULL,
+                channel VARCHAR(20) NOT NULL DEFAULT 'in_app',
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                title VARCHAR(200) NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                sent_at TIMESTAMPTZ NULL,
+                read_at TIMESTAMPTZ NULL,
+                dismissed_at TIMESTAMPTZ NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            ALTER TABLE user_notifications
+                ADD CONSTRAINT user_notifications_user_id_fk
+                FOREIGN KEY (user_id) REFERENCES api_user(id) ON DELETE CASCADE;
+            ALTER TABLE user_notifications
+                ADD CONSTRAINT user_notifications_notification_id_fk
+                FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL;
+
+            CREATE INDEX user_notifications_user_created_at_idx
+                ON user_notifications (user_id, created_at);
+            CREATE INDEX user_notifications_user_dismissed_at_idx
+                ON user_notifications (user_id, dismissed_at);
+            CREATE INDEX user_notifications_user_read_at_idx
+                ON user_notifications (user_id, read_at);
+            CREATE INDEX user_notifications_channel_idx
+                ON user_notifications (channel);
+            CREATE INDEX user_notifications_status_idx
+                ON user_notifications (status);
             """,
             reverse_sql="""
-            DROP TABLE IF EXISTS notifications CASCADE;
+            DROP TABLE IF EXISTS user_notifications;
+            DROP TABLE IF EXISTS notifications;
             """,
         ),
     ]

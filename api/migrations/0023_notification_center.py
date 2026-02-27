@@ -12,20 +12,25 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.CreateModel(
-            name="Notification",
-            fields=[
-                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
-                ("key", models.SlugField(db_index=True, max_length=80)),
-                ("title", models.CharField(max_length=200)),
-                ("body", models.TextField(blank=True, default="")),
-                ("level", models.CharField(choices=[("info", "Info"), ("success", "Success"), ("warning", "Warning"), ("error", "Error")], default="info", max_length=20)),
-                ("data", models.JSONField(blank=True, default=dict)),
-                ("created_at", models.DateTimeField(auto_now_add=True)),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.CreateModel(
+                    name="Notification",
+                    fields=[
+                        ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                        ("key", models.SlugField(db_index=True, max_length=80)),
+                        ("title", models.CharField(max_length=200)),
+                        ("body", models.TextField(blank=True, default="")),
+                        ("level", models.CharField(choices=[("info", "Info"), ("success", "Success"), ("warning", "Warning"), ("error", "Error")], default="info", max_length=20)),
+                        ("data", models.JSONField(blank=True, default=dict)),
+                        ("created_at", models.DateTimeField(auto_now_add=True)),
+                    ],
+                    options={
+                        "db_table": "notifications",
+                    },
+                ),
             ],
-            options={
-                "db_table": "notifications",
-            },
+            database_operations=[],
         ),
         migrations.CreateModel(
             name="UserNotification",
