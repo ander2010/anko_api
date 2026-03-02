@@ -1,8 +1,10 @@
-import logging
 from django.db import transaction
 from django.utils import timezone
 
 from api.models import Plan, Subscription
+from api.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 def ensure_free_subscription_for_user(user):
     """
@@ -12,7 +14,7 @@ def ensure_free_subscription_for_user(user):
     free_plan = Plan.objects.filter(tier="free", is_active=True).first()
     if not free_plan:
         # Mejor loggear en vez de romper el registro (o decide romper si quieres)
-        logging.getLogger("django").error("Free plan not found (tier='free'). Cannot create subscription.")
+        logger.error("Free plan not found (tier='free'). Cannot create subscription.")
         return None
 
     sub, created = Subscription.objects.get_or_create(

@@ -15,10 +15,11 @@ import json
 import re
 from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
-import logging
 from dj_rest_auth.serializers import PasswordResetSerializer
+from api.utils.logging import get_logger
 
 User = get_user_model()
+logger = get_logger(__name__)
 
 def _validate_password_complexity(value):
     if not re.search(r"[a-z]", value):
@@ -701,7 +702,7 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
             user_count = len(users)
         except Exception:
             pass
-        logging.getLogger("django").warning(
+        logger.warning(
             "password_reset serializer email=%s matched_users=%s",
             email,
             user_count,

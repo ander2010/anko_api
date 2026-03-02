@@ -7,7 +7,6 @@ from django.views.decorators.csrf import csrf_exempt
 
 # from multiprocessing.dummy import connection
 from datetime import timedelta
-import logging
 from urllib import request
 from django.db import connection
 from redis import Redis
@@ -89,8 +88,9 @@ import requests
 from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
 from api.services.progressfc_ws import ws_get_latest_progress  # ajusta import
+from api.utils.logging import get_logger
 SECRET_TOKEN = "andelef"
-logging.basicConfig(level=logging.INFO)
+logger = get_logger(__name__)
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
@@ -252,17 +252,20 @@ class AuthViewSet(viewsets.GenericViewSet):
         raw_token = request.data.get("token")
 
         if not raw_token:
+            logger.info("verify_email missing token user_id=%s", getattr(request.user, "id", None))
             return Response({"detail": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         # ✅ convertir string -> UUID (evita bugs)
         try:
             token_uuid = uuid.UUID(str(raw_token).strip())
         except Exception:
+            logger.info("verify_email invalid token format user_id=%s", getattr(request.user, "id", None))
             return Response({"detail": "Invalid token format"}, status=status.HTTP_400_BAD_REQUEST)
 
         ev = get_object_or_404(EmailVerification, token=token_uuid)
 
         if not ev.is_valid():
+            logger.info("verify_email expired_or_used user_id=%s", ev.user_id)
             return Response({"detail": "Token expired or already used"}, status=status.HTTP_400_BAD_REQUEST)
 
         # ✅ marcar verificado
@@ -275,6 +278,7 @@ class AuthViewSet(viewsets.GenericViewSet):
 
         # ✅ ahora sí: emitir token auth
         token_obj, _ = Token.objects.get_or_create(user=user)
+        logger.info("verify_email success user_id=%s", user.id)
 
         return Response(
             {"ok": True, "token": token_obj.key, "user": UserSerializer(user).data},
@@ -288,6 +292,7 @@ class AuthViewSet(viewsets.GenericViewSet):
 
         serializer = UserSerializer(data=data)
         if not serializer.is_valid():
+            logger.info("register failed errors=%s", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         user = serializer.save()
@@ -313,6 +318,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         ev.save(update_fields=["token", "expires_at", "verified_at"])
 
         self._send_verify_email(user, ev.token)
+        logger.info("register success user_id=%s username=%s", user.id, user.username)
 
         return Response(
             {
@@ -331,6 +337,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         password = (request.data.get("password") or "").strip()
 
         if not username or not password:
+            logger.info("login missing credentials username=%s", username or None)
             return Response(
                 {"error": "username and password are required"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -338,10 +345,12 @@ class AuthViewSet(viewsets.GenericViewSet):
 
         user = authenticate(username=username, password=password)
         if user is None:
+            logger.info("login invalid credentials username=%s", username)
             return Response({"error": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST)
 
         # ✅ BLOQUEO si no verificó
         if not user.email_verified:
+            logger.info("login blocked email_not_verified user_id=%s", user.id)
             return Response(
                 {"error": "Email not verified", "code": "email_not_verified"},
                 status=status.HTTP_403_FORBIDDEN,
@@ -350,6 +359,7 @@ class AuthViewSet(viewsets.GenericViewSet):
         login(request, user)
 
         token, _ = Token.objects.get_or_create(user=user)
+        logger.info("login success user_id=%s", user.id)
         return Response(
             {"token": token.key, "user": UserSerializer(user).data},
             status=status.HTTP_200_OK,
@@ -528,7 +538,7 @@ async def _ask_via_chat_ws(base_url: str, payload: dict, session_id: str) -> Dic
 
 def _ask_via_http(base_url: str, payload: dict) -> Dict[str, Any]:
     url = f"{_normalize_base_url(base_url)}/ask"
-    resp = requests.post(url, json=payload, timeout=120)
+    resp = _post_with_logging(url, payload, timeout=120, label="ask_http")
 
     out: Dict[str, Any] = {
         "_transport": "http",
@@ -544,6 +554,47 @@ def _ask_via_http(base_url: str, payload: dict) -> Dict[str, Any]:
 
     out["ok"] = bool(resp.ok)
     return out
+
+
+def _post_with_logging(url: str, payload: dict, *, timeout: int, label: str = "external_post"):
+    start = time.perf_counter()
+    payload_keys = list(payload.keys()) if isinstance(payload, dict) else [type(payload).__name__]
+    try:
+        payload_size = len(json.dumps(payload).encode("utf-8"))
+    except Exception:
+        payload_size = None
+    try:
+        resp = requests.post(url, json=payload, timeout=timeout)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        content_length = resp.headers.get("Content-Length")
+        try:
+            response_size = int(content_length) if content_length is not None else len(resp.content or b"")
+        except Exception:
+            response_size = None
+        logger.info(
+            "External HTTP %s url=%s status=%s ok=%s duration_ms=%s payload_keys=%s payload_bytes=%s response_bytes=%s",
+            label,
+            url,
+            resp.status_code,
+            resp.ok,
+            duration_ms,
+            payload_keys,
+            payload_size,
+            response_size,
+        )
+        return resp
+    except requests.RequestException as e:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.error(
+            "External HTTP %s failed url=%s duration_ms=%s payload_keys=%s payload_bytes=%s error=%s",
+            label,
+            url,
+            duration_ms,
+            payload_keys,
+            payload_size,
+            e,
+        )
+        raise
 
 class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
@@ -736,7 +787,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     answer=answer,
                 )
             except Exception:
-                logging.exception("Failed to save ConversationMessage for session_id=%s", session_id)   
+                logger.exception("Failed to save ConversationMessage for session_id=%s", session_id)
                 pass
 
             resp_payload = {
@@ -794,7 +845,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ws_url = f"{ws_base}/ws/progress/{job_id}"
-        logging.info(f"Connecting to WS progress stream at {ws_url} for job_id {job_id}")
+        logger.info("Connecting to WS progress stream at %s for job_id %s", ws_url, job_id)
 
         def event_stream():
             ws = None
@@ -812,7 +863,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                         yield "event: ping\ndata: {}\n\n"
 
             except Exception as e:
-                logging.error(f"Error in WS progress stream for job_id {job_id}: {e}")
+                logger.error("Error in WS progress stream for job_id %s: %s", job_id, e)
                 yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
             finally:
                 if ws:
@@ -856,7 +907,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
 
         try:
-            response = requests.post(url, json=payload, timeout=60)
+            response = _post_with_logging(url, payload, timeout=60, label="process_request_test")
             
 
             try:
@@ -970,7 +1021,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         base_url = self.normalize_base_url(base_url)
         url = f"{os.getenv('PROCESS_REQUEST_BASE_URL', 'http://localhost:8080')}/process-request"
 
-        logging.info(f"Calling external process-request at {url}")
+        logger.info("Calling external process-request at %s", url)
         job_id = str(uuid.uuid4())
 
         payload = {
@@ -983,7 +1034,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
    
 
-        r = requests.post(url, json=payload, timeout=60)
+        r = _post_with_logging(url, payload, timeout=60, label="process_request")
      
 
         data = r.json()
@@ -991,13 +1042,13 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ws_url = f"{ws_base}/ws/progress/{job_id}"
-        logging.info(f"External process-request responded with job_id: {job_id}, ws_url: {ws_url}")
+        logger.info("External process-request responded with job_id=%s ws_url=%s", job_id, ws_url)
         return data, ws_url
 
 
     @action(detail=True, methods=["get", "post"], url_path="documents")
     def documents(self, request, pk=None):
-        logging.info(f"documents action called with method {request.method} by user {request.user.id}")
+        logger.info("documents action called with method=%s user_id=%s", request.method, request.user.id)
         project = self.get_object()
 
         # =========================
@@ -1016,13 +1067,13 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         # POST: subir documentos
         # =========================
         files = request.FILES.getlist("files")
-        logging.info(f"Received {len(files)} files for upload")
+        logger.info("Received %s files for upload", len(files))
         if not files:
             return Response(
                 {"error": "No files provided. Use multipart/form-data with key 'files'."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        logging.info(f"User {request.user.id} is uploading {len(files)} files to project {project.id}")
+        logger.info("User %s uploading %s files to project %s", request.user.id, len(files), project.id)
         PlanGuard.assert_upload_allowed(user=request.user, files=files)
         created_docs = []
         processing = []  # doc + ws_url + respuesta del microservicio
@@ -1370,6 +1421,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         file_hash = request.data.get("hash")
 
         if not all([project_id, filename, file_key, file_hash]):
+            logger.info("doc_register missing_fields user_id=%s project_id=%s", request.user.id, project_id)
             return Response(
                 {"detail": "Missing required fields (project_id, filename, file_key, hash)"},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1378,6 +1430,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         project = get_object_or_404(Project, id=project_id)
         # Check access
         if project.owner != request.user and not project.members.filter(id=request.user.id).exists():
+            logger.info("doc_register no_access user_id=%s project_id=%s", request.user.id, project_id)
             return Response({"detail": "No access to project"}, status=status.HTTP_403_FORBIDDEN)
         fake_file = type("F", (), {"size": int(file_size or 0)})()
         with transaction.atomic():
@@ -1390,6 +1443,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                   
                 )
             except PermissionDenied as e:
+                logger.info("doc_register plan_limit user_id=%s project_id=%s", request.user.id, project_id)
                 return Response(
                     {
                         "ok": False,
@@ -1414,6 +1468,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 doc._uploader_id = request.user.id
                 doc.uploaded_by = request.user
                 doc.save()
+            logger.info("doc_register saved user_id=%s project_id=%s doc_id=%s", request.user.id, project_id, doc.id)
 
             # ✅ Evento SIEMPRE (si aceptaste el request)
             DocumentUploadEvent.objects.create(
@@ -1460,7 +1515,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 "process": "process_pdf",
                 "options": {},
             }
-            r = requests.post(url, json=payload, timeout=60)
+            r = _post_with_logging(url, payload, timeout=60, label="process_request_retry")
             data = r.json()
             job_id = data.get("job_id", job_id)
 
@@ -1469,6 +1524,9 @@ class DocumentViewSet(viewsets.ModelViewSet):
         except Exception as e:
             data = {"success": False, "error": str(e)}
             ws_url = None
+            logger.error("doc_register external_failed user_id=%s project_id=%s doc_id=%s error=%s", request.user.id, project_id, doc.id, e)
+        else:
+            logger.info("doc_register external_ok user_id=%s project_id=%s doc_id=%s", request.user.id, project_id, doc.id)
 
         return Response({
             "document": DocumentSerializer(doc, context={"request": request}).data,
@@ -2160,7 +2218,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 try:
                     ws = create_connection(ws_url, timeout=20)
                 except Exception as e:
-                    logging.warning(f"[progress_stream_bat] WS connect attempt {attempt + 1} failed: {e}")
+                    logger.warning("[progress_stream_bat] WS connect attempt %s failed: %s", attempt + 1, e)
                     if attempt < MAX_RETRIES - 1:
                         yield f"event: ping\ndata: {json.dumps({'waiting': True, 'attempt': attempt + 1})}\n\n"
                         time.sleep(RETRY_DELAY)
@@ -2213,7 +2271,13 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
                 if ws_closed_early:
                     # Job aún en cola — esperar y reconectar
-                    logging.info(f"[progress_stream_bat] WS closed early for battery {battery.id}, retrying in {RETRY_DELAY}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                    logger.info(
+                        "[progress_stream_bat] WS closed early for battery %s, retrying in %ss (attempt %s/%s)",
+                        battery.id,
+                        RETRY_DELAY,
+                        attempt + 1,
+                        MAX_RETRIES,
+                    )
                     if attempt < MAX_RETRIES - 1:
                         yield f"event: ping\ndata: {json.dumps({'waiting': True, 'attempt': attempt + 1})}\n\n"
                         time.sleep(RETRY_DELAY)
@@ -2367,7 +2431,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         }
 
         try:
-            resp = requests.post(url, json=payload, timeout=120)
+            resp = _post_with_logging(url, payload, timeout=120, label="process_request_stream")
         except requests.RequestException as e:
             return Response(
                 {"detail": "Failed calling microservice", "error": str(e)},
@@ -3005,7 +3069,8 @@ class BatteryShareViewSet(viewsets.ModelViewSet):
         battery = serializer.validated_data["battery"]
         if battery.project.owner_id != self.request.user.id:
             raise serializers.ValidationError("Only the project owner can share this battery.")
-        serializer.save()
+        share = serializer.save()
+        logger.info("battery_share created by_user=%s battery_id=%s shared_with=%s", self.request.user.id, battery.id, share.shared_with_id)
 
 
 class SavedBatteryViewSet(viewsets.ModelViewSet):
@@ -3032,7 +3097,8 @@ class InviteViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         # Solo Ultra debería poder invitar (luego lo amarramos a PlanLimit)
-        serializer.save(inviter=self.request.user)
+        invite = serializer.save(inviter=self.request.user)
+        logger.info("invite created inviter_id=%s invite_id=%s battery_id=%s", self.request.user.id, invite.id, invite.battery_to_share_id)
 
     @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="accept")
     def accept(self, request):
@@ -3042,14 +3108,17 @@ class InviteViewSet(viewsets.ModelViewSet):
         """
         token = request.data.get("token")
         if not token:
+            logger.info("invite accept missing_token user_id=%s", getattr(request.user, "id", None))
             return Response({"detail": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             invite = Invite.objects.select_related("battery_to_share").get(token=token)
         except Invite.DoesNotExist:
+            logger.info("invite accept not_found token=%s", token)
             return Response({"detail": "Invite not found"}, status=status.HTTP_404_NOT_FOUND)
 
         if not invite.is_valid():
+            logger.info("invite accept invalid token=%s", token)
             return Response({"detail": "Invite is not valid (expired/revoked/accepted)"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Si está autenticado, registramos accepted_by
@@ -3058,6 +3127,7 @@ class InviteViewSet(viewsets.ModelViewSet):
             invite.accepted_by = request.user
             invite.accepted_at = timezone.now()
             invite.save(update_fields=["status", "accepted_by", "accepted_at"])
+            logger.info("invite accepted invite_id=%s user_id=%s", invite.id, request.user.id)
             return Response(InviteSerializer(invite).data)
 
         # Si no está autenticado, el frontend debe redirigir a register/login
@@ -3610,7 +3680,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
         # --- Call microservice ---
         try:
-            resp = requests.post(f"{base_url}/flashcards/create", json=svc_payload, timeout=30)
+            resp = _post_with_logging(f"{base_url}/flashcards/create", svc_payload, timeout=30, label="flashcards_create")
             resp.raise_for_status()
             svc_data = resp.json()
         except requests.RequestException as e:
@@ -3982,7 +4052,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
         # --- Call microservice ---
         try:
-            resp = requests.post(f"{base_url}/flashcards/create", json=svc_payload, timeout=30)
+            resp = _post_with_logging(f"{base_url}/flashcards/create", svc_payload, timeout=30, label="flashcards_create")
             resp.raise_for_status()
             svc_data = resp.json()
         except requests.RequestException as e:
@@ -4693,7 +4763,13 @@ class DeckShareViewSet(viewsets.ModelViewSet):
         deck = serializer.validated_data["deck"]
         if deck.owner_id != self.request.user.id:
             raise serializers.ValidationError("Only deck owner can share this deck.")
-        serializer.save()
+        share = serializer.save()
+        logger.info(
+            "deck_share created by_user=%s deck_id=%s shared_with=%s",
+            self.request.user.id,
+            share.deck_id,
+            share.shared_with_id,
+        )
 
 
 class SavedDeckViewSet(viewsets.ModelViewSet):
@@ -5095,7 +5171,7 @@ class FrontendPasswordResetView(PasswordResetView):
         authentication_classes = [] 
 
         def dispatch(self, request, *args, **kwargs):
-            logging.getLogger("django").warning(
+            logger.warning(
                 "password_reset dispatch path=%s method=%s content_type=%s",
                 request.path,
                 request.method,
@@ -5114,7 +5190,7 @@ class FrontendPasswordResetView(PasswordResetView):
                 user_count = len(list(form.get_users(email))) if email else 0
             except Exception:
                 user_count = 0
-            logging.getLogger("django").warning(
+            logger.warning(
                 "password_reset request email=%s matched_users=%s",
                 email,
                 user_count,
@@ -5216,13 +5292,16 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
             battery = Battery.objects.select_related("project__owner").get(id=battery_id)
 
             if battery.visibility not in ["public", "shared"]:
+                logger.info("access_request denied visibility battery_id=%s user_id=%s", battery_id, user.id)
                 return Response({"detail": "Battery is not public or shared."}, status=400)
 
             owner = battery.project.owner
             if owner_id := owner.id == user.id:
+                logger.info("access_request denied already_owner battery_id=%s user_id=%s", battery_id, user.id)
                 return Response({"detail": "You already own this battery."}, status=400)
 
             if BatteryShare.objects.filter(battery=battery, shared_with=user).exists():
+                logger.info("access_request denied already_shared battery_id=%s user_id=%s", battery_id, user.id)
                 return Response({"detail": "You already have access."}, status=400)
 
             ar, created = AccessRequest.objects.get_or_create(
@@ -5239,7 +5318,9 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
             # if exists:
             if not created:
                 if ar.status == "pending":
+                    logger.info("access_request exists_pending battery_id=%s user_id=%s request_id=%s", battery_id, user.id, ar.id)
                     return Response(AccessRequestSerializer(ar).data, status=200)
+                logger.info("access_request exists status=%s battery_id=%s user_id=%s request_id=%s", ar.status, battery_id, user.id, ar.id)
                 return Response({"detail": f"Request already {ar.status}."}, status=400)
 
             approve_url, reject_url = build_owner_action_links(token=str(ar.token))
@@ -5250,18 +5331,22 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
                 approve_url=approve_url,
                 reject_url=reject_url,
             )
+            logger.info("access_request created battery_id=%s user_id=%s request_id=%s", battery_id, user.id, ar.id)
             return Response(AccessRequestSerializer(ar).data, status=201)
 
         # deck
         deck = Deck.objects.select_related("owner").get(id=deck_id)
         if deck.visibility not in ["public", "shared"]:
+            logger.info("access_request denied visibility deck_id=%s user_id=%s", deck_id, user.id)
             return Response({"detail": "Deck is not public or shared."}, status=400)
 
         owner = deck.owner
         if owner.id == user.id:
+            logger.info("access_request denied already_owner deck_id=%s user_id=%s", deck_id, user.id)
             return Response({"detail": "You already own this deck."}, status=400)
 
         if DeckShare.objects.filter(deck=deck, shared_with=user).exists():
+            logger.info("access_request denied already_shared deck_id=%s user_id=%s", deck_id, user.id)
             return Response({"detail": "You already have access."}, status=400)
 
         ar, created = AccessRequest.objects.get_or_create(
@@ -5277,7 +5362,9 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
 
         if not created:
             if ar.status == "pending":
+                logger.info("access_request exists_pending deck_id=%s user_id=%s request_id=%s", deck_id, user.id, ar.id)
                 return Response(AccessRequestSerializer(ar).data, status=200)
+            logger.info("access_request exists status=%s deck_id=%s user_id=%s request_id=%s", ar.status, deck_id, user.id, ar.id)
             return Response({"detail": f"Request already {ar.status}."}, status=400)
 
         approve_url, reject_url = build_owner_action_links(token=str(ar.token))
@@ -5288,6 +5375,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
             approve_url=approve_url,
             reject_url=reject_url,
         )
+        logger.info("access_request created deck_id=%s user_id=%s request_id=%s", deck_id, user.id, ar.id)
         return Response(AccessRequestSerializer(ar).data, status=201)
 
     # ---------
@@ -5352,6 +5440,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
             title=title,
             approved=True,
         )
+        logger.info("access_request approved request_id=%s owner_id=%s requester_id=%s", ar.id, request.user.id, ar.requester_id)
         return Response(AccessRequestSerializer(ar).data, status=200)
 
     @action(detail=True, methods=["post"], url_path="reject", permission_classes=[IsAuthenticated])
@@ -5372,6 +5461,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
             title=title,
             approved=False,
         )
+        logger.info("access_request rejected request_id=%s owner_id=%s requester_id=%s", ar.id, request.user.id, ar.requester_id)
         return Response(AccessRequestSerializer(ar).data, status=200)
 
     # -----------------
@@ -5388,6 +5478,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
         ar.status = "canceled"
         ar.decided_at = timezone.now()
         ar.save(update_fields=["status", "decided_at"])
+        logger.info("access_request canceled request_id=%s requester_id=%s", ar.id, request.user.id)
         return Response(AccessRequestSerializer(ar).data, status=200)
 
 

@@ -7,6 +7,9 @@ from channels.layers import get_channel_layer
 from django.utils import timezone
 
 from api.models import Notification, UserNotification, User
+from api.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def send_user_notification(
@@ -23,6 +26,13 @@ def send_user_notification(
     Create Notification + UserNotification and push via WebSocket.
     """
     data = data or {}
+    logger.info(
+        "Send notification user_id=%s key=%s level=%s channel=%s",
+        user.id,
+        key,
+        level,
+        channel,
+    )
 
     notification = Notification.objects.create(
         key=key,
@@ -60,5 +70,7 @@ def send_user_notification(
                 },
             },
         )
+    else:
+        logger.warning("Notification channel layer missing user_id=%s key=%s", user.id, key)
 
     return user_notification

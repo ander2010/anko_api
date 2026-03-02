@@ -6,7 +6,64 @@ from urllib.parse import parse_qs
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import AnonymousUser
 from django.db import close_old_connections
+from django.utils import timezone
 from rest_framework.authtoken.models import Token
+
+import uuid
+
+from api.utils.logging import get_logger, set_request_id
+
+
+class RequestLogMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.logger = get_logger("api.request")
+
+    def __call__(self, request):
+        start = timezone.now()
+        user_id = getattr(getattr(request, "user", None), "id", None)
+        ip = self._get_client_ip(request)
+        ua = request.META.get("HTTP_USER_AGENT", "")
+        request_id = request.META.get("HTTP_X_REQUEST_ID") or str(uuid.uuid4())
+        set_request_id(request_id)
+        request.request_id = request_id
+        try:
+            response = self.get_response(request)
+            duration_ms = int((timezone.now() - start).total_seconds() * 1000)
+            self.logger.info(
+                "Request completed method=%s path=%s status=%s duration_ms=%s user_id=%s ip=%s ua=%s",
+                request.method,
+                request.path,
+                getattr(response, "status_code", None),
+                duration_ms,
+                user_id,
+                ip,
+                ua,
+            )
+            try:
+                response["X-Request-ID"] = request_id
+            except Exception:
+                pass
+            return response
+        except Exception:
+            self.logger.exception(
+                "Unhandled exception path=%s method=%s user_id=%s ip=%s ua=%s",
+                request.path,
+                request.method,
+                user_id,
+                ip,
+                ua,
+            )
+            raise
+        finally:
+            set_request_id(None)
+
+    @staticmethod
+    def _get_client_ip(request):
+        forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR")
 
 
 @sync_to_async

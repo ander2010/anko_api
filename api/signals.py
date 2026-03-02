@@ -1,12 +1,12 @@
 # api/signals.py
-import logging
 from django.db import transaction, connection
 from django.db.models.signals import pre_delete, post_delete
 from django.dispatch import receiver
 
 from .models import Document, Tag
+from api.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @receiver(pre_delete, sender=Document)
