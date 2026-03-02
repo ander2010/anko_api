@@ -42,7 +42,10 @@ def _configure_logging() -> None:
         return
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
-    log_format = os.getenv("LOG_FORMAT", "%(asctime)s %(levelname)s %(name)s %(message)s")
+    log_format = os.getenv(
+        "LOG_FORMAT",
+        "%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s %(message)s",
+    )
 
     root = logging.getLogger()
     root.setLevel(level)
