@@ -66,8 +66,7 @@ env/
 env.bak/
 .python-version
 
-# VS Code
-.vscode/
+
 
 # JetBrains
 .idea/
