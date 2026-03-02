@@ -57,19 +57,22 @@ def _configure_logging() -> None:
     max_bytes = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
     backup_count = int(os.getenv("LOG_BACKUP_COUNT", "5"))
     log_dir = os.path.dirname(log_file)
-    if log_dir and not os.path.exists(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
+    try:
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
 
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(JsonFormatter())
-    file_handler.addFilter(RequestIdFilter())
-    root.addHandler(file_handler)
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(JsonFormatter())
+        file_handler.addFilter(RequestIdFilter())
+        root.addHandler(file_handler)
+    except Exception as e:
+        root.warning("File logging disabled (path=%s). error=%s", log_file, e)
 
     _CONFIGURED = True
 
