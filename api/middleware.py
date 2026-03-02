@@ -21,7 +21,6 @@ class RequestLogMiddleware:
 
     def __call__(self, request):
         start = timezone.now()
-        user_id = getattr(getattr(request, "user", None), "id", None)
         ip = self._get_client_ip(request)
         ua = request.META.get("HTTP_USER_AGENT", "")
         request_id = request.META.get("HTTP_X_REQUEST_ID") or str(uuid.uuid4())
@@ -30,6 +29,7 @@ class RequestLogMiddleware:
         try:
             response = self.get_response(request)
             duration_ms = int((timezone.now() - start).total_seconds() * 1000)
+            user_id = getattr(getattr(request, "user", None), "id", None)
             self.logger.info(
                 "Request completed method=%s path=%s status=%s duration_ms=%s user_id=%s ip=%s ua=%s",
                 request.method,
@@ -46,6 +46,7 @@ class RequestLogMiddleware:
                 pass
             return response
         except Exception:
+            user_id = getattr(getattr(request, "user", None), "id", None)
             self.logger.exception(
                 "Unhandled exception path=%s method=%s user_id=%s ip=%s ua=%s",
                 request.path,
