@@ -2149,44 +2149,76 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         def event_stream():
             yield f"event: init\ndata: {json.dumps({'battery_id': battery.id, 'job_id': job_id, 'ws_url': ws_url})}\n\n"
 
-            try:
-                ws = create_connection(ws_url, timeout=20)
-            except Exception as e:
-                yield f"event: error\ndata: {json.dumps({'error': 'failed_to_connect_ws', 'detail': str(e), 'ws_url': ws_url})}\n\n"
-                return
+            TERMINAL = {"DONE", "COMPLETED", "FINISHED", "SUCCESS", "FAILED", "ERROR"}
+            MAX_RETRIES = 20      # 20 × 5 s = 100 s max espera total
+            RETRY_DELAY = 5       # segundos entre reintentos
+            is_done = False
+            last_payload = {}
 
-            last_keepalive = time.time()
-            try:
-                while True:
-                    if time.time() - last_keepalive > 15:
-                        yield "event: ping\ndata: {}\n\n"
-                        last_keepalive = time.time()
-
-                    try:
-                        msg = ws.recv()
-                    except WebSocketConnectionClosedException:
-                        yield f"event: end\ndata: {json.dumps({'status': 'ws_closed'})}\n\n"
-                        break
-                    except Exception as e:
-                        yield f"event: error\ndata: {json.dumps({'error': 'ws_recv_failed', 'detail': str(e)})}\n\n"
-                        break
-
-                    try:
-                        payload = json.loads(msg) if isinstance(msg, str) else msg
-                    except Exception:
-                        payload = {"raw": msg}
-
-                    yield f"event: progress\ndata: {json.dumps(payload)}\n\n"
-
-                    status_val = str(payload.get("status", "")).upper()
-                    if status_val in {"DONE", "COMPLETED", "FINISHED", "SUCCESS", "FAILED", "ERROR"}:
-                        yield f"event: end\ndata: {json.dumps({'final_status': status_val})}\n\n"
-                        break
-            finally:
+            for attempt in range(MAX_RETRIES):
+                # Intentar conectar al WebSocket del microservicio
                 try:
-                    ws.close()
-                except Exception:
-                    pass
+                    ws = create_connection(ws_url, timeout=20)
+                except Exception as e:
+                    logging.warning(f"[progress_stream_bat] WS connect attempt {attempt + 1} failed: {e}")
+                    if attempt < MAX_RETRIES - 1:
+                        yield f"event: ping\ndata: {json.dumps({'waiting': True, 'attempt': attempt + 1})}\n\n"
+                        time.sleep(RETRY_DELAY)
+                        continue
+                    yield f"event: error\ndata: {json.dumps({'error': 'failed_to_connect_ws', 'detail': str(e)})}\n\n"
+                    return
+
+                ws_closed_early = False
+                last_keepalive = time.time()
+
+                try:
+                    while True:
+                        if time.time() - last_keepalive > 15:
+                            yield "event: ping\ndata: {}\n\n"
+                            last_keepalive = time.time()
+
+                        try:
+                            msg = ws.recv()
+                        except WebSocketConnectionClosedException:
+                            # WS cerrado — puede que el job aún esté en cola, reintentar
+                            ws_closed_early = True
+                            break
+                        except Exception as e:
+                            yield f"event: error\ndata: {json.dumps({'error': 'ws_recv_failed', 'detail': str(e)})}\n\n"
+                            is_done = True
+                            break
+
+                        try:
+                            payload = json.loads(msg) if isinstance(msg, str) else msg
+                        except Exception:
+                            payload = {"raw": msg}
+
+                        last_payload = payload
+                        status_val = str(payload.get("status", "")).upper()
+
+                        yield f"event: progress\ndata: {json.dumps(payload)}\n\n"
+
+                        if status_val in TERMINAL:
+                            yield f"event: end\ndata: {json.dumps({'final_status': status_val, 'last_payload': payload})}\n\n"
+                            is_done = True
+                            break
+                finally:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+
+                if is_done:
+                    break
+
+                if ws_closed_early:
+                    # Job aún en cola — esperar y reconectar
+                    logging.info(f"[progress_stream_bat] WS closed early for battery {battery.id}, retrying in {RETRY_DELAY}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                    if attempt < MAX_RETRIES - 1:
+                        yield f"event: ping\ndata: {json.dumps({'waiting': True, 'attempt': attempt + 1})}\n\n"
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        yield f"event: end\ndata: {json.dumps({'final_status': 'TIMEOUT', 'last_payload': last_payload})}\n\n"
 
         resp = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
         resp["Cache-Control"] = "no-cache"
