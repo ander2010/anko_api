@@ -4,7 +4,7 @@ from dj_rest_auth.views import PasswordResetView
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
-from .services.notification_events import notify_battery_ready, notify_deck_created
+from .services.notification_events import notify_access_request_approved, notify_battery_ready, notify_deck_created, notify_document_ready, notify_document_uploaded
 from .models import Notification, UserNotification  # noqa: E402
 from .serializers import NotificationSerializer, UserNotificationSerializer  # noqa: E402
 
@@ -1145,7 +1145,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 # ✅ nombre real en storage
                 stored_path = doc.file.name  # ej: "documents/xxxxx.pdf"
 
-                DocumentUploadEvent.objects.create(
+                doc=DocumentUploadEvent.objects.create(
                 user=request.user,
                 project=project,
                 status="success",
@@ -1153,7 +1153,8 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 document_hash=file_hash,
             )
 
-
+                notify_document_uploaded(request.user, doc.filename)
+                notify_document_ready(request.user, doc.filename)
                 # ✅ id estable para microservicio (puedes usar doc.id o file_hash)
                 external_doc_id = doc.id
 
@@ -1474,13 +1475,15 @@ class DocumentViewSet(viewsets.ModelViewSet):
             logger.info("doc_register saved user_id=%s project_id=%s doc_id=%s", request.user.id, project_id, doc.id)
 
             # ✅ Evento SIEMPRE (si aceptaste el request)
-            DocumentUploadEvent.objects.create(
+            doc=DocumentUploadEvent.objects.create(
                 user=request.user,
                 project=project,
                 status="success",
                 filename=filename or "",
                 document_hash=file_hash,
             )
+            notify_document_uploaded(request.user, doc.filename)
+            notify_document_ready(request.user, doc.filename)
         # doc = Document.objects.filter(project=project, hash=file_hash).first()
         # if not doc:
         #     doc = Document(
@@ -5337,6 +5340,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
                 approve_url=approve_url,
                 reject_url=reject_url,
             )
+            notify_access_request_approved(user, resource_name=battery.name)
             logger.info("access_request created battery_id=%s user_id=%s request_id=%s", battery_id, user.id, ar.id)
             return Response(AccessRequestSerializer(ar).data, status=201)
 
@@ -5381,6 +5385,7 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
             approve_url=approve_url,
             reject_url=reject_url,
         )
+        notify_access_request_approved(user, resource_name=deck.title)
         logger.info("access_request created deck_id=%s user_id=%s request_id=%s", deck_id, user.id, ar.id)
         return Response(AccessRequestSerializer(ar).data, status=201)
 
