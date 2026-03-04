@@ -5638,7 +5638,7 @@ class UserNotificationViewSet(viewsets.GenericViewSet):
     def get_queryset(self):
         return (
             UserNotification.objects
-            .filter(user=self.request.user)
+            .filter(user=self.request.user, dismissed_at__isnull=True)
             .select_related("notification")
             .order_by("-created_at")
         )
