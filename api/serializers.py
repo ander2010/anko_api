@@ -17,6 +17,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
 from dj_rest_auth.serializers import PasswordResetSerializer
 from api.utils.logging import get_logger
+from .models import Notification, UserNotification  # noqa: E402
 
 User = get_user_model()
 logger = get_logger(__name__)
@@ -843,3 +844,35 @@ class SummaryJobSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("item_type is required.")
         return value
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = ["id", "key", "title", "body", "level", "data", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+
+class UserNotificationSerializer(serializers.ModelSerializer):
+    notification = NotificationSerializer(read_only=True)
+
+    class Meta:
+        model = UserNotification
+        fields = [
+            "id",
+            "notification",
+            "channel",
+            "status",
+            "title",
+            "body",
+            "payload",
+            "sent_at",
+            "read_at",
+            "dismissed_at",
+            "created_at",
+        ]
+        read_only_fields = ["id", "user", "sent_at", "created_at"]

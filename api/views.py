@@ -4,6 +4,9 @@ from dj_rest_auth.views import PasswordResetView
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
+from .services.notification_events import notify_battery_ready, notify_deck_created
+from .models import Notification, UserNotification  # noqa: E402
+from .serializers import NotificationSerializer, UserNotificationSerializer  # noqa: E402
 
 # from multiprocessing.dummy import connection
 from datetime import timedelta
@@ -2395,6 +2398,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
      
             # external_doc_id=str(document_id),
         )
+        notify_battery_ready(request.user, battery.name)
         battery.sections.set(section_ids)
         project=Project.objects.filter(id=project_id).first()  # para asegurar que existe y evitar error en topic creation
         topic = ensure_topic_for_flashcards(
@@ -2696,6 +2700,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             # sections=sectionz-ifd
         )
 
+        notify_battery_ready(request.user, battery.name)
         count = int(rule.global_count or 0)
         generated = []
 
@@ -3639,7 +3644,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             topic=topic,  # asociamos el topic creado al deck (si tu modelo Deck tiene este campo; si no, puedes omitirlo o manejarlo como mejor te sirva   
         )
 
-       
+        notify_deck_created(request.user, deck.title)
         
 
         # --- Attach Sections (optional) ---
@@ -3861,7 +3866,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             topic=topic,  # asociamos el topic creado al deck (si tu modelo Deck tiene este campo; si no, puedes omitirlo o manejarlo como mejor te sirva   
             
         )
-
+        notify_deck_created(request.user, deck.title)
         if attached_section_ids:
             deck.sections.set(sections_qs)
         
@@ -4004,6 +4009,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             visibility=visibility,
             topic=topic,
         )
+        notify_deck_created(request.user, deck.title)
 
 
         
@@ -5603,6 +5609,73 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
-    
 
-    
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+from api.services.notifications import send_user_notification  # noqa: E402
+
+
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/notifications/          → lista todas las notificaciones globales
+    GET /api/notifications/{id}/     → detalle
+    """
+    queryset = Notification.objects.all().order_by("-created_at")
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class UserNotificationViewSet(viewsets.GenericViewSet):
+    """
+    GET  /api/user-notifications/           → notificaciones del usuario autenticado
+    POST /api/user-notifications/{id}/read/ → marca como leída
+    POST /api/user-notifications/{id}/dismiss/ → descarta
+    """
+    serializer_class = UserNotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            UserNotification.objects
+            .filter(user=self.request.user)
+            .select_related("notification")
+            .order_by("-created_at")
+        )
+
+    def list(self, request, *args, **kwargs):
+        qs = self.get_queryset()
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    def retrieve(self, request, *args, **kwargs):
+        obj = self.get_object()
+        return Response(self.get_serializer(obj).data)
+
+    @action(detail=True, methods=["post"])
+    def read(self, request, pk=None):
+        obj = self.get_object()
+        obj.mark_read()
+        return Response(self.get_serializer(obj).data)
+
+    @action(detail=True, methods=["post"])
+    def dismiss(self, request, pk=None):
+        obj = self.get_object()
+        obj.dismiss()
+        return Response(self.get_serializer(obj).data)
+
+    @action(detail=False, methods=["get"], url_path="send-test")
+    def send_test(self, request):
+        """
+        GET /api/user-notifications/send-test/
+        Crea y envía una notificación de prueba al usuario autenticado.
+        """
+        user_notification = send_user_notification(
+            user=request.user,
+            key="demo",
+            title="Hello!",
+            body="This is a test notification.",
+            level="info",
+            data={"screen": "home"},
+        )
+        return Response(self.get_serializer(user_notification).data, status=status.HTTP_201_CREATED)
