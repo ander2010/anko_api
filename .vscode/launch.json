@@ -2,16 +2,17 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Daphne ASGI (anko_core)",
+      "name": "Uvicorn ASGI (anko_core)",
       "type": "python",
       "request": "launch",
-      "module": "daphne",
+      "module": "uvicorn",
       "args": [
-        "-b",
+        "anko_core.asgi:application",
+        "--host",
         "0.0.0.0",
-        "-p",
+        "--port",
         "8000",
-        "anko_core.asgi:application"
+        "--reload"
       ],
       "django": false,
       "justMyCode": true,

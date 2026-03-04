@@ -38,3 +38,4 @@ whitenoise==6.5.0
 daphne==4.2.1
 
 Twisted[http2,tls]
+uvicorn[standard]
