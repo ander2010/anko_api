@@ -2,7 +2,29 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Gunicorn ASGI (3 workers)",
+      "name": "Uvicorn ASGI (Windows dev, 3 workers)",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "anko_core.asgi:application",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--workers",
+        "3",
+        "--log-level",
+        "debug"
+      ],
+      "django": false,
+      "justMyCode": true,
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Gunicorn ASGI (Linux only, 3 workers)",
       "type": "python",
       "request": "launch",
       "module": "gunicorn",
