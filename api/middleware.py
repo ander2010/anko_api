@@ -26,6 +26,8 @@ class RequestLogMiddleware:
         request_id = request.META.get("HTTP_X_REQUEST_ID") or str(uuid.uuid4())
         set_request_id(request_id)
         request.request_id = request_id
+        lang = request.META.get("HTTP_ACCEPT_LANGUAGE", "not-set")
+        print(f"[LANG] Accept-Language: {lang} | path={request.path}")
         try:
             response = self.get_response(request)
             duration_ms = int((timezone.now() - start).total_seconds() * 1000)

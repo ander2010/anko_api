@@ -5597,23 +5597,17 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
                 {"detail": f"No SummaryJob found for job_id={job_id}."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        translated = post_translate(str(sj.summary))
-        
-
-
-        return Response(
-            {
-                "battery_id": battery.id,
-                "job_id": job_id,
-                "summary_job_id": sj.id,
-                "item_type": sj.item_type,
-                "summary": sj.summary,
-                "translated_summary": translated,
-                "created_at": sj.created_at,
-                "updated_at": sj.updated_at,
-            },
-            status=status.HTTP_200_OK,
-        )
+        data = {
+            "battery_id": battery.id,
+            "job_id": job_id,
+            "summary_job_id": sj.id,
+            "item_type": sj.item_type,
+            "summary": sj.summary,
+            "translated_summary": str(sj.summary),
+            "created_at": sj.created_at,
+            "updated_at": sj.updated_at,
+        }
+        return Response(data, status=status.HTTP_200_OK)
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
