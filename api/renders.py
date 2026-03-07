@@ -2,12 +2,16 @@ import os
 import json
 import base64
 import hashlib
+import logging
 from typing import Optional
 
 from django.conf import settings
 from rest_framework.renderers import JSONRenderer
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from api.renderers import translate_data_if_needed
+
+logger = logging.getLogger("api.renders")
 
 
 def _b64url_encode(b: bytes) -> str:
@@ -91,17 +95,29 @@ class EncryptedJSONRenderer(JSONRenderer):
         request = ctx.get("request")
         view = ctx.get("view")
 
+        view_name = type(view).__name__ if view else "None"
+        action = getattr(view, "action", "?") if view else "?"
+        logger.info("[EncryptedJSONRenderer] render() — view=%s action=%s", view_name, action)
+
         if not request or not view:
+            logger.warning("[EncryptedJSONRenderer] request o view es None — sin cifrado ni traducción")
             return super().render(data, accepted_media_type, renderer_context)
 
-        if not getattr(view, "encrypt_response", False):
+        encrypt = getattr(view, "encrypt_response", False)
+        logger.info("[EncryptedJSONRenderer] encrypt_response=%s", encrypt)
+
+        if not encrypt:
+            logger.info("[EncryptedJSONRenderer] encrypt_response=False — pasa directo a JSONRenderer (sin traducción aquí)")
             return super().render(data, accepted_media_type, renderer_context)
 
         token = _get_token_string_from_request(request)
+        logger.info("[EncryptedJSONRenderer] token presente: %s", bool(token))
+
         if not token:
-            # Si quieres FORZAR cifrado incluso sin token, aquí debes decidir otra estrategia.
-            # Para AllowAny endpoints, lo normal es NO cifrar.
+            logger.warning("[EncryptedJSONRenderer] sin token — sin cifrado ni traducción")
             return super().render(data, accepted_media_type, renderer_context)
 
+        translate_data_if_needed(data, request, caller="EncryptedJSONRenderer")
         wrapped = encrypt_payload({"data": data}, token=token)
+        logger.info("[EncryptedJSONRenderer] payload cifrado correctamente")
         return super().render(wrapped, accepted_media_type, renderer_context)

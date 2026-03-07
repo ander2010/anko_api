@@ -90,6 +90,7 @@ from api.emails.access_requests import (
 import requests
 from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
+from api.renderers import TranslatingJSONRenderer
 from api.services.progressfc_ws import ws_get_latest_progress  # ajusta import
 from api.utils.logging import get_logger
 SECRET_TOKEN = "andelef"
@@ -1576,8 +1577,8 @@ class DocumentViewSet(viewsets.ModelViewSet):
             {
                 "document_id": doc.id,
                 "summary": sd.summary or "",
-                "created_at": sd.created_at,
-                "updated_at": sd.updated_at,
+                "created_at": sd.created_at.isoformat() if sd.created_at else None,
+                "updated_at": sd.updated_at.isoformat() if sd.updated_at else None,
             },
             status=status.HTTP_200_OK,
         )
@@ -5544,7 +5545,7 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
                 {"detail": f"No SummaryJob found for job_id={job_id}."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        translated = post_translate(str(sj.summary))
+    
         
         return Response(
             {
@@ -5553,9 +5554,9 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
                 "summary_job_id": sj.id,
                 "item_type": sj.item_type,
                 "summary": sj.summary,
-                "translated_summary": translated,
-                "created_at": sj.created_at,
-                "updated_at": sj.updated_at,
+             
+                "created_at": sj.created_at.isoformat() if sj.created_at else None,
+                "updated_at": sj.updated_at.isoformat() if sj.updated_at else None,
             },
             status=status.HTTP_200_OK,
         )
@@ -5602,10 +5603,10 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
             "job_id": job_id,
             "summary_job_id": sj.id,
             "item_type": sj.item_type,
-            "summary": sj.summary,
-            "translated_summary": str(sj.summary),
-            "created_at": sj.created_at,
-            "updated_at": sj.updated_at,
+            "summary": str(sj.summary) if sj.summary is not None else None  ,
+            
+            "created_at": sj.created_at.isoformat() if sj.created_at else None,
+            "updated_at": sj.updated_at.isoformat() if sj.updated_at else None,
         }
         return Response(data, status=status.HTTP_200_OK)
 
