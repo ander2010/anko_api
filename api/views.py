@@ -62,6 +62,7 @@ from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
 from .models import Tag
 from api.mixins import EncryptSelectedActionsMixin
+from api.permissions import IsRbacAdmin, is_admin_like
 
 from .models import (
     Resource, Permission, Role,
@@ -95,6 +96,10 @@ from api.services.progressfc_ws import ws_get_latest_progress  # ajusta import
 from api.utils.logging import get_logger
 SECRET_TOKEN = "andelef"
 logger = get_logger(__name__)
+
+
+def _is_rbac_admin_user(user) -> bool:
+    return is_admin_like(user)
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
@@ -2927,19 +2932,19 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 class ResourceViewSet(viewsets.ModelViewSet):
     queryset = Resource.objects.all().order_by("key")
     serializer_class = ResourceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsRbacAdmin]
 
 
 class PermissionViewSet(viewsets.ModelViewSet):
     queryset = Permission.objects.select_related("resource").all().order_by("resource__key", "action", "code")
     serializer_class = PermissionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsRbacAdmin]
 
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.prefetch_related("permissions").all().order_by("name")
     serializer_class = RoleSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsRbacAdmin]
 
 
 # ==========================================================
@@ -2949,9 +2954,9 @@ class RoleViewSet(viewsets.ModelViewSet):
 class PlanViewSet(viewsets.ModelViewSet):
     queryset = Plan.objects.prefetch_related("limits").all().order_by("tier")
     serializer_class = PlanSerializer
-    permission_classes = [AllowAny]  # normalmente el listado de planes es público
+    permission_classes = [IsRbacAdmin]
 
-    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me/limits")
+    @action(detail=False, methods=["get"], permission_classes=[IsRbacAdmin], url_path="me/limits")
     def my_limits(self, request):
         plan = PlanGuard.get_plan_for_user(request.user)
         public_tier = PlanGuard.public_tier(plan)
@@ -2983,22 +2988,18 @@ class PlanViewSet(viewsets.ModelViewSet):
 class PlanLimitViewSet(viewsets.ModelViewSet):
     queryset = PlanLimit.objects.select_related("plan").all().order_by("plan__tier", "key")
     serializer_class = PlanLimitSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsRbacAdmin]
 
 
 class SubscriptionViewSet(viewsets.ModelViewSet):
     queryset = Subscription.objects.select_related("user", "plan").all()
     serializer_class = SubscriptionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsRbacAdmin]
 
     def get_queryset(self):
-        # usuario normal solo ve su subscription; staff/admin ve todas
-        user = self.request.user
-        if user.is_staff or user.is_superuser:
-            return super().get_queryset()
-        return super().get_queryset().filter(user=user)
+        return super().get_queryset()
 
-    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me")
+    @action(detail=False, methods=["get"], permission_classes=[IsRbacAdmin], url_path="me")
     def me(self, request):
         user = request.user
 
@@ -3051,7 +3052,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="set-plan")
+    @action(detail=False, methods=["post"], permission_classes=[IsRbacAdmin], url_path="set-plan")
     def set_plan(self, request):
         """
         POST /api/subscriptions/set-plan/
@@ -3598,13 +3599,19 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     
 
     def get_queryset(self):
-        qs = Deck.objects.filter(owner=self.request.user)
+        user = self.request.user
+        if _is_rbac_admin_user(user):
+            qs = Deck.objects.select_related("owner", "project").prefetch_related("cards").all()
+        else:
+            qs = Deck.objects.select_related("owner", "project").prefetch_related("cards").filter(
+                Q(owner=user) | Q(shares__shared_with=user)
+            ).distinct()
 
         project_id = self.request.query_params.get("project")
         if project_id:
             qs = qs.filter(project_id=project_id)
 
-        return qs.order_by("-id")  # o "-created_at"
+        return qs.order_by("-id")
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -4723,6 +4730,11 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         base_qs = super().get_queryset()
+        if _is_rbac_admin_user(user):
+            deck_id = self.request.query_params.get("deck")
+            if deck_id:
+                return base_qs.filter(deck_id=deck_id).order_by("-created_at")
+            return base_qs.order_by("-created_at")
 
         deck_id = self.request.query_params.get("deck")
         if not deck_id:
@@ -4794,15 +4806,17 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 class DeckShareViewSet(viewsets.ModelViewSet):
     queryset = DeckShare.objects.select_related("deck", "shared_with").all()
     serializer_class = DeckShareSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        return super().get_queryset().filter(Q(shared_with=user) | Q(deck__owner=user)).distinct()
+        if _is_rbac_admin_user(user):
+            return super().get_queryset().order_by("-id")
+        return super().get_queryset().filter(Q(shared_with=user) | Q(deck__owner=user)).distinct().order_by("-id")
 
     def perform_create(self, serializer):
         deck = serializer.validated_data["deck"]
-        if deck.owner_id != self.request.user.id:
+        if deck.owner_id != self.request.user.id and not _is_rbac_admin_user(self.request.user):
             raise serializers.ValidationError("Only deck owner can share this deck.")
         share = serializer.save()
         logger.info(
@@ -4816,10 +4830,12 @@ class DeckShareViewSet(viewsets.ModelViewSet):
 class SavedDeckViewSet(viewsets.ModelViewSet):
     queryset = SavedDeck.objects.select_related("user", "deck").all()
     serializer_class = SavedDeckSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return super().get_queryset().filter(user=self.request.user)
+        if _is_rbac_admin_user(self.request.user):
+            return super().get_queryset().order_by("-id")
+        return super().get_queryset().filter(user=self.request.user).order_by("-id")
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -5134,7 +5150,7 @@ class RBACViewSet(viewsets.ViewSet):
       - Resource.key guarda keys estilo: "dashboard.home", "dashboard.projects", etc.
       - Permission.action="view" es el permiso para ver esa ruta.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsRbacAdmin]
 
     @action(detail=False, methods=["get"], url_path="me/allowed-routes")
     def me_allowed_routes(self, request):
