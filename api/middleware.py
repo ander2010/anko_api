@@ -12,6 +12,7 @@ from rest_framework.authtoken.models import Token
 import uuid
 
 from api.utils.logging import get_logger, set_request_id
+from api.services.audit import log_audit_event
 
 
 class RequestLogMiddleware:
@@ -42,6 +43,21 @@ class RequestLogMiddleware:
                 ip,
                 ua,
             )
+            if request.path.startswith("/api/"):
+                log_audit_event(
+                    operation=f"http.{request.method.lower()}",
+                    success=getattr(response, "status_code", 500) < 400,
+                    user_id=user_id if self._is_authenticated(request) else None,
+                    resource_type="endpoint",
+                    resource_id=request.path,
+                    status_code=getattr(response, "status_code", None),
+                    request_id=request_id,
+                    method=request.method,
+                    path=request.path,
+                    ip_address=ip,
+                    user_agent=ua,
+                    metadata={"duration_ms": duration_ms},
+                )
             try:
                 response["X-Request-ID"] = request_id
             except Exception:
@@ -57,6 +73,21 @@ class RequestLogMiddleware:
                 ip,
                 ua,
             )
+            if request.path.startswith("/api/"):
+                log_audit_event(
+                    operation=f"http.{request.method.lower()}",
+                    success=False,
+                    user_id=user_id if self._is_authenticated(request) else None,
+                    resource_type="endpoint",
+                    resource_id=request.path,
+                    status_code=500,
+                    error_message="Unhandled exception in request pipeline",
+                    request_id=request_id,
+                    method=request.method,
+                    path=request.path,
+                    ip_address=ip,
+                    user_agent=ua,
+                )
             raise
         finally:
             set_request_id(None)
@@ -67,6 +98,11 @@ class RequestLogMiddleware:
         if forwarded:
             return forwarded.split(",")[0].strip()
         return request.META.get("REMOTE_ADDR")
+
+    @staticmethod
+    def _is_authenticated(request):
+        user = getattr(request, "user", None)
+        return bool(user and getattr(user, "is_authenticated", False))
 
 
 @sync_to_async
