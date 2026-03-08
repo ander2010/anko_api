@@ -63,6 +63,8 @@ def translate_data_if_needed(data, request, *, caller=""):
     - Un único request al servicio con solo los strings no cacheados
     """
     tag = f"[TRANSLATE:{caller or 'default'}]"
+    user_id = getattr(getattr(request, "user", None), "id", None) if request else None
+    request_id = getattr(request, "request_id", "") if request else ""
 
     if not request or data is None:
         logger.warning("%s request o data es None — omitido", tag)
@@ -106,7 +108,13 @@ def translate_data_if_needed(data, request, *, caller=""):
     if to_fetch:
         try:
             t0 = time.time()
-            new_translations = post_translate(to_fetch)
+            new_translations = post_translate(
+                to_fetch,
+                audit_user_id=user_id,
+                request_id=request_id,
+                audit_operation="translate.bulk_strings",
+                audit_path="/translate",
+            )
             elapsed = time.time() - t0
             logger.info("%s post_translate tardó %.3fs para %d strings", tag, elapsed, len(to_fetch))
 

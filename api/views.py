@@ -96,6 +96,17 @@ from api.utils.logging import get_logger
 SECRET_TOKEN = "andelef"
 logger = get_logger(__name__)
 
+
+def _is_rbac_admin_user(user) -> bool:
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
+        return True
+    try:
+        return user.roles.filter(name="admin").exists()
+    except Exception:
+        return False
+
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = "page_size"   # 👈 acepta ?page_size=1
@@ -3598,13 +3609,19 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     
 
     def get_queryset(self):
-        qs = Deck.objects.filter(owner=self.request.user)
+        user = self.request.user
+        if _is_rbac_admin_user(user):
+            qs = Deck.objects.select_related("owner", "project").prefetch_related("cards").all()
+        else:
+            qs = Deck.objects.select_related("owner", "project").prefetch_related("cards").filter(
+                Q(owner=user) | Q(shares__shared_with=user)
+            ).distinct()
 
         project_id = self.request.query_params.get("project")
         if project_id:
             qs = qs.filter(project_id=project_id)
 
-        return qs.order_by("-id")  # o "-created_at"
+        return qs.order_by("-id")
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -4723,6 +4740,11 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         base_qs = super().get_queryset()
+        if _is_rbac_admin_user(user):
+            deck_id = self.request.query_params.get("deck")
+            if deck_id:
+                return base_qs.filter(deck_id=deck_id).order_by("-created_at")
+            return base_qs.order_by("-created_at")
 
         deck_id = self.request.query_params.get("deck")
         if not deck_id:
@@ -4794,15 +4816,17 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 class DeckShareViewSet(viewsets.ModelViewSet):
     queryset = DeckShare.objects.select_related("deck", "shared_with").all()
     serializer_class = DeckShareSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        return super().get_queryset().filter(Q(shared_with=user) | Q(deck__owner=user)).distinct()
+        if _is_rbac_admin_user(user):
+            return super().get_queryset().order_by("-id")
+        return super().get_queryset().filter(Q(shared_with=user) | Q(deck__owner=user)).distinct().order_by("-id")
 
     def perform_create(self, serializer):
         deck = serializer.validated_data["deck"]
-        if deck.owner_id != self.request.user.id:
+        if deck.owner_id != self.request.user.id and not _is_rbac_admin_user(self.request.user):
             raise serializers.ValidationError("Only deck owner can share this deck.")
         share = serializer.save()
         logger.info(
@@ -4816,10 +4840,12 @@ class DeckShareViewSet(viewsets.ModelViewSet):
 class SavedDeckViewSet(viewsets.ModelViewSet):
     queryset = SavedDeck.objects.select_related("user", "deck").all()
     serializer_class = SavedDeckSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return super().get_queryset().filter(user=self.request.user)
+        if _is_rbac_admin_user(self.request.user):
+            return super().get_queryset().order_by("-id")
+        return super().get_queryset().filter(user=self.request.user).order_by("-id")
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)

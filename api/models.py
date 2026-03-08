@@ -205,6 +205,40 @@ class PlanUsageCounter(models.Model):
     def __str__(self):
         return f"{self.user_id}:{self.metric}:{self.used}"
 
+
+class AuditLog(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+    )
+    operation = models.CharField(max_length=120, db_index=True)
+    resource_type = models.CharField(max_length=80, blank=True, default="")
+    resource_id = models.CharField(max_length=120, blank=True, default="")
+    success = models.BooleanField(default=False, db_index=True)
+    status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    request_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    method = models.CharField(max_length=16, blank=True, default="")
+    path = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255, blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "audit_logs"
+        indexes = [
+            models.Index(fields=["created_at", "success"], name="audit_logs_created_0b359a_idx"),
+            models.Index(fields=["user", "created_at"], name="audit_logs_user_id_fbfd51_idx"),
+            models.Index(fields=["operation", "created_at"], name="audit_logs_operati_b6eb3e_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.created_at.isoformat()} {self.operation} success={self.success}"
+
 def document_upload_to(instance, filename):
     """
     Build the upload path for a document file.
