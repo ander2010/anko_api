@@ -1,16 +1,13 @@
-# api/services/plan_guard.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
-from typing import Any, Optional
-
-from django.utils import timezone
-from django.db.models import Q
+from typing import Optional
 
 from rest_framework.exceptions import PermissionDenied
+from django.utils import timezone
 
-from api.models import ConversationMessage, Deck, DocumentUploadEvent, Flashcard, Plan, PlanLimit, Subscription, Document, Battery
+from api.models import Battery, Plan, PlanLimit, Subscription
+from api.services.plan_usage import PlanUsageService
 
 
 @dataclass(frozen=True)
@@ -21,31 +18,49 @@ class LimitValue:
 
 
 class PlanGuard:
-    """
-    Enforcements para Free/Premium/Ultra basado en Subscription.plan + PlanLimit.
-    Reglas:
-      - Si user no tiene subscription -> Free
-      - Si subscription existe pero no está activa -> tratar como Free (o bloquear, tu eliges)
-    """
+    """Plan enforcements with Free/Premium/Ultra profiles and admin bypass."""
 
     DEFAULTS = {
-        # keys recomendadas:
-        # upload_max_mb
-        # max_documents (global en Plan)
-        # max_batteries (global en Plan)
-        # questions_per_battery_max
-        # explore_topics_limit
-        # can_use_flashcards
-        # can_invite
-        # can_collect_batteries
-        # can_collect_decks
         "upload_max_mb": 50,
         "questions_per_battery_max": 50,
         "explore_topics_limit": 0,
-        "can_use_flashcards": False,
+        "can_use_flashcards": True,
         "can_invite": False,
         "can_collect_batteries": False,
         "can_collect_decks": False,
+    }
+
+    TIER_ALIASES = {
+        "free": "free",
+        "premium": "premium",
+        "ultra": "ultra",
+    }
+
+    PLAN_PROFILES = {
+        "free": {
+            "documents_per_month": 2,
+            "pages_per_document_max": 10,
+            "ask_queries_per_month": 30,
+            "flashcard_jobs_per_month": 1,
+            "flashcards_per_job_max": 10,
+            "history_days": 3,
+        },
+        "premium": {
+            "documents_per_month": 100,
+            "pages_per_document_max": 150,
+            "ask_queries_per_month": 2000,
+            "flashcard_jobs_per_month": 40,
+            "flashcards_per_job_max": 100,
+            "history_days": 90,
+        },
+        "ultra": {
+            "documents_per_month": 500,
+            "pages_per_document_max": 500,
+            "ask_queries_per_month": 15000,
+            "flashcard_jobs_per_month": 200,
+            "flashcards_per_job_max": 300,
+            "history_days": 365,
+        },
     }
 
     @staticmethod
@@ -54,7 +69,6 @@ class PlanGuard:
         if not sub:
             return None
 
-        # si está vencida o no activa, la tratamos como no activa
         if sub.status not in ("trialing", "active"):
             return None
         if sub.current_period_end and timezone.now() > sub.current_period_end:
@@ -67,18 +81,93 @@ class PlanGuard:
         if sub:
             return sub.plan
 
-        # fallback: Free (debe existir en DB)
         plan = Plan.objects.filter(tier="free", is_active=True).first()
         if not plan:
-            # fallback extra por si no has seed-eado planes aún
-            plan = Plan.objects.create(tier="free", name="Free", description="Default Free", price_cents=0)
+            plan = Plan.objects.create(
+                tier="free",
+                name="Free",
+                description="Default Free",
+                price_cents=0,
+            )
         return plan
+
+    @staticmethod
+    def _user_role_names(user) -> set[str]:
+        try:
+            return {name.lower() for name in user.roles.values_list("name", flat=True)}
+        except Exception:
+            return set()
+
+    @staticmethod
+    def should_enforce_for_user(user) -> bool:
+        if not user or not user.is_authenticated:
+            return False
+
+        role_names = PlanGuard._user_role_names(user)
+        is_admin = bool(
+            getattr(user, "is_staff", False)
+            or getattr(user, "is_superuser", False)
+            or ("admin" in role_names)
+        )
+        return not is_admin
+
+    @staticmethod
+    def _effective_tier(plan: Plan) -> str:
+        raw = (getattr(plan, "tier", None) or getattr(plan, "name", "") or "").strip().lower()
+        mapped = PlanGuard.TIER_ALIASES.get(raw, raw)
+        if mapped in PlanGuard.PLAN_PROFILES:
+            return mapped
+        return "free"
+
+    @staticmethod
+    def public_tier(plan: Plan) -> str:
+        return PlanGuard._effective_tier(plan)
+
+    @staticmethod
+    def map_requested_tier_to_storage(raw_tier: str) -> Optional[str]:
+        tier = (raw_tier or "").strip().lower()
+        if tier in ("free", "premium", "ultra"):
+            return tier
+        return None
+
+    @staticmethod
+    def _profile_limit_int(plan: Plan, key: str) -> int:
+        profile = PlanGuard.PLAN_PROFILES[PlanGuard._effective_tier(plan)]
+        default_value = int(profile[key])
+        configured = PlanGuard.limit_int(plan, key, default=None)
+        return default_value if configured is None else int(configured)
+
+    @staticmethod
+    def _format_reset_at(dt) -> str:
+        local_dt = timezone.localtime(dt)
+        return local_dt.strftime("%Y-%m-%d %H:%M %Z")
+
+    @staticmethod
+    def _period_limit_message(*, metric_label: str, used: int, limit: int, reset_at) -> str:
+        reset_text = PlanGuard._format_reset_at(reset_at)
+        return (
+            f"Plan limit reached for {metric_label} ({used}/{limit}). "
+            f"Upgrade your plan or wait until {reset_text}."
+        )
+
+    @staticmethod
+    def _extract_declared_pages(file_obj) -> Optional[int]:
+        for attr in ("page_count", "pages", "num_pages", "total_pages"):
+            value = getattr(file_obj, attr, None)
+            if value is None:
+                continue
+            try:
+                parsed = int(value)
+                if parsed >= 0:
+                    return parsed
+            except (TypeError, ValueError):
+                continue
+        return None
 
     @staticmethod
     def _get_plan_limit(plan: Plan, key: str) -> LimitValue:
         pl = PlanLimit.objects.filter(plan=plan, key=key).first()
         if not pl:
-            # fallback defaults
             dv = PlanGuard.DEFAULTS.get(key)
             if isinstance(dv, bool):
                 return LimitValue(bool_value=dv)
@@ -97,7 +186,6 @@ class PlanGuard:
             return int(v.int_value)
         if default is not None:
             return int(default)
-        # si default no se pasó, intenta defaults
         dv = PlanGuard.DEFAULTS.get(key)
         return int(dv) if isinstance(dv, int) else None
 
@@ -111,172 +199,285 @@ class PlanGuard:
         dv = PlanGuard.DEFAULTS.get(key)
         return bool(dv) if isinstance(dv, bool) else False
 
-    # =========================
-    # ENFORCERS
-    # =========================
-
     @staticmethod
-    def assert_upload_allowed(*, user, files, plan: Optional["Plan"] = None):
+    def assert_upload_allowed(*, user, files, plan: Optional[Plan] = None):
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
 
+        if not PlanGuard.should_enforce_for_user(user):
+            return
+
         plan = plan or PlanGuard.get_plan_for_user(user)
-        # 1) Límite por tamaño (igual que lo tienes)
+        plan_tier = PlanGuard._effective_tier(plan)
+
         max_mb = PlanGuard.limit_int(plan, "upload_max_mb", default=50)
         max_bytes = (max_mb or 0) * 1024 * 1024
-
         for f in files:
             size = getattr(f, "size", None) or 0
             if max_mb is not None and size > max_bytes:
                 raise PermissionDenied(f"Plan limit: file exceeds upload_max_mb={max_mb}MB.")
 
-        # 2) Límite por ventana (FREE)
-        tier = (getattr(plan, "tier", "") or "").lower()
-        is_free = tier == "free" or (getattr(plan, "name", "") or "").lower() == "free"
-
-        if is_free:
-            window_days = 5
-            window_limit = 2
-            since = timezone.now() - timedelta(days=window_days)
-
-            recent_success = (
-                DocumentUploadEvent.objects
-                .filter(user=user, status="success", created_at__gte=since)
-                .count()
-            )
-
-            if recent_success + len(files) > window_limit:
+        max_pages = PlanGuard._profile_limit_int(plan, "pages_per_document_max")
+        for f in files:
+            pages = PlanGuard._extract_declared_pages(f)
+            if pages is not None and pages > max_pages:
+                filename = getattr(f, "name", "document")
                 raise PermissionDenied(
-                    f"Free plan limit: you can upload up to {window_limit} documents every {window_days} days."
+                    f"Plan limit reached: '{filename}' exceeds {max_pages} pages per document. "
+                    f"Upgrade your plan to upload larger files."
                 )
 
-            return  # free no usa max_documents
-
-        # ---------------------------
-        # 3) Otros planes: límite global (como antes)
-        # ---------------------------
-        if plan.max_documents is not None:
-            owned_or_member_docs = Document.objects.filter(
-                Q(project__owner=user) | Q(project__members=user)
-            ).count()
-
-            if owned_or_member_docs + len(files) > int(plan.max_documents):
-                raise PermissionDenied(f"Plan limit: max_documents={plan.max_documents} reached.")
+        docs_per_month = PlanGuard._profile_limit_int(plan, "documents_per_month")
+        used = PlanUsageService.get_usage(
+            user=user,
+            metric=PlanUsageService.METRIC_DOCUMENTS_UPLOADED,
+            plan_tier=plan_tier,
+        )
+        if used + len(files) > docs_per_month:
+            usage = PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_DOCUMENTS_UPLOADED,
+                limit=docs_per_month,
+                plan_tier=plan_tier,
+            )
+            raise PermissionDenied(
+                PlanGuard._period_limit_message(
+                    metric_label="documents",
+                    used=used,
+                    limit=docs_per_month,
+                    reset_at=usage["period_end"],
+                )
+            )
 
     @staticmethod
     def assert_can_create_battery(*, user, plan: Optional[Plan] = None):
-        """
-        Regla:
-          - max_batteries global (Plan.max_batteries). Free=3, Premium/Ultra ilimitado.
-        """
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
 
-        plan = plan or PlanGuard.get_plan_for_user(user)
+        if not PlanGuard.should_enforce_for_user(user):
+            return
 
+        plan = plan or PlanGuard.get_plan_for_user(user)
         if plan.max_batteries is not None:
             batteries_count = Battery.objects.filter(project__owner=user).count()
             if batteries_count + 1 > int(plan.max_batteries):
                 raise PermissionDenied(f"Plan limit: max_batteries={plan.max_batteries} reached.")
 
     @staticmethod
-    def assert_flashcards_allowed(*, user, plan: Optional[Plan] = None):
-        """
-        Regla:
-          - can_use_flashcards (bool)
-          - flashcards_max_total (int)
-          - Free: max_total = 2
-          - Premium/Ultra: max_total >= 50 (mínimo)
-        """
+    def assert_flashcards_allowed(*, user, requested_cards: Optional[int] = None, plan: Optional[Plan] = None):
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
 
-        plan = plan or PlanGuard.get_plan_for_user(user)
-
-        # 1) Feature flag base
-        if not PlanGuard.limit_bool(plan, "can_use_flashcards", default=False):
-            raise PermissionDenied("This feature requires Premium or Ultra (flashcards).")
-
-        # 2) Límite numérico total
-        max_total = PlanGuard.limit_int(plan, "flashcards_max_total", default=0)
-
-        tier = (getattr(plan, "tier", "") or "").lower()
-        name = (getattr(plan, "name", "") or "").lower()
-        is_free = tier == "free" or name == "free"
-
-        # En Premium/Ultra garantizamos que el límite sea al menos 50
-        if not is_free and max_total is not None and max_total < 50:
-            max_total = 50
-
-        # Si max_total es None => ilimitado (si tú lo manejas así)
-        if max_total is None:
+        if not PlanGuard.should_enforce_for_user(user):
             return
 
-        # Flashcard stores user_id as string (not FK). Keep deck__owner for legacy rows.
-        # 
-        current = Deck.objects.filter(owner=user).count()
-        if current >= max_total:
+        plan = plan or PlanGuard.get_plan_for_user(user)
+        plan_tier = PlanGuard._effective_tier(plan)
+
+        cards_per_job_max = PlanGuard._profile_limit_int(plan, "flashcards_per_job_max")
+        if requested_cards is not None and int(requested_cards) > cards_per_job_max:
+            raise PermissionDenied(f"Plan limit: flashcards_per_job_max={cards_per_job_max}.")
+
+        jobs_per_month = PlanGuard._profile_limit_int(plan, "flashcard_jobs_per_month")
+        used = PlanUsageService.get_usage(
+            user=user,
+            metric=PlanUsageService.METRIC_FLASHCARD_JOBS,
+            plan_tier=plan_tier,
+        )
+        if used + 1 > jobs_per_month:
+            usage = PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_FLASHCARD_JOBS,
+                limit=jobs_per_month,
+                plan_tier=plan_tier,
+            )
             raise PermissionDenied(
-                f"Plan limit reached: flashcards_max_total={max_total}. "
-                f"Current={current}."
+                PlanGuard._period_limit_message(
+                    metric_label="flashcard jobs",
+                    used=used,
+                    limit=jobs_per_month,
+                    reset_at=usage["period_end"],
+                )
             )
 
     @staticmethod
     def assert_explore_topics_allowed(*, user, requested_topics: int, plan: Optional[Plan] = None):
-        """
-        Regla:
-          - explore_topics_limit: Free 0, Premium 10, Ultra ilimitado (null)
-        """
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
-        plan = plan or PlanGuard.get_plan_for_user(user)
 
+        if not PlanGuard.should_enforce_for_user(user):
+            return
+
+        plan = plan or PlanGuard.get_plan_for_user(user)
         limit = PlanGuard.limit_int(plan, "explore_topics_limit", default=0)
         if limit is None:
-            return  # ilimitado
+            return
         if int(requested_topics) > int(limit):
             raise PermissionDenied(f"Plan limit: explore_topics_limit={limit} topics.")
-
 
     @staticmethod
     def assert_ask_allowed(*, user, plan: Optional[Plan] = None):
         if not user or not user.is_authenticated:
             raise PermissionDenied("Authentication required.")
 
+        if not PlanGuard.should_enforce_for_user(user):
+            return
+
         plan = plan or PlanGuard.get_plan_for_user(user)
-
-        tier = (getattr(plan, "tier", "") or "").lower()
-        name = (getattr(plan, "name", "") or "").lower()
-        is_free = tier == "free" or name == "free"
-        is_ultra = tier == "ultra" or name == "ultra"
-        is_premium = tier == "premium" or name == "premium"
-
-        # 1) Define ventana
-        window_days = PlanGuard.limit_int(plan, "ask_window_days", default=5)
-        since = timezone.now() - timedelta(days=window_days or 0)
-
-        # 2) Define límite por plan (Ultra ilimitado)
-        # Si tienes PlanLimit, úsalo; si no, aplica defaults
-        limit = PlanGuard.limit_int(plan, "ask_questions_per_window", default=None)
-
-        if is_ultra:
-            return  # ilimitado
-
-        if limit is None:
-            # defaults si no existe PlanLimit
-            limit = 5 if is_free else 50 if is_premium else 5
-
-        # 3) Cuenta SOLO mensajes con respuesta (para "preguntas con sus respuestas")
-        used = (
-            ConversationMessage.objects.filter(
-                user_id=user.id,
-                created_at__gte=since,
-            )
-            .exclude(Q(answer__isnull=True) | Q(answer=""))
-            .count()
+        plan_tier = PlanGuard._effective_tier(plan)
+        ask_limit = PlanGuard._profile_limit_int(plan, "ask_queries_per_month")
+        used = PlanUsageService.get_usage(
+            user=user,
+            metric=PlanUsageService.METRIC_ASK_QUERIES,
+            plan_tier=plan_tier,
         )
-
-        if used >= limit:
+        if used + 1 > ask_limit:
+            usage = PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_ASK_QUERIES,
+                limit=ask_limit,
+                plan_tier=plan_tier,
+            )
             raise PermissionDenied(
-    f"Limit reached ({used}/{limit}). Upgrade to Premium or Ultra to continue asking questions."
-)
+                PlanGuard._period_limit_message(
+                    metric_label="/ask queries",
+                    used=used,
+                    limit=ask_limit,
+                    reset_at=usage["period_end"],
+                )
+            )
+
+    @staticmethod
+    def history_days_for_user(*, user, plan: Optional[Plan] = None) -> Optional[int]:
+        if not user or not user.is_authenticated:
+            return None
+        if not PlanGuard.should_enforce_for_user(user):
+            return None
+
+        plan = plan or PlanGuard.get_plan_for_user(user)
+        return PlanGuard._profile_limit_int(plan, "history_days")
+
+    @staticmethod
+    def usage_summary_for_user(*, user, plan: Optional[Plan] = None) -> dict:
+        if not user or not user.is_authenticated:
+            return {}
+        if not PlanGuard.should_enforce_for_user(user):
+            return {"bypass": True}
+
+        plan = plan or PlanGuard.get_plan_for_user(user)
+        tier = PlanGuard._effective_tier(plan)
+
+        docs_limit = PlanGuard._profile_limit_int(plan, "documents_per_month")
+        ask_limit = PlanGuard._profile_limit_int(plan, "ask_queries_per_month")
+        jobs_limit = PlanGuard._profile_limit_int(plan, "flashcard_jobs_per_month")
+
+        return {
+            "documents_uploaded": PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_DOCUMENTS_UPLOADED,
+                limit=docs_limit,
+                plan_tier=tier,
+            ),
+            "ask_queries": PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_ASK_QUERIES,
+                limit=ask_limit,
+                plan_tier=tier,
+            ),
+            "flashcard_jobs": PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_FLASHCARD_JOBS,
+                limit=jobs_limit,
+                plan_tier=tier,
+            ),
+        }
+
+    @staticmethod
+    def record_documents_uploaded(*, user, amount: int, plan: Optional[Plan] = None):
+        if amount <= 0 or not PlanGuard.should_enforce_for_user(user):
+            return
+        plan = plan or PlanGuard.get_plan_for_user(user)
+        tier = PlanGuard._effective_tier(plan)
+        limit = PlanGuard._profile_limit_int(plan, "documents_per_month")
+        applied, used, max_limit = PlanUsageService.consume(
+            user=user,
+            metric=PlanUsageService.METRIC_DOCUMENTS_UPLOADED,
+            amount=amount,
+            limit=limit,
+            plan_tier=tier,
+        )
+        if not applied:
+            usage = PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_DOCUMENTS_UPLOADED,
+                limit=max_limit,
+                plan_tier=tier,
+            )
+            raise PermissionDenied(
+                PlanGuard._period_limit_message(
+                    metric_label="documents",
+                    used=used,
+                    limit=max_limit,
+                    reset_at=usage["period_end"],
+                )
+            )
+
+    @staticmethod
+    def record_flashcard_job(*, user, amount: int = 1, plan: Optional[Plan] = None):
+        if amount <= 0 or not PlanGuard.should_enforce_for_user(user):
+            return
+        plan = plan or PlanGuard.get_plan_for_user(user)
+        tier = PlanGuard._effective_tier(plan)
+        limit = PlanGuard._profile_limit_int(plan, "flashcard_jobs_per_month")
+        applied, used, max_limit = PlanUsageService.consume(
+            user=user,
+            metric=PlanUsageService.METRIC_FLASHCARD_JOBS,
+            amount=amount,
+            limit=limit,
+            plan_tier=tier,
+        )
+        if not applied:
+            usage = PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_FLASHCARD_JOBS,
+                limit=max_limit,
+                plan_tier=tier,
+            )
+            raise PermissionDenied(
+                PlanGuard._period_limit_message(
+                    metric_label="flashcard jobs",
+                    used=used,
+                    limit=max_limit,
+                    reset_at=usage["period_end"],
+                )
+            )
+
+    @staticmethod
+    def record_ask_query(*, user, amount: int = 1, plan: Optional[Plan] = None):
+        if amount <= 0 or not PlanGuard.should_enforce_for_user(user):
+            return
+        plan = plan or PlanGuard.get_plan_for_user(user)
+        tier = PlanGuard._effective_tier(plan)
+        limit = PlanGuard._profile_limit_int(plan, "ask_queries_per_month")
+        applied, used, max_limit = PlanUsageService.consume(
+            user=user,
+            metric=PlanUsageService.METRIC_ASK_QUERIES,
+            amount=amount,
+            limit=limit,
+            plan_tier=tier,
+        )
+        if not applied:
+            usage = PlanUsageService.summary(
+                user=user,
+                metric=PlanUsageService.METRIC_ASK_QUERIES,
+                limit=max_limit,
+                plan_tier=tier,
+            )
+            raise PermissionDenied(
+                PlanGuard._period_limit_message(
+                    metric_label="/ask queries",
+                    used=used,
+                    limit=max_limit,
+                    reset_at=usage["period_end"],
+                )
+            )

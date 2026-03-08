@@ -167,6 +167,44 @@ class Subscription(models.Model):
     def __str__(self):
         return f"{self.user} - {self.plan.tier} - {self.status}"
 
+
+class PlanUsageCounter(models.Model):
+    METRIC_CHOICES = [
+        ("documents_uploaded", "Documents Uploaded"),
+        ("ask_queries", "Ask Queries"),
+        ("flashcard_jobs", "Flashcard Jobs"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="plan_usage_counters",
+    )
+    metric = models.CharField(max_length=40, choices=METRIC_CHOICES, db_index=True)
+    used = models.PositiveIntegerField(default=0)
+
+    period_start = models.DateTimeField(db_index=True)
+    period_end = models.DateTimeField(db_index=True)
+    plan_tier_snapshot = models.CharField(max_length=20, blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "plan_usage_counters"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "metric", "period_start", "period_end"],
+                name="uniq_usage_user_metric_period",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["user", "metric", "period_end"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.metric}:{self.used}"
+
 def document_upload_to(instance, filename):
     """
     Build the upload path for a document file.

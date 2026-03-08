@@ -646,14 +646,20 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        history_days = PlanGuard.history_days_for_user(user=request.user)
+        since = timezone.now() - timedelta(days=history_days) if history_days is not None else None
+
         # 2) traer sesiones del usuario (más reciente primero)
         # Si quieres “última añadida” usa created_at.
         # Si quieres “más activa recientemente” usa updated_at.
         sessions_qs = (
             UserSession.objects
             .filter(user=request.user)
+            .distinct()
             .order_by("-created_at")   # o "-updated_at"
         )
+        if since is not None:
+            sessions_qs = sessions_qs.filter(messages__created_at__gte=since)
 
         offset = index - 1
         session_obj = sessions_qs[offset:offset + 1].first()
@@ -668,8 +674,11 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         msgs_qs = (
             ConversationMessage.objects
             .filter(session=session_obj)
-            .order_by("-created_at")[:10]
+            .order_by("-created_at")
         )
+        if since is not None:
+            msgs_qs = msgs_qs.filter(created_at__gte=since)
+        msgs_qs = msgs_qs[:10]
 
         data = ConversationMessageSerializer(msgs_qs, many=True).data
 
@@ -803,6 +812,8 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 "final": final_msg,
                 "request_payload": payload,
             }
+            if resp_payload["ok"]:
+                PlanGuard.record_ask_query(user=request.user)
             return Response(resp_payload, status=status.HTTP_200_OK)
 
         except Exception as exc:
@@ -814,6 +825,8 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             rj = http_result.get("response_json")
             if isinstance(rj, dict):
                 job_id = rj.get("job_id")
+            if bool(http_result.get("ok")):
+                PlanGuard.record_ask_query(user=request.user)
 
             return Response(
                 {
@@ -1176,6 +1189,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                         "external": external_data,
                     }
                 )
+            PlanGuard.record_documents_uploaded(user=request.user, amount=len(files))
 
         return Response(
             {
@@ -1483,6 +1497,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 filename=filename or "",
                 document_hash=file_hash,
             )
+            PlanGuard.record_documents_uploaded(user=request.user, amount=1)
             notify_document_uploaded(request.user, doc.filename)
             notify_document_ready(request.user, doc.filename)
         # doc = Document.objects.filter(project=project, hash=file_hash).first()
@@ -2939,9 +2954,10 @@ class PlanViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me/limits")
     def my_limits(self, request):
         plan = PlanGuard.get_plan_for_user(request.user)
+        public_tier = PlanGuard.public_tier(plan)
 
         data = {
-            "plan": {"tier": plan.tier, "name": plan.name},
+            "plan": {"tier": public_tier, "name": plan.name},
             "max_documents": plan.max_documents,
             "max_batteries": plan.max_batteries,
             "limits": {
@@ -2952,7 +2968,14 @@ class PlanViewSet(viewsets.ModelViewSet):
                 "can_invite": PlanGuard.limit_bool(plan, "can_invite"),
                 "can_collect_batteries": PlanGuard.limit_bool(plan, "can_collect_batteries"),
                 "can_collect_decks": PlanGuard.limit_bool(plan, "can_collect_decks"),
+                "documents_per_month": PlanGuard._profile_limit_int(plan, "documents_per_month"),
+                "pages_per_document_max": PlanGuard._profile_limit_int(plan, "pages_per_document_max"),
+                "ask_queries_per_month": PlanGuard._profile_limit_int(plan, "ask_queries_per_month"),
+                "flashcard_jobs_per_month": PlanGuard._profile_limit_int(plan, "flashcard_jobs_per_month"),
+                "flashcards_per_job_max": PlanGuard._profile_limit_int(plan, "flashcards_per_job_max"),
+                "history_days": PlanGuard._profile_limit_int(plan, "history_days"),
             },
+            "usage": PlanGuard.usage_summary_for_user(user=request.user, plan=plan),
         }
         return Response(data)
 
@@ -2999,6 +3022,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             )
 
         plan = sub.plan
+        public_tier = PlanGuard.public_tier(plan)
 
         # ✅ respuesta simple para frontend (más útil que serializar todo)
         return Response(
@@ -3014,7 +3038,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
                 },
                 "plan": {
                     "id": plan.id,
-                    "tier": plan.tier,
+                    "tier": public_tier,
                     "name": plan.name,
                     "description": plan.description,
                     "price_cents": plan.price_cents,
@@ -3034,12 +3058,16 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         Body: { "tier": "free|premium|ultra" }
         Cambia el plan del usuario (demo/simple). En producción lo maneja Stripe/Paypal webhooks.
         """
-        tier = (request.data.get("tier") or "").strip().lower()
-        if tier not in ("free", "premium", "ultra"):
-            return Response({"detail": "tier must be free|premium|ultra"}, status=status.HTTP_400_BAD_REQUEST)
+        raw_tier = (request.data.get("tier") or "")
+        storage_tier = PlanGuard.map_requested_tier_to_storage(raw_tier)
+        if storage_tier is None:
+            return Response(
+                {"detail": "tier must be free|premium|ultra"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            plan = Plan.objects.get(tier=tier, is_active=True)
+            plan = Plan.objects.get(tier=storage_tier, is_active=True)
         except Plan.DoesNotExist:
             return Response({"detail": "Plan not found or inactive"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -3615,6 +3643,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             return Response({"detail": "cards_count must be > 0"}, status=status.HTTP_400_BAD_REQUEST)
         if cards_count > 500:
             return Response({"detail": "cards_count too large (max 500)"}, status=status.HTTP_400_BAD_REQUEST)
+        PlanGuard.assert_flashcards_allowed(user=request.user, requested_cards=cards_count)
 
         # --- Project ---
         try:
@@ -3709,6 +3738,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         # ✅ GUARDA job_id EN EL DECK (clave)
         deck.external_job_id = str(job_id)
         deck.save(update_fields=["external_job_id"])
+        PlanGuard.record_flashcard_job(user=request.user)
 
         # construir ws urls (ws / wss según protocolo del base_url)
         host = base_url.split("://", 1)[-1].lstrip("/")
@@ -3785,7 +3815,6 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     @transaction.atomic
     def create_with_flashcards(self, request):
         data = request.data or {}
-        PlanGuard.assert_flashcards_allowed(user=request.user)
 
         # --------- Deck fields ----------
         project_id = data.get("project_id")
@@ -3847,6 +3876,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 # return Response({"detail": f"cards[{i}] front and back are required"}, status=status.HTTP_400_BAD_REQUEST)
 
             clean_cards.append({"front": front, "back": back, "notes": notes})
+        PlanGuard.assert_flashcards_allowed(user=request.user, requested_cards=len(clean_cards))
         job_id = uuid.uuid4()
 
         topic = ensure_topic_for_flashcards(
@@ -3898,6 +3928,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         deck_data = DeckSerializer(deck, context={"request": request}).data
         cards_qs = Flashcard.objects.filter(deck=deck).order_by("created_at", "id")
         cards_data = FlashcardSerializer(cards_qs, many=True, context={"request": request}).data
+        PlanGuard.record_flashcard_job(user=request.user)
 
         return Response(
             {
@@ -3928,8 +3959,6 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         description = data.get("description") or ""
         visibility = data.get("visibility") or "private"
         
-        PlanGuard.assert_flashcards_allowed(user=request.user)
-
         # --- Optional: section_ids ---
         section_ids = data.get("section_ids") or []
         if not isinstance(section_ids, list):
@@ -3981,6 +4010,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             return Response({"detail": "cards_count must be > 0"}, status=status.HTTP_400_BAD_REQUEST)
         if cards_count > 500:
             return Response({"detail": "cards_count too large (max 500)"}, status=status.HTTP_400_BAD_REQUEST)
+        PlanGuard.assert_flashcards_allowed(user=request.user, requested_cards=cards_count)
 
         # --- Project ---
         try:
@@ -4086,6 +4116,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         ws_progress = f"ws://{host}/ws/progress/{job_id}"
         deck.external_job_id = job_id
         deck.save(update_fields=["external_job_id"])
+        PlanGuard.record_flashcard_job(user=request.user)
         # --- Response (MISMO estilo del primero + job/ws) ---
         flashcards_count = cards_count
         sections_count = len(attached_section_ids)
