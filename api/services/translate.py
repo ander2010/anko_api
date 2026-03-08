@@ -15,7 +15,7 @@ def post_translate(
     *,
     source_language: str = DEFAULT_SOURCE,
     target_language: str = DEFAULT_TARGET,
-    timeout: int = 60,
+    timeout: int = 180,
 ) -> Any:
     """
     Traduce `data` llamando al servicio /translate y retorna el resultado listo
