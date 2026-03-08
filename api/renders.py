@@ -100,7 +100,7 @@ class EncryptedJSONRenderer(JSONRenderer):
         logger.info("[EncryptedJSONRenderer] render() — view=%s action=%s", view_name, action)
 
         if not request or not view:
-            logger.warning("[EncryptedJSONRenderer] request o view es None — sin cifrado ni traducción")
+            logger.warning("[EncryptedJSONRenderer] request o view es None — sin cifrado")
             return super().render(data, accepted_media_type, renderer_context)
 
         encrypt = getattr(view, "encrypt_response", False)
@@ -114,7 +114,7 @@ class EncryptedJSONRenderer(JSONRenderer):
         logger.info("[EncryptedJSONRenderer] token presente: %s", bool(token))
 
         if not token:
-            logger.warning("[EncryptedJSONRenderer] sin token — sin cifrado ni traducción")
+            logger.warning("[EncryptedJSONRenderer] sin token — sin cifrado")
             return super().render(data, accepted_media_type, renderer_context)
 
         translate_data_if_needed(data, request, caller="EncryptedJSONRenderer")
