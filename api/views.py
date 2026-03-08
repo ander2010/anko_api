@@ -62,7 +62,6 @@ from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
 from .models import Tag
 from api.mixins import EncryptSelectedActionsMixin
-from api.permissions import IsRbacAdmin, is_admin_like
 
 from .models import (
     Resource, Permission, Role,
@@ -99,7 +98,14 @@ logger = get_logger(__name__)
 
 
 def _is_rbac_admin_user(user) -> bool:
-    return is_admin_like(user)
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
+        return True
+    try:
+        return user.roles.filter(name="admin").exists()
+    except Exception:
+        return False
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
@@ -2932,19 +2938,19 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 class ResourceViewSet(viewsets.ModelViewSet):
     queryset = Resource.objects.all().order_by("key")
     serializer_class = ResourceSerializer
-    permission_classes = [IsRbacAdmin]
+    permission_classes = [IsAuthenticated]
 
 
 class PermissionViewSet(viewsets.ModelViewSet):
     queryset = Permission.objects.select_related("resource").all().order_by("resource__key", "action", "code")
     serializer_class = PermissionSerializer
-    permission_classes = [IsRbacAdmin]
+    permission_classes = [IsAuthenticated]
 
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.prefetch_related("permissions").all().order_by("name")
     serializer_class = RoleSerializer
-    permission_classes = [IsRbacAdmin]
+    permission_classes = [IsAuthenticated]
 
 
 # ==========================================================
@@ -2954,9 +2960,9 @@ class RoleViewSet(viewsets.ModelViewSet):
 class PlanViewSet(viewsets.ModelViewSet):
     queryset = Plan.objects.prefetch_related("limits").all().order_by("tier")
     serializer_class = PlanSerializer
-    permission_classes = [IsRbacAdmin]
+    permission_classes = [AllowAny]  # normalmente el listado de planes es público
 
-    @action(detail=False, methods=["get"], permission_classes=[IsRbacAdmin], url_path="me/limits")
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me/limits")
     def my_limits(self, request):
         plan = PlanGuard.get_plan_for_user(request.user)
         public_tier = PlanGuard.public_tier(plan)
@@ -2988,18 +2994,22 @@ class PlanViewSet(viewsets.ModelViewSet):
 class PlanLimitViewSet(viewsets.ModelViewSet):
     queryset = PlanLimit.objects.select_related("plan").all().order_by("plan__tier", "key")
     serializer_class = PlanLimitSerializer
-    permission_classes = [IsRbacAdmin]
+    permission_classes = [IsAuthenticated]
 
 
 class SubscriptionViewSet(viewsets.ModelViewSet):
     queryset = Subscription.objects.select_related("user", "plan").all()
     serializer_class = SubscriptionSerializer
-    permission_classes = [IsRbacAdmin]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return super().get_queryset()
+        # usuario normal solo ve su subscription; staff/admin ve todas
+        user = self.request.user
+        if user.is_staff or user.is_superuser:
+            return super().get_queryset()
+        return super().get_queryset().filter(user=user)
 
-    @action(detail=False, methods=["get"], permission_classes=[IsRbacAdmin], url_path="me")
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="me")
     def me(self, request):
         user = request.user
 
@@ -3052,7 +3062,7 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=False, methods=["post"], permission_classes=[IsRbacAdmin], url_path="set-plan")
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="set-plan")
     def set_plan(self, request):
         """
         POST /api/subscriptions/set-plan/
@@ -5150,7 +5160,7 @@ class RBACViewSet(viewsets.ViewSet):
       - Resource.key guarda keys estilo: "dashboard.home", "dashboard.projects", etc.
       - Permission.action="view" es el permiso para ver esa ruta.
     """
-    permission_classes = [IsRbacAdmin]
+    permission_classes = [IsAuthenticated]
 
     @action(detail=False, methods=["get"], url_path="me/allowed-routes")
     def me_allowed_routes(self, request):

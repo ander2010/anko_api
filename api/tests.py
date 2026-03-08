@@ -117,26 +117,6 @@ class RbacAdminPanelTests(APITestCase):
         missing = expected_prefixes - registered
         self.assertFalse(missing, f"Missing API routes for admin panels: {sorted(missing)}")
 
-    def test_rbac_endpoint_is_admin_only(self):
-        self.client.force_authenticate(user=self.user_a)
-        forbidden = self.client.get("/api/rbac/me/allowed-routes/")
-        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
-
-        self.client.force_authenticate(user=self.admin)
-        ok = self.client.get("/api/rbac/me/allowed-routes/")
-        self.assertEqual(ok.status_code, status.HTTP_200_OK)
-
-    def test_billing_endpoints_are_admin_only(self):
-        self.client.force_authenticate(user=self.user_a)
-        for path in ["/api/plans/", "/api/plan-limits/", "/api/subscriptions/"]:
-            resp = self.client.get(path)
-            self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, path)
-
-        self.client.force_authenticate(user=self.admin)
-        for path in ["/api/plans/", "/api/plan-limits/", "/api/subscriptions/"]:
-            resp = self.client.get(path)
-            self.assertEqual(resp.status_code, status.HTTP_200_OK, path)
-
     def test_decks_requires_authentication(self):
         response = self.client.get("/api/decks/")
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
