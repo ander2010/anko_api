@@ -108,7 +108,7 @@ def _is_rbac_admin_user(user) -> bool:
         return False
 
 class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 20
+    page_size = 10
     page_size_query_param = "page_size"   # 👈 acepta ?page_size=1
     max_page_size = 200
 
@@ -2927,6 +2927,9 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     def attempts(self, request, pk=None):
         battery = self.get_object()
         qs = battery.attempts.filter(user=request.user).order_by("-started_at")
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(BatteryAttemptSerializer(page, many=True).data)
         return Response(BatteryAttemptSerializer(qs, many=True).data)
     
 
@@ -5457,6 +5460,9 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
         status_filter = request.query_params.get("status")
         if status_filter:
             qs = qs.filter(status=status_filter)
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(AccessRequestSerializer(page, many=True).data)
         return Response(AccessRequestSerializer(qs, many=True).data)
 
     @action(detail=False, methods=["get"], url_path="inbox", permission_classes=[IsAuthenticated])
@@ -5466,6 +5472,9 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
         status_filter = request.query_params.get("status")
         if status_filter:
             qs = qs.filter(status=status_filter)
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(AccessRequestSerializer(page, many=True).data)
         return Response(AccessRequestSerializer(qs, many=True).data)
 
     # -----------------
@@ -5702,6 +5711,10 @@ class UserNotificationViewSet(viewsets.GenericViewSet):
 
     def list(self, request, *args, **kwargs):
         qs = self.get_queryset()
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
 
