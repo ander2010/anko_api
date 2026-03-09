@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from typing import Any, Optional, Union
 
 import requests
@@ -10,6 +11,7 @@ from api.services.audit import log_audit_event
 BASE_URL = os.getenv("TRANSLATE_BASE_URL", os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
 DEFAULT_SOURCE = os.getenv("TRANSLATE_SOURCE_LANGUAGE", "english")
 DEFAULT_TARGET = os.getenv("TRANSLATE_TARGET_LANGUAGE", "spanish")
+logger = logging.getLogger("api.services.translate")
 
 
 def _collect_value_string_refs(data: Union[list, dict], refs: list[tuple[Any, Any]], strings: list[str]) -> None:
@@ -85,6 +87,28 @@ def post_translate(
         strings: list[str] = []
         _collect_value_string_refs(data, refs, strings)
         payload["data"] = strings
+
+    send_data = payload.get("data")
+    if isinstance(send_data, list):
+        send_count = len(send_data)
+        preview = [str(x)[:120] for x in send_data[:3]]
+    elif isinstance(send_data, dict):
+        send_count = len(send_data)
+        preview = {str(k): str(v)[:120] for k, v in list(send_data.items())[:3]}
+    else:
+        send_count = 1 if send_data is not None else 0
+        preview = str(send_data)[:120] if send_data is not None else None
+
+    logger.info(
+        "[translate.request] request_id=%s url=%s source=%s target=%s data_type=%s items=%s preview=%s",
+        request_id,
+        url,
+        source_language,
+        target_language,
+        type(send_data).__name__,
+        send_count,
+        preview,
+    )
 
     try:
         response = requests.post(url, json=payload, timeout=timeout)
