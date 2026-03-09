@@ -16,24 +16,13 @@ logger = logging.getLogger("api.renderers")
 _translation_cache: dict[str, str] = {}
 _CACHE_MAX = 10_000
 
-# Translate only selected keys by default (customizable via env).
-# Example: TRANSLATE_ALLOWED_KEYS=title,description,body,message,detail
-_ALLOWED_KEYS = {
-    k.strip().lower()
-    for k in os.getenv(
-        "TRANSLATE_ALLOWED_KEYS",
-        "title,description,body,message,detail,name,label",
-    ).split(",")
-    if k.strip()
-}
-
-# Skip heavy/high-noise fields even if they appear in allowed sets.
+# Optional key blacklist. If a key is listed, string values under that key are skipped.
 # Example: TRANSLATE_SKIP_KEYS=content,notes,explanation
 _SKIP_KEYS = {
     k.strip().lower()
     for k in os.getenv(
         "TRANSLATE_SKIP_KEYS",
-        "content,notes,explanation",
+        "",
     ).split(",")
     if k.strip()
 }
@@ -53,35 +42,32 @@ def _should_translate(s: str) -> bool:
     return not _SKIP_RE.match(s)
 
 
-def _should_translate_key(key) -> bool:
+def _is_skipped_key(key) -> bool:
     if key is None:
         return False
-    key_l = str(key).strip().lower()
-    if not key_l or key_l in _SKIP_KEYS:
-        return False
-    return key_l in _ALLOWED_KEYS
+    return str(key).strip().lower() in _SKIP_KEYS
 
 
-def _collect_strings(data, strings, refs, *, parent_key=None, path=""):
+def _collect_strings(data, strings, refs, *, path=""):
     """Recorre data recursivamente y acumula strings traducibles con sus referencias."""
     if isinstance(data, dict):
         for k, v in data.items():
             child_path = f"{path}.{k}" if path else str(k)
             if isinstance(v, str):
-                if _should_translate_key(k) and _should_translate(v):
+                if not _is_skipped_key(k) and _should_translate(v):
                     refs.append((data, k, len(strings), child_path))
                     strings.append(v)
             else:
-                _collect_strings(v, strings, refs, parent_key=k, path=child_path)
+                _collect_strings(v, strings, refs, path=child_path)
     elif isinstance(data, list):
         for i, v in enumerate(data):
             child_path = f"{path}[{i}]" if path else f"[{i}]"
             if isinstance(v, str):
-                if _should_translate_key(parent_key) and _should_translate(v):
+                if _should_translate(v):
                     refs.append((data, i, len(strings), child_path))
                     strings.append(v)
             else:
-                _collect_strings(v, strings, refs, parent_key=parent_key, path=child_path)
+                _collect_strings(v, strings, refs, path=child_path)
 
 
 def _apply_translations(translated, refs):
@@ -175,10 +161,11 @@ def translate_data_if_needed(data, request, *, caller=""):
     new_translations: list[str] = []
     if to_fetch:
         to_fetch_original = list(to_fetch)
+        payload_dict = {str(i): val for i, val in enumerate(to_fetch_original)}
         try:
             t0 = time.time()
             new_translations = post_translate(
-                list(to_fetch),
+                payload_dict,
                 audit_user_id=user_id,
                 request_id=request_id,
                 audit_operation="translate.bulk_strings",
@@ -187,8 +174,13 @@ def translate_data_if_needed(data, request, *, caller=""):
             elapsed = time.time() - t0
             logger.info("%s post_translate tardó %.3fs para %d strings", tag, elapsed, len(to_fetch))
 
-            if not isinstance(new_translations, list):
-                logger.error("%s post_translate devolvió %s en vez de list — abortando", tag, type(new_translations))
+            if isinstance(new_translations, dict):
+                new_translations = [
+                    str(new_translations.get(str(i), to_fetch_original[i]))
+                    for i in range(len(to_fetch_original))
+                ]
+            elif not isinstance(new_translations, list):
+                logger.error("%s post_translate devolvió %s en vez de dict/list — abortando", tag, type(new_translations))
                 new_translations = []
         except Exception as ex:
             logger.exception("%s excepción en post_translate: %s", tag, ex)
