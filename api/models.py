@@ -244,7 +244,7 @@ def document_upload_to(instance, filename):
     Build the upload path for a document file.
 
     The final storage path will be:
-        documents/{user_id}/{uuid}_{original_filename}
+        documents/{user_id}/{project_id}/{original_filename}
 
     The global storage configuration (e.g. AWS_LOCATION="anko")
     will automatically prefix this path.
@@ -257,11 +257,13 @@ def document_upload_to(instance, filename):
     if not user_id and instance.project_id:
         user_id = instance.project.owner_id
 
+    project_id = instance.project_id
+
     safe_filename = os.path.basename(filename)
     # unique_filename = f"{uuid.uuid4()}_{safe_filename}"
     unique_filename = f"{safe_filename}"
 
-    return f"documents/{user_id}/{unique_filename}"
+    return f"documents/{user_id}/{project_id}/{unique_filename}"
 
 
 class Project(models.Model):
