@@ -263,7 +263,7 @@ def document_upload_to(instance, filename):
     # unique_filename = f"{uuid.uuid4()}_{safe_filename}"
     unique_filename = f"{safe_filename}"
 
-    return f"documents/{user_id}/{project_id}/{unique_filename}"
+    return f"documents/{user_id}/{unique_filename}"
 
 
 class Project(models.Model):
