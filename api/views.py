@@ -1513,7 +1513,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             logger.info("doc_register saved user_id=%s project_id=%s doc_id=%s", request.user.id, project_id, doc.id)
 
             # ✅ Evento SIEMPRE (si aceptaste el request)
-            doc=DocumentUploadEvent.objects.create(
+            DocumentUploadEvent.objects.create(
                 user=request.user,
                 project=project,
                 status="success",
