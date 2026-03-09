@@ -988,6 +988,13 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             )
         )
 
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            ser = DocumentWithSectionsSerializer(page, many=True, context={"request": request})
+            response = self.get_paginated_response(ser.data)
+            response.data["projectId"] = project.id
+            return response
+
         ser = DocumentWithSectionsSerializer(qs, many=True, context={"request": request})
         return Response({"projectId": project.id, "documents": ser.data})
 
@@ -1088,6 +1095,11 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 if hasattr(project, "documents")
                 else project.document_set.all().order_by("-uploaded_at")
             )
+            page = self.paginate_queryset(qs)
+            if page is not None:
+                ser = DocumentEsSerializer(page, many=True, context={"request": request})
+                return self.get_paginated_response(ser.data)
+
             ser = DocumentEsSerializer(qs, many=True, context={"request": request})
             return Response(ser.data)
 

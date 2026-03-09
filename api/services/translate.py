@@ -12,6 +12,31 @@ DEFAULT_SOURCE = os.getenv("TRANSLATE_SOURCE_LANGUAGE", "english")
 DEFAULT_TARGET = os.getenv("TRANSLATE_TARGET_LANGUAGE", "spanish")
 
 
+def _collect_value_string_refs(data: Union[list, dict], refs: list[tuple[Any, Any]], strings: list[str]) -> None:
+    """Collect only string VALUES (never dict keys) from nested list/dict payloads."""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, str):
+                refs.append((data, key))
+                strings.append(value)
+            elif isinstance(value, (dict, list)):
+                _collect_value_string_refs(value, refs, strings)
+    elif isinstance(data, list):
+        for idx, value in enumerate(data):
+            if isinstance(value, str):
+                refs.append((data, idx))
+                strings.append(value)
+            elif isinstance(value, (dict, list)):
+                _collect_value_string_refs(value, refs, strings)
+
+
+def _apply_value_translations(refs: list[tuple[Any, Any]], translated: list[Any]) -> None:
+    for i, (container, key) in enumerate(refs):
+        if i >= len(translated):
+            break
+        container[key] = translated[i]
+
+
 def post_translate(
     data: Union[str, list, dict],
     *,
@@ -53,6 +78,13 @@ def post_translate(
     wrap_string = isinstance(data, str)
     if wrap_string:
         payload["data"] = [data]
+    elif isinstance(data, (list, dict)):
+        # Hard guard: never send dict keys for translation.
+        # We extract only string values and send them as a flat list.
+        refs: list[tuple[Any, Any]] = []
+        strings: list[str] = []
+        _collect_value_string_refs(data, refs, strings)
+        payload["data"] = strings
 
     try:
         response = requests.post(url, json=payload, timeout=timeout)
@@ -105,4 +137,14 @@ def post_translate(
 
     if wrap_string and isinstance(result, list) and result:
         return result[0]
+
+    if isinstance(data, (list, dict)):
+        refs: list[tuple[Any, Any]] = []
+        strings: list[str] = []
+        _collect_value_string_refs(data, refs, strings)
+        if not strings or not isinstance(result, list):
+            return data
+        _apply_value_translations(refs, result)
+        return data
+
     return result
