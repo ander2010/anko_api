@@ -55,7 +55,7 @@ from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
     AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SummaryJobSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
-    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer,BatteryOptionSerializer,BatteryQuestionSerializer, BatteryAttemptSerializer
+    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer, BatteryListSerializer, BatteryOptionSerializer, BatteryQuestionSerializer, BatteryAttemptSerializer
 )
 from urllib.parse import quote, urlencode
 from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
@@ -75,7 +75,7 @@ from .serializers import (
     ResourceSerializer, PermissionSerializer, RoleSerializer,
     PlanSerializer, PlanLimitSerializer, SubscriptionSerializer,
     BatteryShareSerializer, SavedBatterySerializer, InviteSerializer,
-    DeckSerializer, FlashcardSerializer, DeckShareSerializer, SavedDeckSerializer,
+    DeckSerializer, DeckListSerializer, FlashcardSerializer, DeckShareSerializer, SavedDeckSerializer,
     TagSerializer, QaPairSerializer
 )
 from rest_framework.pagination import PageNumberPagination
@@ -2005,10 +2005,35 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     encrypted_actions = {
         "list",          # GET /batteries/
         "retrieve",      # GET /batteries/{id}/
+        "questions",     # GET /batteries/{id}/questions/
         "attempts",      # GET custom action
         "results",       # GET custom action
         "stats",         # GET custom action
     }
+
+    def get_serializer_class(self):
+        if getattr(self, "action", None) in {"list", "my"}:
+            return BatteryListSerializer
+        return BatterySerializer
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="questions")
+    def questions(self, request, pk=None):
+        """
+        GET /api/batteries/{id}/questions/
+        """
+        battery = self.get_object()
+        user = request.user
+        has_access = (
+            battery.project.owner_id == user.id
+            or battery.visibility == "public"
+            or battery.shares.filter(shared_with=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
+
+        questions_qs = battery.questions_rel.all().order_by("order", "id")
+        ser = BatteryQuestionSerializer(questions_qs, many=True, context={"request": request})
+        return Response(ser.data)
     
 
 
@@ -3383,10 +3408,23 @@ def ensure_topic_for_flashcards(
 
 
 class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
-    queryset = Deck.objects.select_related("owner").prefetch_related("cards").all()
+    queryset = Deck.objects.select_related("owner", "project").all()
     serializer_class = DeckSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination  # ✅
+
+    def get_queryset(self):
+        qs = Deck.objects.select_related("owner", "project")
+        if getattr(self, "action", None) in {"list", "my"}:
+            qs = qs.annotate(card_count=Count("cards", distinct=True))
+        if getattr(self, "action", None) in {"retrieve", "cards"}:
+            qs = qs.prefetch_related("cards")
+        return qs
+
+    def get_serializer_class(self):
+        if getattr(self, "action", None) in {"list", "my"}:
+            return DeckListSerializer
+        return DeckSerializer
 
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="job-progress")
@@ -3514,7 +3552,28 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     encrypted_actions = {
         "list",        # GET /decks/
         "retrieve",    # GET /decks/{id}/
+        "cards",       # GET /decks/{id}/cards/
     }
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="cards")
+    def cards(self, request, pk=None):
+        """
+        GET /api/decks/{id}/cards/
+        """
+        deck = self.get_object()
+
+        user = request.user
+        has_access = (
+            deck.owner_id == user.id
+            or deck.visibility == "public"
+            or deck.shares.filter(shared_with=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
+
+        cards_qs = deck.cards.all().order_by("id")
+        ser = FlashcardSerializer(cards_qs, many=True, context={"request": request})
+        return Response(ser.data)
 
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my")
@@ -3543,7 +3602,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         else:
             user_id = request.user.id
 
-        qs = Deck.objects.select_related("owner", "project").prefetch_related("cards").filter(
+        qs = Deck.objects.select_related("owner", "project").filter(
             Q(owner_id=user_id) | Q(shares__shared_with_id=user_id)
         ).distinct()
 
@@ -3568,6 +3627,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 card_count=Count("cards", distinct=True),
                 shared_count=Count("shares", distinct=True),
             )
+        else:
+            qs = qs.annotate(card_count=Count("cards", distinct=True))
 
         qs = qs.order_by("-created_at")
 

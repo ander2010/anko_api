@@ -335,6 +335,56 @@ class BatterySerializer(serializers.ModelSerializer):
         return BatteryAttemptSerializer(last).data if last else None
 
 
+class BatteryListSerializer(serializers.ModelSerializer):
+    attempts_count = serializers.SerializerMethodField()
+    last_attempt = serializers.SerializerMethodField()
+
+    owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
+    approved_count = serializers.SerializerMethodField()
+    rejected_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Battery
+        fields = [
+            "id",
+            "project",
+            "rule",
+            "name",
+            "status",
+            "created_at",
+            "difficulty",
+            "visibility",
+            "description",
+            "external_job_id",
+            "attempts_count",
+            "last_attempt",
+            "owner_id",
+            "approved_count",
+            "rejected_count",
+        ]
+
+    def get_approved_count(self, obj):
+        return obj.access_requests.filter(status="approved").count()
+
+    def get_rejected_count(self, obj):
+        return obj.access_requests.filter(status="rejected").count()
+
+    def get_attempts_count(self, obj):
+        request = self.context.get("request")
+        if request and request.user.is_authenticated:
+            return obj.attempts.filter(user=request.user).count()
+        return obj.attempts.count()
+
+    def get_last_attempt(self, obj):
+        request = self.context.get("request")
+        qs = obj.attempts.all().order_by("-started_at")
+        if request and request.user.is_authenticated:
+            qs = qs.filter(user=request.user)
+
+        last = qs.first()
+        return BatteryAttemptSerializer(last).data if last else None
+
+
 class BatteryAttemptAnswerSerializer(serializers.ModelSerializer):
     questionId = serializers.IntegerField(source="question_id", read_only=True)
 
@@ -555,6 +605,46 @@ class DeckSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at", "ownerId", "cardsCount", "cards","external_job_id"]
 
     def get_cardsCount(self, obj):
+        annotated = getattr(obj, "card_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.cards.count()
+
+    def get_approved_count(self, obj):
+        return obj.access_requests.filter(status="approved").count()
+
+    def get_rejected_count(self, obj):
+        return obj.access_requests.filter(status="rejected").count()
+
+
+class DeckListSerializer(serializers.ModelSerializer):
+    ownerId = serializers.IntegerField(source="owner_id", read_only=True)
+    cardsCount = serializers.SerializerMethodField()
+    approved_count = serializers.SerializerMethodField()
+    rejected_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Deck
+        fields = [
+            "id",
+            "ownerId",
+            "title",
+            "visibility",
+            "created_at",
+            "description",
+            "cardsCount",
+            "project",
+            "sections",
+            "external_job_id",
+            "approved_count",
+            "rejected_count",
+        ]
+        read_only_fields = ["created_at", "ownerId", "cardsCount", "external_job_id"]
+
+    def get_cardsCount(self, obj):
+        annotated = getattr(obj, "card_count", None)
+        if annotated is not None:
+            return annotated
         return obj.cards.count()
 
     def get_approved_count(self, obj):
