@@ -2,6 +2,7 @@ import re
 import time
 import logging
 import os
+import json
 from collections import Counter
 
 from rest_framework.renderers import JSONRenderer
@@ -111,6 +112,12 @@ def translate_data_if_needed(data, request, *, caller=""):
     if not lang.lower().startswith("es"):
         logger.info("%s idioma %r ≠ 'es' — sin traducción", tag, lang)
         return
+
+    # Full payload trace before translation (requested for debugging).
+    try:
+        logger.info("%s full_json_before_translate=%s", tag, json.dumps(data, ensure_ascii=False, default=str))
+    except Exception:
+        logger.info("%s full_json_before_translate=%s", tag, str(data))
 
     global _translation_cache
 
