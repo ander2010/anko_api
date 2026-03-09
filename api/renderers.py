@@ -1,6 +1,9 @@
 import re
 import time
 import logging
+import os
+import json
+from collections import Counter
 
 from rest_framework.renderers import JSONRenderer
 
@@ -12,6 +15,17 @@ logger = logging.getLogger("api.renderers")
 # Se limpia automáticamente al superar _CACHE_MAX entradas
 _translation_cache: dict[str, str] = {}
 _CACHE_MAX = 10_000
+
+# Optional key blacklist. If a key is listed, string values under that key are skipped.
+# Example: TRANSLATE_SKIP_KEYS=content,notes,explanation
+_SKIP_KEYS = {
+    k.strip().lower()
+    for k in os.getenv(
+        "TRANSLATE_SKIP_KEYS",
+        "",
+    ).split(",")
+    if k.strip()
+}
 
 # Strings que claramente NO son lenguaje natural y no deben traducirse
 _SKIP_RE = re.compile(
@@ -28,29 +42,37 @@ def _should_translate(s: str) -> bool:
     return not _SKIP_RE.match(s)
 
 
-def _collect_strings(data, strings, refs):
+def _is_skipped_key(key) -> bool:
+    if key is None:
+        return False
+    return str(key).strip().lower() in _SKIP_KEYS
+
+
+def _collect_strings(data, strings, refs, *, path=""):
     """Recorre data recursivamente y acumula strings traducibles con sus referencias."""
     if isinstance(data, dict):
         for k, v in data.items():
+            child_path = f"{path}.{k}" if path else str(k)
             if isinstance(v, str):
-                if _should_translate(v):
-                    refs.append((data, k, len(strings)))
+                if not _is_skipped_key(k) and _should_translate(v):
+                    refs.append((data, k, len(strings), child_path))
                     strings.append(v)
             else:
-                _collect_strings(v, strings, refs)
+                _collect_strings(v, strings, refs, path=child_path)
     elif isinstance(data, list):
         for i, v in enumerate(data):
+            child_path = f"{path}[{i}]" if path else f"[{i}]"
             if isinstance(v, str):
                 if _should_translate(v):
-                    refs.append((data, i, len(strings)))
+                    refs.append((data, i, len(strings), child_path))
                     strings.append(v)
             else:
-                _collect_strings(v, strings, refs)
+                _collect_strings(v, strings, refs, path=child_path)
 
 
 def _apply_translations(translated, refs):
     """Aplica las traducciones en su lugar usando las referencias."""
-    for container, key, idx in refs:
+    for container, key, idx, _path in refs:
         if idx < len(translated):
             container[key] = translated[idx]
 
@@ -77,6 +99,12 @@ def translate_data_if_needed(data, request, *, caller=""):
         logger.info("%s idioma %r ≠ 'es' — sin traducción", tag, lang)
         return
 
+    # Full payload trace before translation (requested for debugging).
+    try:
+        logger.info("%s full_json_before_translate=%s", tag, json.dumps(data, ensure_ascii=False, default=str))
+    except Exception:
+        logger.info("%s full_json_before_translate=%s", tag, str(data))
+
     global _translation_cache
 
     # 1. Recolectar strings traducibles
@@ -89,27 +117,55 @@ def translate_data_if_needed(data, request, *, caller=""):
         logger.info("%s nada que traducir", tag)
         return
 
+    key_counter = Counter()
+    path_preview = []
+    for _container, key, idx, ref_path in refs[:10]:
+        key_name = str(key)
+        key_counter[key_name] += 1
+        path_preview.append(
+            {
+                "path": ref_path,
+                "key": key_name,
+                "value_preview": str(strings[idx])[:120],
+            }
+        )
+
+    unique_count = len(set(strings))
+    duplicate_count = len(strings) - unique_count
+    logger.info(
+        "%s translation selection total=%d unique=%d duplicates=%d top_keys=%s sample_refs=%s",
+        tag,
+        len(strings),
+        unique_count,
+        duplicate_count,
+        dict(key_counter.most_common(8)),
+        path_preview,
+    )
+
     # 2. Separar los que ya están en cache vs los que hay que pedir
     cached_map: dict[str, str] = {}
     to_fetch: list[str] = []
-    to_fetch_indices: list[int] = []   # índice dentro de `strings`
+    to_fetch_set: set[str] = set()
 
     for i, s in enumerate(strings):
         if s in _translation_cache:
             cached_map[s] = _translation_cache[s]
         else:
-            to_fetch.append(s)
-            to_fetch_indices.append(i)
+            if s not in to_fetch_set:
+                to_fetch.append(s)
+                to_fetch_set.add(s)
 
     logger.info("%s en cache: %d | a traducir: %d", tag, len(cached_map), len(to_fetch))
 
     # 3. Llamar al servicio solo con los no cacheados
     new_translations: list[str] = []
     if to_fetch:
+        to_fetch_original = list(to_fetch)
+        payload_dict = {str(i): val for i, val in enumerate(to_fetch_original)}
         try:
             t0 = time.time()
             new_translations = post_translate(
-                to_fetch,
+                payload_dict,
                 audit_user_id=user_id,
                 request_id=request_id,
                 audit_operation="translate.bulk_strings",
@@ -118,18 +174,34 @@ def translate_data_if_needed(data, request, *, caller=""):
             elapsed = time.time() - t0
             logger.info("%s post_translate tardó %.3fs para %d strings", tag, elapsed, len(to_fetch))
 
-            if not isinstance(new_translations, list):
-                logger.error("%s post_translate devolvió %s en vez de list — abortando", tag, type(new_translations))
+            if isinstance(new_translations, dict):
+                new_translations = [
+                    str(new_translations.get(str(i), to_fetch_original[i]))
+                    for i in range(len(to_fetch_original))
+                ]
+            elif not isinstance(new_translations, list):
+                logger.error("%s post_translate devolvió %s en vez de dict/list — abortando", tag, type(new_translations))
                 new_translations = []
         except Exception as ex:
             logger.exception("%s excepción en post_translate: %s", tag, ex)
             new_translations = []
 
         # Guardar en cache lo que recibimos
+        mapping_preview = []
         for i, translated_str in enumerate(new_translations):
-            if i < len(to_fetch):
-                original = to_fetch[i]
+            if i < len(to_fetch_original):
+                original = to_fetch_original[i]
                 _translation_cache[original] = translated_str
+                if len(mapping_preview) < 8:
+                    mapping_preview.append(
+                        {
+                            "original": str(original)[:120],
+                            "translated": str(translated_str)[:120],
+                        }
+                    )
+
+        if mapping_preview:
+            logger.info("%s translation result sample=%s", tag, mapping_preview)
 
         # Limpiar cache si crece demasiado
         if len(_translation_cache) > _CACHE_MAX:
@@ -166,6 +238,16 @@ class TranslatingJSONRenderer(JSONRenderer):
             if is_error:
                 logger.info("[TranslatingJSONRenderer] error %s — sin traducción", status)
             else:
+                # Helpful pagination diagnostics:
+                # `count` is total matching rows, while `results` length is current page size.
+                if isinstance(data, dict) and isinstance(data.get("results"), list):
+                    logger.info(
+                        "[TranslatingJSONRenderer] pagination meta count=%s page_items=%s next=%s previous=%s",
+                        data.get("count"),
+                        len(data.get("results", [])),
+                        bool(data.get("next")),
+                        bool(data.get("previous")),
+                    )
                 translate_data_if_needed(
                     data,
                     renderer_context.get("request"),
