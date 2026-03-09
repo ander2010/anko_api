@@ -88,6 +88,8 @@ from api.emails.access_requests import (
     send_access_decision_email_to_requester,
 )
 import requests
+import boto3
+from botocore.exceptions import ClientError, BotoCoreError
 from websocket import create_connection, WebSocketTimeoutException
 from rest_framework.renderers import BaseRenderer
 from api.renderers import TranslatingJSONRenderer
@@ -1355,6 +1357,114 @@ class DocumentViewSet(viewsets.ModelViewSet):
     serializer_class = DocumentSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination  # ✅
+
+    def _build_supabase_s3_client(self):
+        endpoint = os.getenv("SUPABASE_S3_ENDPOINT") or getattr(settings, "AWS_S3_ENDPOINT_URL", None)
+        access_key = os.getenv("SUPABASE_S3_ACCESS_KEY") or getattr(settings, "AWS_ACCESS_KEY_ID", None)
+        secret_key = os.getenv("SUPABASE_S3_SECRET_KEY") or getattr(settings, "AWS_SECRET_ACCESS_KEY", None)
+        region = os.getenv("SUPABASE_S3_REGION", getattr(settings, "AWS_S3_REGION_NAME", "us-east-1"))
+        bucket = os.getenv("SUPABASE_S3_BUCKET") or getattr(settings, "AWS_STORAGE_BUCKET_NAME", None)
+
+        if not endpoint or not access_key or not secret_key or not bucket:
+            raise RuntimeError("Missing Supabase S3 configuration")
+
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+        )
+        return client, bucket
+
+    @staticmethod
+    def _candidate_storage_keys(raw_key: str, bucket: str) -> list[str]:
+        raw_key = (raw_key or "").strip().lstrip("/")
+        if not raw_key:
+            return []
+
+        candidates: list[str] = []
+        if raw_key.startswith(f"{bucket}/"):
+            candidates.append(raw_key[len(bucket) + 1 :])
+        candidates.append(raw_key)
+
+        # Dedupe preserving order
+        deduped = []
+        seen = set()
+        for key in candidates:
+            if key and key not in seen:
+                deduped.append(key)
+                seen.add(key)
+        return deduped
+
+    def _delete_document_file_from_supabase(self, doc: Document) -> dict:
+        raw_key = getattr(doc.file, "name", "") or ""
+        if not raw_key:
+            return {"deleted": False, "reason": "empty_file_key"}
+
+        client, bucket = self._build_supabase_s3_client()
+        candidates = self._candidate_storage_keys(raw_key, bucket)
+
+        for key in candidates:
+            try:
+                client.head_object(Bucket=bucket, Key=key)
+            except ClientError as e:
+                code = str(e.response.get("Error", {}).get("Code", ""))
+                if code in {"404", "NoSuchKey", "NotFound"}:
+                    continue
+                raise
+
+            client.delete_object(Bucket=bucket, Key=key)
+            return {"deleted": True, "key": key}
+
+        # Fallback: search in likely project/user prefix and match by filename
+        filename = os.path.basename(raw_key)
+        user_id = getattr(doc, "uploaded_by_id", None) or getattr(doc.project, "owner_id", None)
+        if filename and user_id:
+            prefix = f"documents/{user_id}/"
+            paginator = client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    key = obj.get("Key", "")
+                    if key and os.path.basename(key) == filename:
+                        client.delete_object(Bucket=bucket, Key=key)
+                        return {"deleted": True, "key": key, "fallback": True}
+
+        return {"deleted": False, "reason": "not_found", "candidates": candidates}
+
+    def destroy(self, request, *args, **kwargs):
+        doc = self.get_object()
+        file_key = getattr(doc.file, "name", "") or ""
+
+        try:
+            storage_result = self._delete_document_file_from_supabase(doc)
+        except (ClientError, BotoCoreError, RuntimeError, OSError) as exc:
+            logger.exception(
+                "doc_delete storage_failed user_id=%s doc_id=%s file_key=%s error=%s",
+                request.user.id,
+                doc.id,
+                file_key,
+                str(exc),
+            )
+            return Response(
+                {
+                    "detail": "Could not delete the file from Supabase storage.",
+                    "document_id": doc.id,
+                    "file_key": file_key,
+                    "error": str(exc),
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        self.perform_destroy(doc)
+        logger.info(
+            "doc_delete success user_id=%s doc_id=%s file_key=%s storage=%s",
+            request.user.id,
+            doc.id,
+            file_key,
+            storage_result,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="related-learning")
