@@ -55,7 +55,7 @@ from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
     AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SummaryJobSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
-    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer, BatteryListSerializer, BatteryOptionSerializer, BatteryQuestionSerializer, BatteryAttemptSerializer
+    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer, BatteryListSerializer, BatteryOptionSerializer, BatteryQuestionSerializer, BatteryAttemptSerializer, DocumentListSerializer
 )
 from urllib.parse import quote, urlencode
 from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
@@ -1371,6 +1371,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination  # ✅
 
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "list":
+            return DocumentListSerializer
+        return DocumentSerializer
+
     def _build_supabase_s3_client(self):
         endpoint = os.getenv("SUPABASE_S3_ENDPOINT") or getattr(settings, "AWS_S3_ENDPOINT_URL", None)
         access_key = os.getenv("SUPABASE_S3_ACCESS_KEY") or getattr(settings, "AWS_ACCESS_KEY_ID", None)
@@ -1726,9 +1731,26 @@ class DocumentViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
-        return Document.objects.filter(
+        qs = Document.objects.filter(
             Q(project__owner=user) | Q(project__members=user)
         ).distinct()
+        if getattr(self, "action", None) == "list":
+            qs = qs.defer("extracted_text")
+        return qs
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="extracted-text")
+    def extracted_text(self, request, pk=None):
+        """
+        GET /api/documents/{id}/extracted-text/
+        """
+        doc = self.get_object()
+        return Response(
+            {
+                "document_id": doc.id,
+                "extracted_text": doc.extracted_text or "",
+            },
+            status=status.HTTP_200_OK,
+        )
     
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="summary")
     def summary(self, request, pk=None):
@@ -2032,7 +2054,44 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
 
         questions_qs = battery.questions_rel.all().order_by("order", "id")
-        ser = BatteryQuestionSerializer(questions_qs, many=True, context={"request": request})
+
+        def _page_from_meta(meta_obj):
+            if not isinstance(meta_obj, dict):
+                return None
+            for key in ("page", "page_number", "source_page", "page_reference"):
+                if meta_obj.get(key) is not None:
+                    return meta_obj.get(key)
+            source = meta_obj.get("source")
+            if isinstance(source, dict):
+                for key in ("page", "page_number"):
+                    if source.get(key) is not None:
+                        return source.get(key)
+            return None
+
+        page_reference_by_order = {}
+        job_id = (battery.external_job_id or "").strip()
+        if job_id:
+            for qa_index, meta in QaPair.objects.filter(job_id=job_id).values_list("qa_index", "meta"):
+                if qa_index is None:
+                    continue
+                try:
+                    order_key = int(qa_index)
+                except (TypeError, ValueError):
+                    continue
+                if order_key in page_reference_by_order:
+                    continue
+                page_ref = _page_from_meta(meta)
+                if page_ref is not None:
+                    page_reference_by_order[order_key] = page_ref
+
+        ser = BatteryQuestionSerializer(
+            questions_qs,
+            many=True,
+            context={
+                "request": request,
+                "page_reference_by_order": page_reference_by_order,
+            },
+        )
         return Response(ser.data)
     
 

@@ -173,6 +173,47 @@ class DocumentSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(u) if request else u
 
 
+class DocumentListSerializer(serializers.ModelSerializer):
+    filename = serializers.SerializerMethodField()
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Document
+        fields = [
+            "id",
+            "project",
+            "filename",
+            "file",
+            "url",
+            "type",
+            "size",
+            "uploaded_at",
+            "status",
+            "processing_error",
+            "hash",
+            "job_id",
+            "uploaded_by",
+        ]
+
+    def get_filename(self, obj):
+        if not obj.file:
+            return None
+        try:
+            return obj.file.name.split("/")[-1]
+        except Exception:
+            return None
+
+    def get_url(self, obj):
+        if not obj.file:
+            return None
+        request = self.context.get("request")
+        try:
+            u = obj.file.url
+        except Exception:
+            return None
+        return request.build_absolute_uri(u) if request else u
+
+
 class SectionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Section
@@ -245,6 +286,7 @@ class BatteryQuestionSerializer(serializers.ModelSerializer):
     options = BatteryOptionSerializer(many=True, read_only=True)
     topicId = serializers.IntegerField(source="topic_id", read_only=True)
     topicName = serializers.CharField(source="topic.name", read_only=True)
+    page_reference = serializers.SerializerMethodField()
 
     class Meta:
         model = BatteryQuestion
@@ -257,9 +299,43 @@ class BatteryQuestionSerializer(serializers.ModelSerializer):
             "options",
             "points",
             "explanation",
+            "page_reference",
             "order",
             "created_at",
         ]
+
+    def get_page_reference(self, obj):
+        page_by_order = self.context.get("page_reference_by_order") or {}
+        if isinstance(page_by_order, dict):
+            try:
+                order_key = int(getattr(obj, "order", None))
+            except (TypeError, ValueError):
+                order_key = None
+            if order_key is not None and page_by_order.get(order_key) is not None:
+                return page_by_order.get(order_key)
+
+        meta = getattr(obj, "metadata", None) or {}
+        if not isinstance(meta, dict):
+            return None
+
+        # Common keys used by extract/qa pipelines
+        if meta.get("page_reference") is not None:
+            return meta.get("page_reference")
+        if meta.get("page") is not None:
+            return meta.get("page")
+        if meta.get("page_number") is not None:
+            return meta.get("page_number")
+        if meta.get("source_page") is not None:
+            return meta.get("source_page")
+
+        source = meta.get("source")
+        if isinstance(source, dict):
+            if source.get("page") is not None:
+                return source.get("page")
+            if source.get("page_number") is not None:
+                return source.get("page_number")
+
+        return None
 
 class SectionMiniSerializer(serializers.ModelSerializer):
     class Meta:
