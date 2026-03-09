@@ -864,11 +864,12 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     def progress_stream(self, request):
         job_id = request.query_params.get("job_id")
         if not job_id:
-            return StreamingHttpResponse(
-                "event: error\ndata: job_id is required\n\n",
-                content_type="text/event-stream",
-                status=400,
-            )
+            def _err():
+                yield f"event: error\ndata: {json.dumps({'detail': 'job_id is required'})}\n\n"
+            resp = StreamingHttpResponse(_err(), content_type="text/event-stream", status=400)
+            resp["Cache-Control"] = "no-cache"
+            resp["X-Accel-Buffering"] = "no"
+            return resp
 
         base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", "http://localhost:8080").rstrip("/")
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
@@ -876,44 +877,56 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         logger.info("Connecting to WS progress stream at %s for job_id %s", ws_url, job_id)
 
         def event_stream():
-            ws = None
+            yield f"event: init\ndata: {json.dumps({'job_id': job_id, 'ws_url': ws_url})}\n\n"
+
             try:
-                ws = create_connection(ws_url, timeout=10)
+                ws = create_connection(ws_url, timeout=20)
+            except Exception as e:
+                logger.error("WS connect failed for job_id %s: %s", job_id, e)
+                yield f"event: error\ndata: {json.dumps({'error': 'failed_to_connect_ws', 'detail': str(e)})}\n\n"
+                return
 
-                # evento inicial
-                yield f"event: connected\ndata: {json.dumps({'job_id': job_id})}\n\n"
-
+            TERMINAL = {"COMPLETED", "DONE", "FINISHED", "SUCCESS", "FAILED", "ERROR"}
+            last_keepalive = time.time()
+            try:
                 while True:
+                    if time.time() - last_keepalive > 15:
+                        yield "event: ping\ndata: {}\n\n"
+                        last_keepalive = time.time()
+
                     try:
                         msg = ws.recv()
-                        yield f"data: {msg}\n\n"
-                        try:
-                            parsed = json.loads(msg)
-                            if parsed.get("status") in ("COMPLETED", "FAILED", "ERROR", "DONE"):
-                                break
-                        except (json.JSONDecodeError, AttributeError):
-                            pass
-                    except WebSocketTimeoutException:
-                        yield "event: ping\ndata: {}\n\n"
                     except WebSocketConnectionClosedException:
                         logger.info("WS closed normally for job_id %s", job_id)
+                        yield f"event: end\ndata: {json.dumps({'status': 'ws_closed'})}\n\n"
+                        break
+                    except Exception as e:
+                        logger.error("WS recv error for job_id %s: %s", job_id, e)
+                        yield f"event: error\ndata: {json.dumps({'error': 'ws_recv_failed', 'detail': str(e)})}\n\n"
                         break
 
-            except Exception as e:
-                logger.error("Error in WS progress stream for job_id %s: %s", job_id, e)
-                yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+                    try:
+                        payload = json.loads(msg) if isinstance(msg, str) else msg
+                    except Exception:
+                        payload = {"raw": msg}
+
+                    yield f"event: progress\ndata: {json.dumps(payload)}\n\n"
+
+                    status_val = str(payload.get("status", "")).upper()
+                    if status_val in TERMINAL:
+                        logger.info("WS job_id %s finished with status %s", job_id, status_val)
+                        yield f"event: end\ndata: {json.dumps({'final_status': status_val})}\n\n"
+                        break
             finally:
-                if ws:
+                try:
                     ws.close()
+                except Exception:
+                    pass
 
-        response = StreamingHttpResponse(
-            event_stream(),
-            content_type="text/event-stream",
-        )
-        response["Cache-Control"] = "no-cache"
-        response["X-Accel-Buffering"] = "no"
-
-        return response
+        resp = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
 
 
     @staticmethod
