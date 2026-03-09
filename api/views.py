@@ -1003,24 +1003,37 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="documents-with-sections")
     def documents_with_sections(self, request, pk=None):
         project = self.get_object()
+        document_id = request.query_params.get("document_id")
+        if not document_id:
+            return Response(
+                {"detail": "document_id query param is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        qs = (
-            project.documents.all()               # ✅ documents (plural)
-            .order_by("-uploaded_at")
+        try:
+            document_id = int(document_id)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "document_id must be an integer"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        doc = (
+            project.documents.filter(id=document_id)
             .prefetch_related(
                 Prefetch("sections", queryset=Section.objects.all().order_by("order", "id"))
             )
+            .first()
         )
 
-        page = self.paginate_queryset(qs)
-        if page is not None:
-            ser = DocumentWithSectionsSerializer(page, many=True, context={"request": request})
-            response = self.get_paginated_response(ser.data)
-            response.data["projectId"] = project.id
-            return response
+        if not doc:
+            return Response(
+                {"detail": "Document not found in this project"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        ser = DocumentWithSectionsSerializer(qs, many=True, context={"request": request})
-        return Response({"projectId": project.id, "documents": ser.data})
+        ser = DocumentWithSectionsSerializer(doc, context={"request": request})
+        return Response({"projectId": project.id, "document": ser.data}, status=status.HTTP_200_OK)
 
 
 
