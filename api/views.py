@@ -887,8 +887,17 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     try:
                         msg = ws.recv()
                         yield f"data: {msg}\n\n"
+                        try:
+                            parsed = json.loads(msg)
+                            if parsed.get("status") in ("COMPLETED", "FAILED", "ERROR", "DONE"):
+                                break
+                        except (json.JSONDecodeError, AttributeError):
+                            pass
                     except WebSocketTimeoutException:
                         yield "event: ping\ndata: {}\n\n"
+                    except WebSocketConnectionClosedException:
+                        logger.info("WS closed normally for job_id %s", job_id)
+                        break
 
             except Exception as e:
                 logger.error("Error in WS progress stream for job_id %s: %s", job_id, e)
