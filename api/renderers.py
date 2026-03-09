@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+import os
 
 from rest_framework.renderers import JSONRenderer
 
@@ -12,6 +13,28 @@ logger = logging.getLogger("api.renderers")
 # Se limpia automáticamente al superar _CACHE_MAX entradas
 _translation_cache: dict[str, str] = {}
 _CACHE_MAX = 10_000
+
+# Translate only selected keys by default (customizable via env).
+# Example: TRANSLATE_ALLOWED_KEYS=title,description,body,message,detail
+_ALLOWED_KEYS = {
+    k.strip().lower()
+    for k in os.getenv(
+        "TRANSLATE_ALLOWED_KEYS",
+        "title,description,body,message,detail,name,label",
+    ).split(",")
+    if k.strip()
+}
+
+# Skip heavy/high-noise fields even if they appear in allowed sets.
+# Example: TRANSLATE_SKIP_KEYS=content,notes,explanation
+_SKIP_KEYS = {
+    k.strip().lower()
+    for k in os.getenv(
+        "TRANSLATE_SKIP_KEYS",
+        "content,notes,explanation",
+    ).split(",")
+    if k.strip()
+}
 
 # Strings que claramente NO son lenguaje natural y no deben traducirse
 _SKIP_RE = re.compile(
@@ -28,24 +51,33 @@ def _should_translate(s: str) -> bool:
     return not _SKIP_RE.match(s)
 
 
-def _collect_strings(data, strings, refs):
+def _should_translate_key(key) -> bool:
+    if key is None:
+        return False
+    key_l = str(key).strip().lower()
+    if not key_l or key_l in _SKIP_KEYS:
+        return False
+    return key_l in _ALLOWED_KEYS
+
+
+def _collect_strings(data, strings, refs, *, parent_key=None):
     """Recorre data recursivamente y acumula strings traducibles con sus referencias."""
     if isinstance(data, dict):
         for k, v in data.items():
             if isinstance(v, str):
-                if _should_translate(v):
+                if _should_translate_key(k) and _should_translate(v):
                     refs.append((data, k, len(strings)))
                     strings.append(v)
             else:
-                _collect_strings(v, strings, refs)
+                _collect_strings(v, strings, refs, parent_key=k)
     elif isinstance(data, list):
         for i, v in enumerate(data):
             if isinstance(v, str):
-                if _should_translate(v):
+                if _should_translate_key(parent_key) and _should_translate(v):
                     refs.append((data, i, len(strings)))
                     strings.append(v)
             else:
-                _collect_strings(v, strings, refs)
+                _collect_strings(v, strings, refs, parent_key=parent_key)
 
 
 def _apply_translations(translated, refs):
@@ -92,14 +124,15 @@ def translate_data_if_needed(data, request, *, caller=""):
     # 2. Separar los que ya están en cache vs los que hay que pedir
     cached_map: dict[str, str] = {}
     to_fetch: list[str] = []
-    to_fetch_indices: list[int] = []   # índice dentro de `strings`
+    to_fetch_set: set[str] = set()
 
     for i, s in enumerate(strings):
         if s in _translation_cache:
             cached_map[s] = _translation_cache[s]
         else:
-            to_fetch.append(s)
-            to_fetch_indices.append(i)
+            if s not in to_fetch_set:
+                to_fetch.append(s)
+                to_fetch_set.add(s)
 
     logger.info("%s en cache: %d | a traducir: %d", tag, len(cached_map), len(to_fetch))
 
@@ -128,8 +161,7 @@ def translate_data_if_needed(data, request, *, caller=""):
         # Guardar en cache lo que recibimos
         for i, translated_str in enumerate(new_translations):
             if i < len(to_fetch):
-                original = to_fetch[i]
-                _translation_cache[original] = translated_str
+                _translation_cache[to_fetch[i]] = translated_str
 
         # Limpiar cache si crece demasiado
         if len(_translation_cache) > _CACHE_MAX:
