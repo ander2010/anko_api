@@ -78,8 +78,13 @@ def post_translate(
     # El servicio solo acepta list o dict, nunca str directo.
     # Si es str, lo envolvemos en lista y extraemos el primer elemento al retornar.
     wrap_string = isinstance(data, str)
+    list_of_strings_input = isinstance(data, list) and all(isinstance(x, str) for x in data)
+
     if wrap_string:
         payload["data"] = [data]
+    elif list_of_strings_input:
+        # Keep order and avoid mutating caller list; renderer relies on original values.
+        payload["data"] = list(data)
     elif isinstance(data, (list, dict)):
         # Hard guard: never send dict keys for translation.
         # We extract only string values and send them as a flat list.
@@ -161,6 +166,9 @@ def post_translate(
 
     if wrap_string and isinstance(result, list) and result:
         return result[0]
+
+    if list_of_strings_input and isinstance(result, list):
+        return result
 
     if isinstance(data, (list, dict)):
         refs: list[tuple[Any, Any]] = []

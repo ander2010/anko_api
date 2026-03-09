@@ -167,10 +167,11 @@ def translate_data_if_needed(data, request, *, caller=""):
     # 3. Llamar al servicio solo con los no cacheados
     new_translations: list[str] = []
     if to_fetch:
+        to_fetch_original = list(to_fetch)
         try:
             t0 = time.time()
             new_translations = post_translate(
-                to_fetch,
+                list(to_fetch),
                 audit_user_id=user_id,
                 request_id=request_id,
                 audit_operation="translate.bulk_strings",
@@ -189,8 +190,8 @@ def translate_data_if_needed(data, request, *, caller=""):
         # Guardar en cache lo que recibimos
         mapping_preview = []
         for i, translated_str in enumerate(new_translations):
-            if i < len(to_fetch):
-                original = to_fetch[i]
+            if i < len(to_fetch_original):
+                original = to_fetch_original[i]
                 _translation_cache[original] = translated_str
                 if len(mapping_preview) < 8:
                     mapping_preview.append(
