@@ -166,6 +166,16 @@ class TranslatingJSONRenderer(JSONRenderer):
             if is_error:
                 logger.info("[TranslatingJSONRenderer] error %s — sin traducción", status)
             else:
+                # Helpful pagination diagnostics:
+                # `count` is total matching rows, while `results` length is current page size.
+                if isinstance(data, dict) and isinstance(data.get("results"), list):
+                    logger.info(
+                        "[TranslatingJSONRenderer] pagination meta count=%s page_items=%s next=%s previous=%s",
+                        data.get("count"),
+                        len(data.get("results", [])),
+                        bool(data.get("next")),
+                        bool(data.get("previous")),
+                    )
                 translate_data_if_needed(
                     data,
                     renderer_context.get("request"),
