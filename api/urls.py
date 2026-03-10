@@ -3,7 +3,7 @@ from django.views.decorators.csrf import csrf_exempt
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    AccessRequestViewSet, AuthViewSet, FrontendPasswordResetView, PublicBatteryViewSet, PublicDeckViewSet, RBACViewSet, SummaryJobViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet,
+    AccessRequestViewSet, AdminViewSet, AuthViewSet, FrontendPasswordResetView, PublicBatteryViewSet, PublicDeckViewSet, RBACViewSet, SummaryJobViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet,
     SectionViewSet, TopicViewSet, RuleViewSet, BatteryViewSet,
     ResourceViewSet, PermissionViewSet, RoleViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
@@ -55,6 +55,7 @@ router.register(r"summary-jobs", SummaryJobViewSet, basename="summary-job")
 router.register(r"support-requests", SupportRequestViewSet, basename="support-request")
 router.register(r"notifications", NotificationViewSet, basename="notifications")
 router.register(r"user-notifications", UserNotificationViewSet, basename="user-notifications")
+router.register(r"admin", AdminViewSet, basename="admin")
 urlpatterns = [
     path("auth/google/", GoogleLoginView.as_view(), name="google_login"),
     path("auth/facebook/", FacebookLoginView.as_view(), name="facebook_login"),

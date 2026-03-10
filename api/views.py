@@ -6025,3 +6025,360 @@ class UserNotificationViewSet(viewsets.GenericViewSet):
             data={"screen": "home"},
         )
         return Response(self.get_serializer(user_notification).data, status=status.HTTP_201_CREATED)
+
+
+# ==========================================================
+# Admin ViewSet – CRUD de administración para recursos globales
+# Requiere rol admin / is_staff / is_superuser
+# Base URL: /api/admin/
+# ==========================================================
+
+class AdminViewSet(viewsets.GenericViewSet):
+    """
+    Panel de administración. Todos los endpoints requieren rol admin.
+
+    Recursos disponibles:
+      battery-shares   → BatteryShare   (baterías compartidas)
+      saved-batteries  → SavedBattery   (baterías guardadas)
+      flashcards       → Flashcard      (flashcards generales)
+      deck-shares      → DeckShare      (decks compartidos)
+      saved-decks      → SavedDeck      (decks guardados)
+      decks            → Deck           (decks generales)
+      projects         → Project        (proyectos generales)
+
+    Patrón de nombres:
+      admin_list_<resource>    → GET  /api/admin/<resource>/
+      admin_detail_<resource>  → GET  /api/admin/<resource>/{id}/
+      admin_update_<resource>  → PATCH /api/admin/<resource>/{id}/
+      admin_delete_<resource>  → DELETE /api/admin/<resource>/{id}/
+    """
+
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+
+    def _require_admin(self, request):
+        if not _is_rbac_admin_user(request.user):
+            return Response(
+                {"detail": "Admin access required."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return None
+
+    # ----------------------------------------------------------
+    # BATERÍAS COMPARTIDAS  (BatteryShare)
+    # ----------------------------------------------------------
+
+    @action(detail=False, methods=["get"], url_path="battery-shares")
+    def admin_list_battery_shares(self, request):
+        """GET /api/admin/battery-shares/ — lista todas las baterías compartidas."""
+        err = self._require_admin(request)
+        if err:
+            return err
+        qs = (
+            BatteryShare.objects
+            .select_related("battery", "shared_with")
+            .all()
+            .order_by("-id")
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                BatteryShareSerializer(page, many=True, context={"request": request}).data
+            )
+        return Response(BatteryShareSerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get", "patch", "delete"],
+            url_path=r"battery-shares/(?P<item_pk>\d+)")
+    def admin_detail_battery_share(self, request, item_pk=None):
+        """
+        GET    /api/admin/battery-shares/{id}/ — detalle
+        PATCH  /api/admin/battery-shares/{id}/ — actualizar
+        DELETE /api/admin/battery-shares/{id}/ — eliminar
+        """
+        err = self._require_admin(request)
+        if err:
+            return err
+        obj = get_object_or_404(BatteryShare, pk=item_pk)
+        if request.method == "GET":
+            return Response(BatteryShareSerializer(obj, context={"request": request}).data)
+        if request.method == "PATCH":
+            ser = BatteryShareSerializer(obj, data=request.data, partial=True,
+                                         context={"request": request})
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # ----------------------------------------------------------
+    # BATERÍAS GUARDADAS  (SavedBattery)
+    # ----------------------------------------------------------
+
+    @action(detail=False, methods=["get"], url_path="saved-batteries")
+    def admin_list_saved_batteries(self, request):
+        """GET /api/admin/saved-batteries/ — lista todas las baterías guardadas."""
+        err = self._require_admin(request)
+        if err:
+            return err
+        qs = (
+            SavedBattery.objects
+            .select_related("user", "battery", "battery__project")
+            .all()
+            .order_by("-id")
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                SavedBatterySerializer(page, many=True, context={"request": request}).data
+            )
+        return Response(SavedBatterySerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get", "patch", "delete"],
+            url_path=r"saved-batteries/(?P<item_pk>\d+)")
+    def admin_detail_saved_battery(self, request, item_pk=None):
+        """
+        GET    /api/admin/saved-batteries/{id}/ — detalle
+        PATCH  /api/admin/saved-batteries/{id}/ — actualizar
+        DELETE /api/admin/saved-batteries/{id}/ — eliminar
+        """
+        err = self._require_admin(request)
+        if err:
+            return err
+        obj = get_object_or_404(SavedBattery, pk=item_pk)
+        if request.method == "GET":
+            return Response(SavedBatterySerializer(obj, context={"request": request}).data)
+        if request.method == "PATCH":
+            ser = SavedBatterySerializer(obj, data=request.data, partial=True,
+                                          context={"request": request})
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # ----------------------------------------------------------
+    # FLASHCARDS GENERALES  (Flashcard)
+    # ----------------------------------------------------------
+
+    @action(detail=False, methods=["get"], url_path="flashcards")
+    def admin_list_flashcards(self, request):
+        """GET /api/admin/flashcards/ — lista todas las flashcards (filtrable por ?deck=<id>)."""
+        err = self._require_admin(request)
+        if err:
+            return err
+        qs = Flashcard.objects.select_related("deck").all().order_by("-id")
+        deck_id = request.query_params.get("deck")
+        if deck_id:
+            qs = qs.filter(deck_id=deck_id)
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                FlashcardSerializer(page, many=True, context={"request": request}).data
+            )
+        return Response(FlashcardSerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get", "patch", "delete"],
+            url_path=r"flashcards/(?P<item_pk>\d+)")
+    def admin_detail_flashcard(self, request, item_pk=None):
+        """
+        GET    /api/admin/flashcards/{id}/ — detalle
+        PATCH  /api/admin/flashcards/{id}/ — actualizar
+        DELETE /api/admin/flashcards/{id}/ — eliminar
+        """
+        err = self._require_admin(request)
+        if err:
+            return err
+        obj = get_object_or_404(Flashcard, pk=item_pk)
+        if request.method == "GET":
+            return Response(FlashcardSerializer(obj, context={"request": request}).data)
+        if request.method == "PATCH":
+            ser = FlashcardSerializer(obj, data=request.data, partial=True,
+                                       context={"request": request})
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # ----------------------------------------------------------
+    # DECKS COMPARTIDOS  (DeckShare)
+    # ----------------------------------------------------------
+
+    @action(detail=False, methods=["get"], url_path="deck-shares")
+    def admin_list_deck_shares(self, request):
+        """GET /api/admin/deck-shares/ — lista todos los decks compartidos."""
+        err = self._require_admin(request)
+        if err:
+            return err
+        qs = (
+            DeckShare.objects
+            .select_related("deck", "shared_with")
+            .all()
+            .order_by("-id")
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                DeckShareSerializer(page, many=True, context={"request": request}).data
+            )
+        return Response(DeckShareSerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get", "patch", "delete"],
+            url_path=r"deck-shares/(?P<item_pk>\d+)")
+    def admin_detail_deck_share(self, request, item_pk=None):
+        """
+        GET    /api/admin/deck-shares/{id}/ — detalle
+        PATCH  /api/admin/deck-shares/{id}/ — actualizar
+        DELETE /api/admin/deck-shares/{id}/ — eliminar
+        """
+        err = self._require_admin(request)
+        if err:
+            return err
+        obj = get_object_or_404(DeckShare, pk=item_pk)
+        if request.method == "GET":
+            return Response(DeckShareSerializer(obj, context={"request": request}).data)
+        if request.method == "PATCH":
+            ser = DeckShareSerializer(obj, data=request.data, partial=True,
+                                       context={"request": request})
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # ----------------------------------------------------------
+    # DECKS GUARDADOS  (SavedDeck)
+    # ----------------------------------------------------------
+
+    @action(detail=False, methods=["get"], url_path="saved-decks")
+    def admin_list_saved_decks(self, request):
+        """GET /api/admin/saved-decks/ — lista todos los decks guardados."""
+        err = self._require_admin(request)
+        if err:
+            return err
+        qs = (
+            SavedDeck.objects
+            .select_related("user", "deck")
+            .all()
+            .order_by("-id")
+        )
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                SavedDeckSerializer(page, many=True, context={"request": request}).data
+            )
+        return Response(SavedDeckSerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get", "patch", "delete"],
+            url_path=r"saved-decks/(?P<item_pk>\d+)")
+    def admin_detail_saved_deck(self, request, item_pk=None):
+        """
+        GET    /api/admin/saved-decks/{id}/ — detalle
+        PATCH  /api/admin/saved-decks/{id}/ — actualizar
+        DELETE /api/admin/saved-decks/{id}/ — eliminar
+        """
+        err = self._require_admin(request)
+        if err:
+            return err
+        obj = get_object_or_404(SavedDeck, pk=item_pk)
+        if request.method == "GET":
+            return Response(SavedDeckSerializer(obj, context={"request": request}).data)
+        if request.method == "PATCH":
+            ser = SavedDeckSerializer(obj, data=request.data, partial=True,
+                                       context={"request": request})
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # ----------------------------------------------------------
+    # DECKS GENERALES  (Deck)
+    # ----------------------------------------------------------
+
+    @action(detail=False, methods=["get"], url_path="decks")
+    def admin_list_decks(self, request):
+        """GET /api/admin/decks/ — lista todos los decks (filtrable por ?project=<id>)."""
+        err = self._require_admin(request)
+        if err:
+            return err
+        qs = (
+            Deck.objects
+            .select_related("owner", "project")
+            .annotate(card_count=Count("cards", distinct=True))
+            .all()
+            .order_by("-id")
+        )
+        project_id = request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                DeckListSerializer(page, many=True, context={"request": request}).data
+            )
+        return Response(DeckListSerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get", "patch", "delete"],
+            url_path=r"decks/(?P<item_pk>\d+)")
+    def admin_detail_deck(self, request, item_pk=None):
+        """
+        GET    /api/admin/decks/{id}/ — detalle
+        PATCH  /api/admin/decks/{id}/ — actualizar
+        DELETE /api/admin/decks/{id}/ — eliminar
+        """
+        err = self._require_admin(request)
+        if err:
+            return err
+        obj = get_object_or_404(Deck.objects.select_related("owner", "project"), pk=item_pk)
+        if request.method == "GET":
+            return Response(DeckSerializer(obj, context={"request": request}).data)
+        if request.method == "PATCH":
+            ser = DeckSerializer(obj, data=request.data, partial=True,
+                                  context={"request": request})
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # ----------------------------------------------------------
+    # PROYECTOS GENERALES  (Project)
+    # ----------------------------------------------------------
+
+    @action(detail=False, methods=["get"], url_path="projects")
+    def admin_list_projects(self, request):
+        """GET /api/admin/projects/ — lista todos los proyectos."""
+        err = self._require_admin(request)
+        if err:
+            return err
+        qs = Project.objects.all().order_by("-id")
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(
+                ProjectSerializer(page, many=True, context={"request": request}).data
+            )
+        return Response(ProjectSerializer(qs, many=True, context={"request": request}).data)
+
+    @action(detail=False, methods=["get", "patch", "delete"],
+            url_path=r"projects/(?P<item_pk>\d+)")
+    def admin_detail_project(self, request, item_pk=None):
+        """
+        GET    /api/admin/projects/{id}/ — detalle
+        PATCH  /api/admin/projects/{id}/ — actualizar
+        DELETE /api/admin/projects/{id}/ — eliminar
+        """
+        err = self._require_admin(request)
+        if err:
+            return err
+        obj = get_object_or_404(Project, pk=item_pk)
+        if request.method == "GET":
+            return Response(ProjectSerializer(obj, context={"request": request}).data)
+        if request.method == "PATCH":
+            ser = ProjectSerializer(obj, data=request.data, partial=True,
+                                     context={"request": request})
+            ser.is_valid(raise_exception=True)
+            ser.save()
+            return Response(ser.data)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
