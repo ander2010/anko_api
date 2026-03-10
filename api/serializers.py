@@ -414,6 +414,7 @@ class BatterySerializer(serializers.ModelSerializer):
 class BatteryListSerializer(serializers.ModelSerializer):
     attempts_count = serializers.SerializerMethodField()
     last_attempt = serializers.SerializerMethodField()
+    question_count = serializers.SerializerMethodField()
 
     owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
     approved_count = serializers.SerializerMethodField()
@@ -432,6 +433,7 @@ class BatteryListSerializer(serializers.ModelSerializer):
             "visibility",
             "description",
             "external_job_id",
+            "question_count",
             "attempts_count",
             "last_attempt",
             "owner_id",
@@ -444,6 +446,12 @@ class BatteryListSerializer(serializers.ModelSerializer):
 
     def get_rejected_count(self, obj):
         return obj.access_requests.filter(status="rejected").count()
+
+    def get_question_count(self, obj):
+        annotated = getattr(obj, "question_count", None)
+        if annotated is not None:
+            return int(annotated)
+        return obj.questions_rel.count()
 
     def get_attempts_count(self, obj):
         request = self.context.get("request")

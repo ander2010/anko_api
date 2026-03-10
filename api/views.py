@@ -2038,6 +2038,15 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             return BatteryListSerializer
         return BatterySerializer
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "action", None) in {"list", "my"}:
+            qs = qs.annotate(question_count=Count("questions_rel", distinct=True))
+        project_id = self.request.query_params.get("project")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        return qs
+
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="questions")
     def questions(self, request, pk=None):
         """
@@ -2164,10 +2173,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
         include_counts = (request.query_params.get("include_counts", "true") or "").lower() == "true"
         if include_counts:
-            qs = qs.annotate(
-                question_count=Count("questions_rel", distinct=True),
-                shared_count=Count("shares", distinct=True),
-            )
+            qs = qs.annotate(shared_count=Count("shares", distinct=True))
 
         qs = qs.order_by("-created_at")
 
@@ -2910,13 +2916,6 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
 
 
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        project_id = self.request.query_params.get("project")
-        if project_id:
-            qs = qs.filter(project_id=project_id)
-        return qs
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
