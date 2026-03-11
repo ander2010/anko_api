@@ -287,6 +287,7 @@ class BatteryQuestionSerializer(serializers.ModelSerializer):
     topicId = serializers.IntegerField(source="topic_id", read_only=True)
     topicName = serializers.CharField(source="topic.name", read_only=True)
     page_reference = serializers.SerializerMethodField()
+    source_document_name = serializers.SerializerMethodField()
 
     class Meta:
         model = BatteryQuestion
@@ -300,6 +301,7 @@ class BatteryQuestionSerializer(serializers.ModelSerializer):
             "points",
             "explanation",
             "page_reference",
+            "source_document_name",
             "order",
             "created_at",
         ]
@@ -335,6 +337,17 @@ class BatteryQuestionSerializer(serializers.ModelSerializer):
             if source.get("page_number") is not None:
                 return source.get("page_number")
 
+        return None
+
+    def get_source_document_name(self, obj):
+        doc_by_order = self.context.get("source_document_name_by_order") or {}
+        if isinstance(doc_by_order, dict):
+            try:
+                order_key = int(getattr(obj, "order", None))
+            except (TypeError, ValueError):
+                order_key = None
+            if order_key is not None:
+                return doc_by_order.get(order_key)
         return None
 
 class SectionMiniSerializer(serializers.ModelSerializer):
