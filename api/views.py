@@ -2078,12 +2078,14 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             return None
 
         page_reference_by_order = {}
+        source_document_id_by_order = {}
         source_document_name_by_order = {}
         job_id = (battery.external_job_id or "").strip()
         if job_id:
-            for qa_index, meta, document_name in QaPair.objects.filter(job_id=job_id).values_list(
+            for qa_index, meta, document_id, document_name in QaPair.objects.filter(job_id=job_id).values_list(
                 "qa_index",
                 "meta",
+                "document_id",
                 "document__filename",
             ):
                 if qa_index is None:
@@ -2097,6 +2099,8 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 page_ref = _page_from_meta(meta)
                 if page_ref is not None:
                     page_reference_by_order[order_key] = page_ref
+                if order_key not in source_document_id_by_order and document_id is not None:
+                    source_document_id_by_order[order_key] = document_id
                 if order_key not in source_document_name_by_order and document_name:
                     source_document_name_by_order[order_key] = document_name
 
@@ -2106,6 +2110,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             context={
                 "request": request,
                 "page_reference_by_order": page_reference_by_order,
+                "source_document_id_by_order": source_document_id_by_order,
                 "source_document_name_by_order": source_document_name_by_order,
             },
         )
