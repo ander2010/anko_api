@@ -21,6 +21,7 @@ from rest_framework.permissions import AllowAny
 import uuid
 import json
 import hashlib
+import io
 from django.db.models import Count, Q, Sum
 import time
 from django.utils import timezone
@@ -43,7 +44,7 @@ from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Prefetch
-from django.http import StreamingHttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate, login
 
@@ -2115,6 +2116,296 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             },
         )
         return Response(ser.data)
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-questions-pdf")
+    def download_questions_pdf(self, request, pk=None):
+        """
+        GET /api/batteries/{id}/download-questions-pdf/
+        Returns a PDF with:
+        1) all questions first
+        2) then answers + hint + source page/reference for each question
+        """
+        battery = self.get_object()
+        user = request.user
+        has_access = (
+            battery.project.owner_id == user.id
+            or battery.visibility == "public"
+            or battery.shares.filter(shared_with=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
+
+        questions = list(
+            battery.questions_rel.all()
+            .prefetch_related("options")
+            .order_by("order", "id")
+        )
+        if not questions:
+            return Response({"detail": "This battery has no questions."}, status=status.HTTP_400_BAD_REQUEST)
+
+        def _page_from_meta(meta_obj):
+            if not isinstance(meta_obj, dict):
+                return None
+            for key in ("page", "page_number", "source_page", "page_reference"):
+                if meta_obj.get(key) is not None:
+                    return meta_obj.get(key)
+            source = meta_obj.get("source")
+            if isinstance(source, dict):
+                for key in ("page", "page_number"):
+                    if source.get(key) is not None:
+                        return source.get(key)
+            return None
+
+        page_reference_by_order = {}
+        source_document_name_by_order = {}
+        job_id = (battery.external_job_id or "").strip()
+        if job_id:
+            for qa_index, meta, document_name in QaPair.objects.filter(job_id=job_id).values_list(
+                "qa_index",
+                "meta",
+                "document__filename",
+            ):
+                if qa_index is None:
+                    continue
+                try:
+                    order_key = int(qa_index)
+                except (TypeError, ValueError):
+                    continue
+                if order_key in page_reference_by_order:
+                    continue
+                page_ref = _page_from_meta(meta)
+                if page_ref is not None:
+                    page_reference_by_order[order_key] = page_ref
+                if order_key not in source_document_name_by_order and document_name:
+                    source_document_name_by_order[order_key] = document_name
+
+        def _correct_answer_text(question_obj) -> str:
+            opts = sorted(
+                list(question_obj.options.all()),
+                key=lambda o: (getattr(o, "order", 0), getattr(o, "id", 0)),
+            )
+            correct = [(o.text or "").strip() for o in opts if bool(getattr(o, "correct", False))]
+            if correct:
+                return "\n".join([f"{idx}. {c}" for idx, c in enumerate([c for c in correct if c], start=1)]) or "N/A"
+            return "N/A"
+
+        def _question_type_text(question_obj) -> str:
+            raw = str(getattr(question_obj, "type", "") or "").strip().lower()
+            if raw in {"true_false", "truefalse", "tf"}:
+                return "True/False"
+            if raw in {"single_choice", "singlechoice", "single"}:
+                return "Single Choice"
+            if raw in {"multi_select", "multiselect", "multi", "multi_choice", "multiple_choice", "multiple", "checkbox"}:
+                return "Multiple Choice"
+            return raw.replace("_", " ").title() or "Unknown"
+
+        def _question_items_list(question_obj) -> list[str]:
+            opts = sorted(
+                list(question_obj.options.all()),
+                key=lambda o: (getattr(o, "order", 0), getattr(o, "id", 0)),
+            )
+            if not opts:
+                return []
+            out: list[str] = []
+            for opt in opts:
+                text = (getattr(opt, "text", "") or "").strip()
+                if not text:
+                    continue
+                out.append(text)
+            return out
+
+        records = []
+        for idx, q in enumerate(questions, start=1):
+            try:
+                order_key = int(getattr(q, "order", None))
+            except (TypeError, ValueError):
+                order_key = None
+
+            page_ref = page_reference_by_order.get(order_key) if order_key is not None else None
+            doc_name = source_document_name_by_order.get(order_key) if order_key is not None else None
+
+            if page_ref is not None and doc_name:
+                check_text = f"Page {page_ref} ({doc_name})"
+            elif page_ref is not None:
+                check_text = f"Page {page_ref}"
+            elif doc_name:
+                check_text = f"Document: {doc_name}"
+            else:
+                check_text = "Not available"
+
+            records.append(
+                {
+                    "n": idx,
+                    "question": (q.question or "").strip(),
+                    "type": _question_type_text(q),
+                    "items": _question_items_list(q),
+                    "answer": _correct_answer_text(q),
+                    "hint": (q.explanation or "").strip() or "N/A",
+                    "check": check_text,
+                }
+            )
+
+        raw_lang = (
+            request.headers.get("language")
+            or request.headers.get("Language")
+            or request.headers.get("Accept-Language")
+            or "en"
+        )
+        lang = str(raw_lang).split(",")[0].strip().lower()
+        if "-" in lang:
+            lang = lang.split("-", 1)[0]
+        if lang not in {"en", "es"}:
+            lang = "en"
+
+        labels = {
+            "title": "Questions",
+            "subtitle": "Question List",
+            "section_answers": "Answers, Hints and Where to Check",
+            "type": "Type",
+            "items": "Items",
+            "answer": "Answer",
+            "hint": "Hint",
+            "check": "Where to Check",
+        }
+        if lang == "es":
+            labels = {
+                "title": "Preguntas",
+                "subtitle": "Lista de preguntas",
+                "section_answers": "Respuestas, pistas y donde revisar",
+                "type": "Tipo",
+                "items": "Opciones",
+                "answer": "Respuesta",
+                "hint": "Pista",
+                "check": "Donde revisar",
+            }
+            to_translate = []
+            for row in records:
+                to_translate.extend([row["question"], row["type"], row["answer"], row["hint"], row["check"]])
+                to_translate.extend(row["items"])
+            try:
+                translated = post_translate(
+                    to_translate,
+                    source_language="english",
+                    target_language="spanish",
+                    audit_user_id=request.user.id,
+                    audit_operation="battery.translate_questions_pdf",
+                    audit_path=f"/api/batteries/{battery.id}/download-questions-pdf/",
+                )
+            except Exception as exc:
+                return Response(
+                    {"detail": "Failed translating battery questions to Spanish.", "error": str(exc)},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+            if isinstance(translated, list) and len(translated) == len(to_translate):
+                i = 0
+                for row in records:
+                    row["question"] = translated[i]
+                    row["type"] = translated[i + 1]
+                    row["answer"] = translated[i + 2]
+                    row["hint"] = translated[i + 3]
+                    row["check"] = translated[i + 4]
+                    i += 5
+                    count_items = len(row["items"])
+                    if count_items:
+                        row["items"] = translated[i:i + count_items]
+                        i += count_items
+
+        try:
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.pagesizes import letter
+            from reportlab.lib.utils import simpleSplit
+        except Exception:
+            return Response(
+                {"detail": "PDF generation dependency missing. Install reportlab."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        buffer = io.BytesIO()
+        pdf = canvas.Canvas(buffer, pagesize=letter)
+        width, height = letter
+        left = 42
+        right = width - 42
+        top = height - 42
+        bottom = 42
+        max_w = right - left
+        y = top
+
+        def _new_page():
+            nonlocal y
+            pdf.showPage()
+            y = top
+
+        def _draw_wrapped(text: str, font: str = "Helvetica", size: int = 11, gap: int = 14, indent: int = 0):
+            nonlocal y
+            x = left + max(0, int(indent))
+            avail_w = max_w - max(0, int(indent))
+            lines = simpleSplit(str(text or ""), font, size, avail_w)
+            if not lines:
+                lines = [""]
+            for line in lines:
+                if y <= bottom + gap:
+                    _new_page()
+                pdf.setFont(font, size)
+                pdf.drawString(x, y, line)
+                y -= gap
+
+        pdf.setTitle(f"battery_questions_{battery.id}_{lang}.pdf")
+        _draw_wrapped(labels["title"], "Helvetica-Bold", 16, 20)
+        _draw_wrapped(f"{labels['subtitle']}: {battery.name}", "Helvetica-Bold", 12, 16)
+        y -= 6
+        for row in records:
+            _draw_wrapped(f"{row['n']}. {row['question']}", "Helvetica-Bold", 11, 14)
+            _draw_wrapped(f"{labels['type']}: {row['type']}", "Helvetica", 11, 14)
+            if row["items"]:
+                _draw_wrapped(f"{labels['items']}:", "Helvetica", 11, 14)
+                for opt_idx, item_text in enumerate(row["items"], start=1):
+                    _draw_wrapped(f"{opt_idx}. {item_text}", "Helvetica", 11, 14)
+            else:
+                _draw_wrapped(f"{labels['items']}: N/A", "Helvetica", 11, 14)
+            y -= 8
+
+        _new_page()
+        _draw_wrapped(labels["section_answers"], "Helvetica-Bold", 15, 20)
+        y -= 6
+        for row in records:
+            _draw_wrapped(f"{row['n']}. {labels['answer']}:", "Helvetica-Bold", 11, 14)
+            answer_lines = [ln.strip() for ln in str(row["answer"] or "").splitlines() if ln.strip()]
+            if not answer_lines:
+                answer_lines = ["N/A"]
+            for ans_line in answer_lines:
+                _draw_wrapped(ans_line, "Helvetica", 11, 14, indent=18)
+            _draw_wrapped(f"{labels['hint']}: {row['hint']}", "Helvetica", 11, 14)
+            _draw_wrapped(f"{labels['check']}: {row['check']}", "Helvetica", 11, 14)
+            y -= 8
+
+        pdf.save()
+        buffer.seek(0)
+
+        def safe_file_part(value: str, default: str) -> str:
+            text = (value or "").strip()
+            text = re.sub(r"\s+", "_", text)
+            text = re.sub(r"[^A-Za-z0-9._-]", "", text)
+            text = text.strip("._-")
+            return text or default
+
+        project_name = (
+            getattr(battery.project, "title", None)
+            or getattr(battery.project, "name", None)
+            or "project"
+        ) if battery.project else "project"
+        battery_name = battery.name or "battery"
+        filename = f"{safe_file_part(project_name, 'project')}_{safe_file_part(battery_name, 'questions')}_{lang}.pdf"
+
+        disposition = (request.query_params.get("disposition") or "attachment").strip().lower()
+        if disposition not in {"attachment", "inline"}:
+            disposition = "attachment"
+
+        response = HttpResponse(buffer.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = (
+            f'{disposition}; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}'
+        )
+        response["Access-Control-Expose-Headers"] = "Content-Disposition"
+        return response
     
 
 
@@ -2386,14 +2677,19 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 # options: ["True","False"] (strings)
                 if isinstance(options, list) and options and isinstance(options[0], str):
                     correct_norm = correct_response.strip().lower()
+                    correct_multi = {c.lower() for c in _split_multi_answers(correct_response)}
                     for i, opt_text in enumerate(options, start=1):
                         opt_text_str = _safe_str(opt_text).strip()
+                        if qtype == "multiSelect":
+                            is_correct = opt_text_str.lower() in correct_multi
+                        else:
+                            is_correct = (opt_text_str.lower() == correct_norm)
                         opt_objs.append(
                             BatteryOption(
                                 question=qobj,
                                 option_id=str(i),
                                 text=opt_text_str,
-                                correct=(opt_text_str.lower() == correct_norm),
+                                correct=is_correct,
                                 order=i,
                             )
                         )
@@ -3645,6 +3941,272 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         cards_qs = deck.cards.all().order_by("id")
         ser = FlashcardSerializer(cards_qs, many=True, context={"request": request})
         return Response(ser.data)
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-flashcards-pdf")
+    def download_flashcards_pdf(self, request, pk=None):
+        """
+        GET /api/decks/{id}/download-flashcards-pdf/
+        Creates a printable PDF where each front page is followed by a back page.
+        If there are 2 cards on a front page, the next page contains those same 2 backs.
+        """
+        deck = self.get_object()
+        user = request.user
+        has_access = (
+            deck.owner_id == user.id
+            or deck.visibility == "public"
+            or deck.shares.filter(shared_with=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
+
+        cards = list(
+            deck.cards.all()
+            .order_by("id")
+            .values("front", "back")
+        )
+        if not cards:
+            return Response({"detail": "This deck has no flashcards."}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_lang = (
+            request.headers.get("language")
+            or request.headers.get("Language")
+            or request.headers.get("Accept-Language")
+            or "en"
+        )
+        lang = str(raw_lang).split(",")[0].strip().lower()
+        if "-" in lang:
+            lang = lang.split("-", 1)[0]
+        if lang not in {"en", "es"}:
+            lang = "en"
+
+        # User-friendly print mode:
+        # - book: normal page turn (default)
+        # - notebook: top flip
+        raw_print_mode = (
+            request.query_params.get("print_mode")
+            or request.headers.get("x-print-mode")
+            or request.query_params.get("duplex_flip")
+            or request.headers.get("x-duplex-flip")
+            or "book"
+        )
+        print_mode = str(raw_print_mode).strip().lower().replace("-", "_")
+        if print_mode == "long_edge":
+            print_mode = "book"
+        elif print_mode == "short_edge":
+            print_mode = "notebook"
+        if print_mode not in {"book", "notebook"}:
+            print_mode = "book"
+
+        # Internal mapping for slot order on back pages.
+        duplex_flip = "long_edge" if print_mode == "book" else "short_edge"
+
+        if lang == "es":
+            source_items = []
+            for card in cards:
+                source_items.append(card.get("front") or "")
+                source_items.append(card.get("back") or "")
+            try:
+                translated_items = post_translate(
+                    source_items,
+                    source_language="english",
+                    target_language="spanish",
+                    audit_user_id=request.user.id,
+                    audit_operation="flashcards.translate_pdf",
+                    audit_path=f"/api/decks/{deck.id}/download-flashcards-pdf/",
+                )
+            except Exception as exc:
+                return Response(
+                    {"detail": "Failed translating flashcards to Spanish.", "error": str(exc)},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+            if isinstance(translated_items, list) and len(translated_items) == len(source_items):
+                idx = 0
+                for card in cards:
+                    card["front"] = translated_items[idx]
+                    card["back"] = translated_items[idx + 1]
+                    idx += 2
+
+        try:
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.pagesizes import letter
+            from reportlab.lib.utils import simpleSplit
+        except Exception:
+            return Response(
+                {"detail": "PDF generation dependency missing. Install reportlab."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        buffer = io.BytesIO()
+        pdf = canvas.Canvas(buffer, pagesize=letter)
+        width, height = letter
+
+        top_margin = 48
+        bottom_margin = 36
+        side_margin = 36
+        slot_gap = 18
+        slot_height = (height - top_margin - bottom_margin - slot_gap) / 2
+        slot_width = width - (2 * side_margin)
+
+        def draw_page_label(label: str) -> None:
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.drawCentredString(width / 2, height - 24, label)
+
+        def draw_page_hint(text: str) -> None:
+            pdf.setFont("Helvetica", 8)
+            pdf.drawString(side_margin, 14, text)
+
+        def draw_slot(slot_idx: int, card_text: str, card_number: Optional[int] = None) -> None:
+            top_y = height - top_margin - (slot_idx * (slot_height + slot_gap))
+            bottom_y = top_y - slot_height
+            card_padding_x = 24
+            card_padding_y = 18
+            text_width = slot_width - (2 * card_padding_x)
+            font_name = "Helvetica"
+            font_size = 12
+            text_top_y = top_y - card_padding_y - 10
+            text_bottom_y = bottom_y + card_padding_y
+            line_gap = 16
+
+            pdf.roundRect(side_margin, bottom_y, slot_width, slot_height, 6, stroke=1, fill=0)
+            if card_number is not None:
+                pdf.setFont("Helvetica", 8)
+                pdf.drawRightString(
+                    side_margin + slot_width - card_padding_x + 2,
+                    top_y - card_padding_y + 6,
+                    f"#{card_number}",
+                )
+            pdf.setFont(font_name, font_size)
+
+            clean_text = re.sub(r"\s+", " ", str(card_text or "")).strip()
+            lines = simpleSplit(clean_text, font_name, font_size, text_width)
+            if not lines:
+                lines = [""]
+
+            available_span = max(0, text_top_y - text_bottom_y)
+            max_lines = max(1, int(available_span // line_gap) + 1)
+            visible_lines = lines[:max_lines]
+            fits_without_cut = len(lines) <= max_lines
+
+            # Vertical placement rule:
+            # - if rendered text uses <= half of available slot height, center it
+            # - otherwise start from top for readability
+            used_span = max(0, (len(visible_lines) - 1) * line_gap)
+            if fits_without_cut and used_span <= (available_span * 0.5):
+                center_offset = max(0, (available_span - used_span) / 2)
+                y = text_top_y - center_offset
+            else:
+                y = text_top_y
+
+            x_left = side_margin + card_padding_x
+            x_center = side_margin + (slot_width / 2)
+
+            def draw_justified_line(text_line: str, y_pos: float, is_last: bool) -> None:
+                text_line = (text_line or "").strip()
+                if not text_line:
+                    return
+                if is_last or " " not in text_line:
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                words = text_line.split()
+                if len(words) < 2:
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                word_widths = [pdf.stringWidth(w, font_name, font_size) for w in words]
+                total_word_width = sum(word_widths)
+                gaps = len(words) - 1
+                if gaps <= 0:
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                remaining = text_width - total_word_width
+                base_space = pdf.stringWidth(" ", font_name, font_size)
+                space_width = remaining / gaps if gaps else base_space
+
+                # Avoid ugly over-stretching on short lines.
+                if space_width <= 0 or space_width > (base_space * 3):
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                x_cursor = x_left
+                for idx_word, (word, w_width) in enumerate(zip(words, word_widths)):
+                    pdf.drawString(x_cursor, y_pos, word)
+                    x_cursor += w_width
+                    if idx_word < gaps:
+                        x_cursor += space_width
+
+            for idx_line, line in enumerate(visible_lines):
+                draw_line = line
+                if idx_line == len(visible_lines) - 1 and not fits_without_cut:
+                    if len(draw_line) > 3:
+                        draw_line = draw_line[:-3].rstrip() + "..."
+                    else:
+                        draw_line = "..."
+                is_last_line = idx_line == (len(visible_lines) - 1)
+                draw_justified_line(draw_line, y, is_last_line)
+                y -= line_gap
+
+        for i in range(0, len(cards), 2):
+            pair = cards[i:i + 2]
+
+            draw_page_label("FRONT")
+            if i == 0:
+                draw_page_hint("Print mode: book. If backs are inverted, regenerate with print_mode=notebook.")
+            for slot_idx, card in enumerate(pair):
+                draw_slot(
+                    slot_idx,
+                    card.get("front") or "",
+                    card_number=i + slot_idx + 1,
+                )
+            pdf.showPage()
+
+            draw_page_label("BACK")
+            if i == 0:
+                draw_page_hint(f"Back mapping applied for print_mode={print_mode}.")
+            back_pair = pair if duplex_flip == "long_edge" else list(reversed(pair))
+            for slot_idx, card in enumerate(back_pair):
+                card_number = (i + slot_idx + 1) if duplex_flip == "long_edge" else (i + len(back_pair) - slot_idx)
+                draw_slot(
+                    slot_idx,
+                    card.get("back") or "",
+                    card_number=card_number,
+                )
+            pdf.showPage()
+
+        pdf.save()
+        buffer.seek(0)
+
+        def safe_file_part(value: str, default: str) -> str:
+            text = (value or "").strip()
+            text = re.sub(r"\s+", "_", text)
+            text = re.sub(r"[^A-Za-z0-9._-]", "", text)
+            text = text.strip("._-")
+            return text or default
+
+        project_name = (
+            getattr(deck.project, "title", None)
+            or getattr(deck.project, "name", None)
+            or "project"
+        ) if deck.project else "project"
+        flash_card_name = deck.title or "flashcards"
+        filename = f"{safe_file_part(project_name, 'project')}_{safe_file_part(flash_card_name, 'flashcards')}_{lang}.pdf"
+
+        disposition = (request.query_params.get("disposition") or "attachment").strip().lower()
+        if disposition not in {"attachment", "inline"}:
+            disposition = "attachment"
+
+        response = HttpResponse(buffer.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = (
+            f'{disposition}; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}'
+        )
+        response["X-Print-Mode-Applied"] = print_mode
+        response["X-Duplex-Flip-Applied"] = duplex_flip
+        response["Access-Control-Expose-Headers"] = (
+            "Content-Disposition, X-Print-Mode-Applied, X-Duplex-Flip-Applied"
+        )
+        return response
 
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated], url_path="my")
