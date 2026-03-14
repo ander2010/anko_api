@@ -970,6 +970,32 @@ class UserSession(models.Model):
         db_table = "user_sessions"
 
 
+class PdfDecryptionKey(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="pdf_decryption_keys",
+    )
+    key_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    secret = models.CharField(max_length=128)
+    pdf_name = models.CharField(max_length=255, blank=True, default="")
+    pdf_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    resource_kind = models.CharField(max_length=40, blank=True, default="")
+    resource_id = models.PositiveBigIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "pdf_decryption_keys"
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["user", "pdf_hash"]),
+        ]
+
+    def __str__(self):
+        return f"pdfkey:{self.user_id}"
+
+
 class ConversationMessage(models.Model):
     session = models.ForeignKey(
         UserSession,

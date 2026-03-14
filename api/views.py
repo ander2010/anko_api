@@ -22,6 +22,7 @@ import uuid
 import json
 import hashlib
 import io
+import secrets
 from django.db.models import Count, Q, Sum
 import time
 from django.utils import timezone
@@ -49,7 +50,7 @@ from collections import defaultdict
 from django.contrib.auth import authenticate, login
 
 from api.services.translate import post_translate
-from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, UserSession
+from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, UserSession, PdfDecryptionKey
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
@@ -98,6 +99,30 @@ from api.services.progressfc_ws import ws_get_latest_progress  # ajusta import
 from api.utils.logging import get_logger
 SECRET_TOKEN = "andelef"
 logger = get_logger(__name__)
+
+
+def _generate_pdf_owner_password() -> str:
+    # Keep a compact but strong random owner password for reportlab encryption.
+    return secrets.token_urlsafe(24)
+
+
+def _save_pdf_decryption_key(
+    user,
+    *,
+    pdf_name: str,
+    pdf_bytes: bytes,
+    owner_password: str,
+    resource_kind: str,
+    resource_id: int,
+) -> None:
+    PdfDecryptionKey.objects.create(
+        user=user,
+        secret=owner_password,
+        pdf_name=(pdf_name or "")[:255],
+        pdf_hash=hashlib.sha256(pdf_bytes).hexdigest(),
+        resource_kind=resource_kind or "",
+        resource_id=resource_id,
+    )
 
 
 def _is_rbac_admin_user(user) -> bool:
@@ -2314,6 +2339,8 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             from reportlab.pdfgen import canvas
             from reportlab.lib.pagesizes import letter
             from reportlab.lib.utils import simpleSplit
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.lib.pdfencrypt import StandardEncryption
         except Exception:
             return Response(
                 {"detail": "PDF generation dependency missing. Install reportlab."},
@@ -2321,7 +2348,17 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             )
 
         buffer = io.BytesIO()
-        pdf = canvas.Canvas(buffer, pagesize=letter)
+        owner_pwd = _generate_pdf_owner_password()
+        pdf_encrypt = StandardEncryption(
+            userPassword="",
+            ownerPassword=owner_pwd,
+            canPrint=1,
+            canModify=0,
+            canCopy=0,
+            canAnnotate=0,
+            strength=128,
+        )
+        pdf = canvas.Canvas(buffer, pagesize=letter, encrypt=pdf_encrypt)
         width, height = letter
         left = 42
         right = width - 42
@@ -2330,10 +2367,36 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         max_w = right - left
         y = top
 
+        def _draw_page_watermark():
+            page_center_x = width / 2
+            page_center_y = height / 2
+            watermark_text = "ankard"
+            span = ((width ** 2) + (height ** 2)) ** 0.5
+            unit_width = max(1.0, pdf.stringWidth(watermark_text, "Helvetica-Bold", 1))
+            size = max(52, min(130, int((span * 0.58) / unit_width)))
+
+            pdf.saveState()
+            pdf.setFillColorRGB(0.9, 0.9, 0.9)
+            pdf.setFont("Helvetica-Bold", size)
+            pdf.translate(page_center_x, page_center_y)
+            pdf.rotate(-32)
+            ascent = pdfmetrics.getAscent("Helvetica-Bold")
+            descent = pdfmetrics.getDescent("Helvetica-Bold")
+            center_above_baseline = ((ascent + descent) / 2.0 / 1000.0) * size
+            pdf.drawCentredString(0, -center_above_baseline, watermark_text)
+            pdf.restoreState()
+
+            pdf.saveState()
+            pdf.setFillColorRGB(0.7, 0.7, 0.7)
+            pdf.setFont("Helvetica", 9)
+            pdf.drawRightString(width - 24, 20, "www.ankard.com")
+            pdf.restoreState()
+
         def _new_page():
             nonlocal y
             pdf.showPage()
             y = top
+            _draw_page_watermark()
 
         def _draw_wrapped(text: str, font: str = "Helvetica", size: int = 11, gap: int = 14, indent: int = 0):
             nonlocal y
@@ -2350,6 +2413,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 y -= gap
 
         pdf.setTitle(f"battery_questions_{battery.id}_{lang}.pdf")
+        _draw_page_watermark()
         _draw_wrapped(labels["title"], "Helvetica-Bold", 16, 20)
         _draw_wrapped(f"{labels['subtitle']}: {battery.name}", "Helvetica-Bold", 12, 16)
         y -= 6
@@ -2400,7 +2464,23 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         if disposition not in {"attachment", "inline"}:
             disposition = "attachment"
 
-        response = HttpResponse(buffer.getvalue(), content_type="application/pdf")
+        pdf_bytes = buffer.getvalue()
+        try:
+            _save_pdf_decryption_key(
+                request.user,
+                pdf_name=filename,
+                pdf_bytes=pdf_bytes,
+                owner_password=owner_pwd,
+                resource_kind="questions",
+                resource_id=battery.id,
+            )
+        except Exception as exc:
+            return Response(
+                {"detail": "Failed saving PDF decryption key.", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = (
             f'{disposition}; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}'
         )
@@ -4031,6 +4111,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             from reportlab.pdfgen import canvas
             from reportlab.lib.pagesizes import letter
             from reportlab.lib.utils import simpleSplit
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.lib.pdfencrypt import StandardEncryption
         except Exception:
             return Response(
                 {"detail": "PDF generation dependency missing. Install reportlab."},
@@ -4038,7 +4120,17 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             )
 
         buffer = io.BytesIO()
-        pdf = canvas.Canvas(buffer, pagesize=letter)
+        owner_pwd = _generate_pdf_owner_password()
+        pdf_encrypt = StandardEncryption(
+            userPassword="",
+            ownerPassword=owner_pwd,
+            canPrint=1,
+            canModify=0,
+            canCopy=0,
+            canAnnotate=0,
+            strength=128,
+        )
+        pdf = canvas.Canvas(buffer, pagesize=letter, encrypt=pdf_encrypt)
         width, height = letter
 
         top_margin = 48
@@ -4069,6 +4161,36 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             line_gap = 16
 
             pdf.roundRect(side_margin, bottom_y, slot_width, slot_height, 6, stroke=1, fill=0)
+
+            # Watermark (same for front/back): opposite diagonal and larger span.
+            center_x = side_margin + (slot_width / 2)
+            center_y = bottom_y + (slot_height / 2)
+            watermark_text = "ankard"
+            diagonal_span = ((slot_width ** 2) + (slot_height ** 2)) ** 0.5
+            unit_width = max(1.0, pdf.stringWidth(watermark_text, "Helvetica-Bold", 1))
+            watermark_size = max(32, min(90, int((diagonal_span * 0.9) / unit_width)))
+            pdf.saveState()
+            pdf.setFillColorRGB(0.85, 0.85, 0.85)
+            pdf.setFont("Helvetica-Bold", watermark_size)
+            pdf.translate(center_x, center_y)
+            pdf.rotate(-32)
+            ascent = pdfmetrics.getAscent("Helvetica-Bold")
+            descent = pdfmetrics.getDescent("Helvetica-Bold")
+            center_above_baseline = ((ascent + descent) / 2.0 / 1000.0) * watermark_size
+            baseline_y = -center_above_baseline
+            pdf.drawCentredString(0, baseline_y, watermark_text)
+            pdf.restoreState()
+
+            pdf.saveState()
+            pdf.setFillColorRGB(0.6, 0.6, 0.6)
+            pdf.setFont("Helvetica", 8)
+            pdf.drawRightString(
+                side_margin + slot_width - card_padding_x,
+                bottom_y + 8,
+                "www.ankard.com",
+            )
+            pdf.restoreState()
+
             if card_number is not None:
                 pdf.setFont("Helvetica", 8)
                 pdf.drawRightString(
@@ -4197,7 +4319,23 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if disposition not in {"attachment", "inline"}:
             disposition = "attachment"
 
-        response = HttpResponse(buffer.getvalue(), content_type="application/pdf")
+        pdf_bytes = buffer.getvalue()
+        try:
+            _save_pdf_decryption_key(
+                request.user,
+                pdf_name=filename,
+                pdf_bytes=pdf_bytes,
+                owner_password=owner_pwd,
+                resource_kind="flashcards",
+                resource_id=deck.id,
+            )
+        except Exception as exc:
+            return Response(
+                {"detail": "Failed saving PDF decryption key.", "error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = (
             f'{disposition}; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}'
         )
