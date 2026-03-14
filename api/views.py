@@ -42,6 +42,7 @@ from websocket import WebSocketConnectionClosedException
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Prefetch
@@ -77,7 +78,7 @@ from .serializers import (
     ResourceSerializer, PermissionSerializer, RoleSerializer,
     PlanSerializer, PlanLimitSerializer, SubscriptionSerializer,
     BatteryShareSerializer, SavedBatterySerializer, InviteSerializer,
-    DeckSerializer, DeckListSerializer, FlashcardSerializer, DeckShareSerializer, SavedDeckSerializer,
+    DeckSerializer, DeckListSerializer, FlashcardSerializer, RichFlashcardCreateSerializer, DeckShareSerializer, SavedDeckSerializer,
     TagSerializer, QaPairSerializer
 )
 from rest_framework.pagination import PageNumberPagination
@@ -4517,6 +4518,90 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 "cards_added": len(objs),
             },
             status=status.HTTP_201_CREATED,
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[IsAuthenticated],
+        url_path="add-rich-card",
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    @transaction.atomic
+    def add_rich_card(self, request, pk=None):
+        deck = self.get_object()
+
+        if deck.owner_id != request.user.id:
+            return Response(
+                {"detail": "Only the deck owner can add flashcards"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = RichFlashcardCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        job_id = deck.external_job_id or str(uuid.uuid4())
+        if not deck.external_job_id:
+            deck.external_job_id = job_id
+            deck.save(update_fields=["external_job_id"])
+
+        validated = serializer.validated_data
+        back_image = validated.get("back_image")
+        now = timezone.now()
+
+        card = Flashcard.objects.create(
+            deck=deck,
+            front=validated["front"],
+            back=validated.get("back", ""),
+            notes=validated.get("notes", ""),
+            back_image=back_image,
+            back_image_original_size_bytes=getattr(back_image, "original_image_size_bytes", None) if back_image else None,
+            back_image_size_bytes=getattr(back_image, "image_size_bytes", None) if back_image else None,
+            back_image_was_optimized=bool(getattr(back_image, "image_was_optimized", False)) if back_image else False,
+            back_image_width=getattr(back_image, "image_width", None) if back_image else None,
+            back_image_height=getattr(back_image, "image_height", None) if back_image else None,
+            job_id=job_id,
+            user_id=str(request.user.id),
+            kind="new",
+            status="learning",
+            created_at=now,
+            updated_at=now,
+            card_id=str(uuid.uuid4()),
+        )
+
+        return Response(
+            {
+                "deck_id": deck.id,
+                "job_id": job_id,
+                "image_constraints": RichFlashcardCreateSerializer.image_constraints(),
+                "card": FlashcardSerializer(card, context={"request": request}).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(
+        detail=False,
+        methods=["get"],
+        permission_classes=[IsAuthenticated],
+        url_path="rich-card-config",
+    )
+    def rich_card_config(self, request):
+        return Response(
+            {
+                "image_constraints": RichFlashcardCreateSerializer.image_constraints(),
+                "render_guidance": {
+                    "default_layout": "image_top_text_bottom",
+                    "image_fit": "contain",
+                    "max_preview_height_px": 220,
+                    "warnings": {
+                        "optimized_image": "This image was automatically optimized to fit the flashcard limits.",
+                        "wide_image": "This image is very wide. It may appear smaller in the card preview.",
+                        "tall_image": "This image is very tall. It may appear smaller in the card preview.",
+                        "small_text_space": "This explanation is long. The text area below the image may need scrolling or truncation.",
+                    },
+                },
+            },
+            status=status.HTTP_200_OK,
         )
 
 

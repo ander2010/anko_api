@@ -1,5 +1,9 @@
 from django.conf import settings
+import io
+import os
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import serializers
+from PIL import Image, ImageOps
 from .models import AccessRequest, ConversationMessage, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
 from django.contrib.auth import get_user_model
 from dj_rest_auth.forms import AllAuthPasswordResetForm
@@ -695,11 +699,253 @@ class InviteSerializer(serializers.ModelSerializer):
 
 class FlashcardSerializer(serializers.ModelSerializer):
     deckId = serializers.IntegerField(source="deck_id", read_only=True)
+    backImageUrl = serializers.SerializerMethodField()
+    backImageWarnings = serializers.SerializerMethodField()
+    backImageRenderHint = serializers.SerializerMethodField()
 
     class Meta:
         model = Flashcard
-        fields = ["id", "deck", "deckId", "front", "back", "notes", "created_at"]
-        read_only_fields = ["created_at", "deckId"]
+        fields = [
+            "id",
+            "deck",
+            "deckId",
+            "front",
+            "back",
+            "notes",
+            "back_image",
+            "backImageUrl",
+            "back_image_original_size_bytes",
+            "back_image_size_bytes",
+            "back_image_was_optimized",
+            "back_image_width",
+            "back_image_height",
+            "backImageWarnings",
+            "backImageRenderHint",
+            "created_at",
+        ]
+        read_only_fields = [
+            "created_at",
+            "deckId",
+            "back_image",
+            "back_image_original_size_bytes",
+            "back_image_size_bytes",
+            "back_image_was_optimized",
+            "backImageUrl",
+            "back_image_width",
+            "back_image_height",
+            "backImageWarnings",
+            "backImageRenderHint",
+        ]
+
+    def get_backImageUrl(self, obj):
+        if not obj.back_image:
+            return None
+        request = self.context.get("request")
+        try:
+            url = obj.back_image.url
+        except Exception:
+            return None
+        return request.build_absolute_uri(url) if request else url
+
+    def get_backImageWarnings(self, obj):
+        if not obj.back_image:
+            return []
+
+        warnings = []
+        width = obj.back_image_width or 0
+        height = obj.back_image_height or 0
+
+        if width and height:
+            if width / height >= 2.2:
+                warnings.append("This image is very wide. It may appear smaller in the card preview.")
+            elif height / width >= 2.2:
+                warnings.append("This image is very tall. It may appear smaller in the card preview.")
+
+        if obj.back_image_was_optimized:
+            warnings.append("This image was automatically optimized to fit the flashcard limits.")
+
+        if obj.back and len((obj.back or "").strip()) > 240:
+            warnings.append("This explanation is long. The text area below the image may need scrolling or truncation.")
+
+        return warnings
+
+    def get_backImageRenderHint(self, obj):
+        if not obj.back_image:
+            return "text_only"
+
+        width = obj.back_image_width or 0
+        height = obj.back_image_height or 0
+
+        if width and height:
+            if width / height >= 2.2:
+                return "wide_image"
+            if height / width >= 2.2:
+                return "tall_image"
+
+        if obj.back and len((obj.back or "").strip()) > 240:
+            return "small_text_space"
+
+        if obj.back_image_was_optimized:
+            return "optimized_image"
+
+        return "image_top_text_bottom"
+
+
+class RichFlashcardCreateSerializer(serializers.Serializer):
+    front = serializers.CharField()
+    back = serializers.CharField(required=False, allow_blank=True, default="")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+    back_image = serializers.ImageField(required=False, allow_null=True)
+
+    MAX_IMAGE_BYTES = 3 * 1024 * 1024
+    MIN_WIDTH = 400
+    MIN_HEIGHT = 400
+    MAX_WIDTH = 2000
+    MAX_HEIGHT = 2000
+    MAX_ASPECT_RATIO = 3.0
+    ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
+
+    @classmethod
+    def image_constraints(cls):
+        return {
+            "allowed_formats": ["jpg", "png", "webp"],
+            "max_file_size_bytes": cls.MAX_IMAGE_BYTES,
+            "max_file_size_mb": round(cls.MAX_IMAGE_BYTES / (1024 * 1024), 1),
+            "min_resolution": {"width": cls.MIN_WIDTH, "height": cls.MIN_HEIGHT},
+            "max_resolution": {"width": cls.MAX_WIDTH, "height": cls.MAX_HEIGHT},
+            "max_aspect_ratio": cls.MAX_ASPECT_RATIO,
+            "auto_optimize_when_needed": True,
+            "optimized_storage_format": "webp",
+        }
+
+    def validate_front(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("front is required")
+        return value
+
+    def validate_back(self, value):
+        return (value or "").strip()
+
+    def _normalized_image(self, value):
+        value.seek(0)
+        image = Image.open(value)
+        image = ImageOps.exif_transpose(image)
+        image.load()
+        return image
+
+    def _serialize_optimized_image(self, image, original_name):
+        prepared = image
+        if prepared.mode not in {"RGB", "RGBA"}:
+            prepared = prepared.convert("RGBA" if "A" in prepared.getbands() else "RGB")
+
+        qualities = [82, 74, 66, 58, 50, 42]
+        scale = 1.0
+        original_width, original_height = prepared.size
+
+        for _ in range(4):
+            if scale < 1.0:
+                resized_width = max(self.MIN_WIDTH, int(original_width * scale))
+                resized_height = max(self.MIN_HEIGHT, int(original_height * scale))
+                candidate = prepared.copy()
+                candidate.thumbnail((resized_width, resized_height), Image.Resampling.LANCZOS)
+            else:
+                candidate = prepared.copy()
+
+            for quality in qualities:
+                buffer = io.BytesIO()
+                candidate.save(buffer, format="WEBP", quality=quality, method=6)
+                payload = buffer.getvalue()
+                if len(payload) <= self.MAX_IMAGE_BYTES:
+                    name_root, _ = os.path.splitext(original_name or "flashcard-back")
+                    upload = SimpleUploadedFile(
+                        name=f"{name_root}.webp",
+                        content=payload,
+                        content_type="image/webp",
+                    )
+                    upload.image_width = candidate.size[0]
+                    upload.image_height = candidate.size[1]
+                    upload.image_size_bytes = len(payload)
+                    upload.original_image_size_bytes = getattr(self, "_original_image_size_bytes", None)
+                    upload.image_was_optimized = True
+                    return upload
+
+            scale *= 0.9
+
+        raise serializers.ValidationError(
+            "Image could not be optimized enough to fit the 3.0 MB limit. Try a simpler image."
+        )
+
+    def validate_back_image(self, value):
+        if value is None:
+            return value
+
+        original_size_bytes = value.size
+        self._original_image_size_bytes = original_size_bytes
+
+        try:
+            image = Image.open(value)
+            image.verify()
+        except Exception:
+            raise serializers.ValidationError("Invalid image file.")
+
+        value.seek(0)
+
+        try:
+            raw_image = Image.open(value)
+            image_format = (raw_image.format or "").upper()
+            value.seek(0)
+            image = self._normalized_image(value)
+            width, height = image.size
+        except Exception:
+            raise serializers.ValidationError("Invalid image file.")
+        finally:
+            value.seek(0)
+
+        if image_format not in self.ALLOWED_FORMATS:
+            raise serializers.ValidationError("Unsupported image format. Use JPG, PNG, or WEBP.")
+
+        if width < self.MIN_WIDTH or height < self.MIN_HEIGHT:
+            raise serializers.ValidationError(
+                f"Image resolution too small ({width}x{height}). Min {self.MIN_WIDTH}x{self.MIN_HEIGHT}."
+            )
+
+        if width > self.MAX_WIDTH or height > self.MAX_HEIGHT:
+            raise serializers.ValidationError(
+                f"Image resolution too large ({width}x{height}). Max {self.MAX_WIDTH}x{self.MAX_HEIGHT}."
+            )
+
+        ratio = max(width / height, height / width)
+        if ratio > self.MAX_ASPECT_RATIO:
+            raise serializers.ValidationError(
+                f"Image aspect ratio is too extreme ({ratio:.2f}:1). Max {self.MAX_ASPECT_RATIO:.1f}:1."
+            )
+
+        needs_optimization = (
+            original_size_bytes > self.MAX_IMAGE_BYTES
+            or width > self.MAX_WIDTH
+            or height > self.MAX_HEIGHT
+        )
+
+        if needs_optimization:
+            optimized = image.copy()
+            optimized.thumbnail((self.MAX_WIDTH, self.MAX_HEIGHT), Image.Resampling.LANCZOS)
+            optimized_file = self._serialize_optimized_image(optimized, getattr(value, "name", "flashcard-back"))
+            return optimized_file
+
+        value.image_width = width
+        value.image_height = height
+        value.image_size_bytes = original_size_bytes
+        value.original_image_size_bytes = original_size_bytes
+        value.image_was_optimized = False
+        return value
+
+    def validate(self, attrs):
+        back = attrs.get("back", "")
+        back_image = attrs.get("back_image")
+        if not back and not back_image:
+            raise serializers.ValidationError({"detail": "At least one of back or back_image is required."})
+        return attrs
 
 
 class DeckSerializer(serializers.ModelSerializer):

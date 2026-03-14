@@ -7,6 +7,15 @@ from django.conf import settings
 from django.core.validators import RegexValidator
 
 import uuid
+
+
+def flashcard_back_image_upload_to(instance, filename):
+    ext = os.path.splitext(filename or "")[1].lower() or ".jpg"
+    card_token = instance.card_id or str(uuid.uuid4())
+    deck_id = instance.deck_id or "unassigned"
+    return f"flashcards/back_images/deck_{deck_id}/{card_token}{ext}"
+
+
 class User(AbstractUser):
     email = models.EmailField(unique=True)
     avatar = models.ImageField(upload_to='avatars/', null=True, blank=True)
@@ -656,6 +665,12 @@ class Flashcard(models.Model):
     # Your additions
     deck = models.ForeignKey(Deck, null=True, blank=True, on_delete=models.SET_NULL, related_name="cards")
     notes = models.TextField(blank=True, null=True, default="")
+    back_image = models.ImageField(upload_to=flashcard_back_image_upload_to, null=True, blank=True)
+    back_image_original_size_bytes = models.PositiveIntegerField(null=True, blank=True)
+    back_image_size_bytes = models.PositiveIntegerField(null=True, blank=True)
+    back_image_was_optimized = models.BooleanField(default=False)
+    back_image_width = models.PositiveIntegerField(null=True, blank=True)
+    back_image_height = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         

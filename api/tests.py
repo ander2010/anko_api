@@ -1,4 +1,11 @@
+import io
+import shutil
+import tempfile
+
+from PIL import Image
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -15,6 +22,22 @@ from api.urls import router
 
 
 class RbacAdminPanelTests(APITestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._media_root = tempfile.mkdtemp(prefix="anko-test-media-")
+        cls._override = override_settings(
+            DEFAULT_FILE_STORAGE="django.core.files.storage.FileSystemStorage",
+            MEDIA_ROOT=cls._media_root,
+        )
+        cls._override.enable()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._override.disable()
+        shutil.rmtree(cls._media_root, ignore_errors=True)
+        super().tearDownClass()
+
     @classmethod
     def setUpTestData(cls):
         cls.admin = User.objects.create_user(
@@ -83,6 +106,16 @@ class RbacAdminPanelTests(APITestCase):
         if not isinstance(payload, list):
             return []
         return [item.get("id") for item in payload if isinstance(item, dict)]
+
+    def _make_test_image(self, *, width=600, height=600, fmt="PNG", color=(32, 128, 192)):
+        buffer = io.BytesIO()
+        image = Image.new("RGB", (width, height), color)
+        image.save(buffer, format=fmt)
+        return SimpleUploadedFile(
+            name=f"card-back.{fmt.lower()}",
+            content=buffer.getvalue(),
+            content_type=f"image/{fmt.lower()}",
+        )
 
     def test_admin_rbac_resources_exist(self):
         required = [
@@ -172,6 +205,177 @@ class RbacAdminPanelTests(APITestCase):
         self.assertIn(self.card_a.id, ids)
         self.assertIn(self.card_b.id, ids)
         self.assertIn(self.card_c.id, ids)
+
+    def test_deck_owner_can_add_rich_card_with_back_image(self):
+        self.client.force_authenticate(user=self.user_a)
+        image = self._make_test_image()
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Question with image",
+                "back": "Explanation under image",
+                "notes": "teacher note",
+                "back_image": image,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.deck_a.refresh_from_db()
+        self.assertTrue(self.deck_a.external_job_id)
+
+        card = Flashcard.objects.exclude(id=self.card_a.id).get(deck=self.deck_a, front="Question with image")
+        self.assertEqual(card.back, "Explanation under image")
+        self.assertEqual(card.notes, "teacher note")
+        self.assertTrue(card.back_image)
+        self.assertTrue(card.back_image_size_bytes)
+        self.assertEqual(card.back_image_original_size_bytes, card.back_image_size_bytes)
+        self.assertFalse(card.back_image_was_optimized)
+        self.assertEqual(card.back_image_width, 600)
+        self.assertEqual(card.back_image_height, 600)
+        self.assertEqual(card.job_id, self.deck_a.external_job_id)
+        self.assertEqual(card.user_id, str(self.user_a.id))
+        self.assertTrue(card.card_id)
+        self.assertEqual(response.data["card"]["backImageRenderHint"], "image_top_text_bottom")
+        self.assertEqual(response.data["card"]["backImageWarnings"], [])
+        self.assertEqual(response.data["card"]["back_image_width"], 600)
+        self.assertEqual(response.data["card"]["back_image_height"], 600)
+        self.assertEqual(response.data["card"]["back_image_size_bytes"], card.back_image_size_bytes)
+        self.assertIn("image_constraints", response.data)
+
+    def test_deck_owner_can_add_rich_card_with_image_only_back(self):
+        self.client.force_authenticate(user=self.user_a)
+        image = self._make_test_image()
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Image-only answer",
+                "back_image": image,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        card = Flashcard.objects.get(deck=self.deck_a, front="Image-only answer")
+        self.assertEqual(card.back, "")
+        self.assertTrue(card.back_image)
+
+    def test_add_rich_card_auto_optimizes_large_image(self):
+        self.client.force_authenticate(user=self.user_a)
+        image = self._make_test_image(width=2600, height=2600)
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Needs optimization",
+                "back": "Optimized explanation",
+                "back_image": image,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        card = Flashcard.objects.get(deck=self.deck_a, front="Needs optimization")
+        self.assertTrue(card.back_image_was_optimized)
+        self.assertTrue(card.back_image_original_size_bytes)
+        self.assertTrue(card.back_image_size_bytes)
+        self.assertLessEqual(card.back_image_width, 2000)
+        self.assertLessEqual(card.back_image_height, 2000)
+        self.assertEqual(response.data["card"]["backImageRenderHint"], "optimized_image")
+        self.assertIn("automatically optimized", " ".join(response.data["card"]["backImageWarnings"]).lower())
+
+    def test_add_rich_card_returns_tall_image_warning(self):
+        self.client.force_authenticate(user=self.user_a)
+        image = self._make_test_image(width=500, height=1300)
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Tall image",
+                "back": "Short explanation",
+                "back_image": image,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["card"]["backImageRenderHint"], "tall_image")
+        self.assertTrue(response.data["card"]["backImageWarnings"])
+
+    def test_add_rich_card_returns_small_text_space_warning(self):
+        self.client.force_authenticate(user=self.user_a)
+        image = self._make_test_image()
+        long_back = "A" * 260
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Long explanation",
+                "back": long_back,
+                "back_image": image,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["card"]["backImageRenderHint"], "small_text_space")
+        self.assertTrue(response.data["card"]["backImageWarnings"])
+
+    def test_add_rich_card_requires_owner(self):
+        self.client.force_authenticate(user=self.user_b)
+        image = self._make_test_image()
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Forbidden",
+                "back_image": image,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_add_rich_card_requires_back_text_or_image(self):
+        self.client.force_authenticate(user=self.user_a)
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Missing answer",
+                "back": "",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rich_card_config_returns_constraints(self):
+        self.client.force_authenticate(user=self.user_a)
+
+        response = self.client.get("/api/decks/rich-card-config/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["image_constraints"]["max_file_size_mb"], 3.0)
+        self.assertEqual(response.data["render_guidance"]["image_fit"], "contain")
+        self.assertTrue(response.data["image_constraints"]["auto_optimize_when_needed"])
+
+    def test_add_rich_card_rejects_small_image(self):
+        self.client.force_authenticate(user=self.user_a)
+        image = self._make_test_image(width=200, height=200)
+
+        response = self.client.post(
+            f"/api/decks/{self.deck_a.id}/add-rich-card/",
+            {
+                "front": "Too small",
+                "back_image": image,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_deck_shares_non_admin_is_scoped(self):
         self.client.force_authenticate(user=self.user_a)
