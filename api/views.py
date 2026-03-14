@@ -4040,11 +4040,16 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if not has_access:
             return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
 
-        cards = list(
-            deck.cards.all()
-            .order_by("id")
-            .values("front", "back")
-        )
+        cards = [
+            {
+                "front": card.front,
+                "back": card.back,
+                "back_image": card.back_image,
+                "back_image_width": card.back_image_width,
+                "back_image_height": card.back_image_height,
+            }
+            for card in deck.cards.all().order_by("id")
+        ]
         if not cards:
             return Response({"detail": "This deck has no flashcards."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -4111,7 +4116,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         try:
             from reportlab.pdfgen import canvas
             from reportlab.lib.pagesizes import letter
-            from reportlab.lib.utils import simpleSplit
+            from reportlab.lib.utils import ImageReader, simpleSplit
             from reportlab.pdfbase import pdfmetrics
             from reportlab.lib.pdfencrypt import StandardEncryption
         except Exception:
@@ -4149,7 +4154,101 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             pdf.setFont("Helvetica", 8)
             pdf.drawString(side_margin, 14, text)
 
-        def draw_slot(slot_idx: int, card_text: str, card_number: Optional[int] = None) -> None:
+        def draw_text_block(
+            *,
+            text: str,
+            x_left: float,
+            x_center: float,
+            text_width: float,
+            text_top_y: float,
+            text_bottom_y: float,
+            font_name: str,
+            font_size: int,
+            line_gap: int,
+        ) -> None:
+            pdf.setFont(font_name, font_size)
+            clean_text = re.sub(r"\s+", " ", str(text or "")).strip()
+            lines = simpleSplit(clean_text, font_name, font_size, text_width)
+            if not lines:
+                lines = [""]
+
+            available_span = max(0, text_top_y - text_bottom_y)
+            max_lines = max(1, int(available_span // line_gap) + 1)
+            visible_lines = lines[:max_lines]
+            fits_without_cut = len(lines) <= max_lines
+
+            used_span = max(0, (len(visible_lines) - 1) * line_gap)
+            if fits_without_cut and used_span <= (available_span * 0.5):
+                center_offset = max(0, (available_span - used_span) / 2)
+                y = text_top_y - center_offset
+            else:
+                y = text_top_y
+
+            def draw_justified_line(text_line: str, y_pos: float, is_last: bool) -> None:
+                text_line = (text_line or "").strip()
+                if not text_line:
+                    return
+                if is_last or " " not in text_line:
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                words = text_line.split()
+                if len(words) < 2:
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                word_widths = [pdf.stringWidth(w, font_name, font_size) for w in words]
+                total_word_width = sum(word_widths)
+                gaps = len(words) - 1
+                if gaps <= 0:
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                remaining = text_width - total_word_width
+                base_space = pdf.stringWidth(" ", font_name, font_size)
+                space_width = remaining / gaps if gaps else base_space
+
+                if space_width <= 0 or space_width > (base_space * 3):
+                    pdf.drawCentredString(x_center, y_pos, text_line)
+                    return
+
+                x_cursor = x_left
+                for idx_word, (word, w_width) in enumerate(zip(words, word_widths)):
+                    pdf.drawString(x_cursor, y_pos, word)
+                    x_cursor += w_width
+                    if idx_word < gaps:
+                        x_cursor += space_width
+
+            for idx_line, line in enumerate(visible_lines):
+                draw_line = line
+                if idx_line == len(visible_lines) - 1 and not fits_without_cut:
+                    if len(draw_line) > 3:
+                        draw_line = draw_line[:-3].rstrip() + "..."
+                    else:
+                        draw_line = "..."
+                is_last_line = idx_line == (len(visible_lines) - 1)
+                draw_justified_line(draw_line, y, is_last_line)
+                y -= line_gap
+
+        def estimate_text_block_height(
+            *,
+            text: str,
+            text_width: float,
+            font_name: str,
+            font_size: int,
+            line_gap: int,
+            min_height: float,
+            max_height: float,
+        ) -> float:
+            clean_text = re.sub(r"\s+", " ", str(text or "")).strip()
+            if not clean_text:
+                return 0
+            lines = simpleSplit(clean_text, font_name, font_size, text_width)
+            line_count = max(1, len(lines))
+            estimated_height = max(line_gap, (line_count - 1) * line_gap) + 18
+            return max(min_height, min(max_height, estimated_height))
+
+        def draw_slot(slot_idx: int, card: dict, side: str, card_number: Optional[int] = None) -> None:
             top_y = height - top_margin - (slot_idx * (slot_height + slot_gap))
             bottom_y = top_y - slot_height
             card_padding_x = 24
@@ -4201,75 +4300,105 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 )
             pdf.setFont(font_name, font_size)
 
-            clean_text = re.sub(r"\s+", " ", str(card_text or "")).strip()
-            lines = simpleSplit(clean_text, font_name, font_size, text_width)
-            if not lines:
-                lines = [""]
-
-            available_span = max(0, text_top_y - text_bottom_y)
-            max_lines = max(1, int(available_span // line_gap) + 1)
-            visible_lines = lines[:max_lines]
-            fits_without_cut = len(lines) <= max_lines
-
-            # Vertical placement rule:
-            # - if rendered text uses <= half of available slot height, center it
-            # - otherwise start from top for readability
-            used_span = max(0, (len(visible_lines) - 1) * line_gap)
-            if fits_without_cut and used_span <= (available_span * 0.5):
-                center_offset = max(0, (available_span - used_span) / 2)
-                y = text_top_y - center_offset
-            else:
-                y = text_top_y
-
             x_left = side_margin + card_padding_x
             x_center = side_margin + (slot_width / 2)
+            if side == "back" and card.get("back_image"):
+                explanation_text = card.get("back") or ""
+                explanation_exists = bool(str(explanation_text).strip())
+                content_top_y = top_y - card_padding_y - 10
+                content_bottom_y = bottom_y + card_padding_y
+                image_text_gap = 16
+                reserved_text_height = 0
+                if explanation_exists:
+                    reserved_text_height = estimate_text_block_height(
+                        text=explanation_text,
+                        text_width=text_width,
+                        font_name=font_name,
+                        font_size=font_size,
+                        line_gap=line_gap,
+                        min_height=54,
+                        max_height=slot_height * 0.38,
+                    )
+                text_bottom_y = content_bottom_y
+                text_top_y = text_bottom_y + reserved_text_height
+                image_top_y = content_top_y
+                image_bottom_y = text_top_y + (image_text_gap if explanation_exists else 0)
+                image_box_height = max(72, image_top_y - image_bottom_y)
+                image_box_width = text_width
+                image_x = x_left
+                image_y = image_bottom_y
 
-            def draw_justified_line(text_line: str, y_pos: float, is_last: bool) -> None:
-                text_line = (text_line or "").strip()
-                if not text_line:
-                    return
-                if is_last or " " not in text_line:
-                    pdf.drawCentredString(x_center, y_pos, text_line)
-                    return
+                image_drawn = False
+                try:
+                    card_image = card.get("back_image")
+                    if card_image:
+                        card_image.open("rb")
+                        image_bytes = card_image.read()
+                        card_image.close()
+                        img_reader = ImageReader(io.BytesIO(image_bytes))
+                        img_width, img_height = img_reader.getSize()
+                        if img_width and img_height:
+                            scale = min(image_box_width / img_width, image_box_height / img_height)
+                            draw_width = img_width * scale
+                            draw_height = img_height * scale
+                            draw_x = image_x + ((image_box_width - draw_width) / 2)
+                            draw_y = image_y + ((image_box_height - draw_height) / 2)
+                            pdf.drawImage(
+                                img_reader,
+                                draw_x,
+                                draw_y,
+                                width=draw_width,
+                                height=draw_height,
+                                preserveAspectRatio=True,
+                                mask="auto",
+                            )
+                            image_drawn = True
+                except Exception:
+                    image_drawn = False
 
-                words = text_line.split()
-                if len(words) < 2:
-                    pdf.drawCentredString(x_center, y_pos, text_line)
-                    return
+                if image_drawn:
+                    pdf.saveState()
+                    pdf.setStrokeColorRGB(0.82, 0.82, 0.82)
+                    pdf.roundRect(image_x, image_y, image_box_width, image_box_height, 4, stroke=1, fill=0)
+                    pdf.restoreState()
 
-                word_widths = [pdf.stringWidth(w, font_name, font_size) for w in words]
-                total_word_width = sum(word_widths)
-                gaps = len(words) - 1
-                if gaps <= 0:
-                    pdf.drawCentredString(x_center, y_pos, text_line)
-                    return
+                if explanation_exists:
+                    draw_text_block(
+                        text=explanation_text,
+                        x_left=x_left,
+                        x_center=x_center,
+                        text_width=text_width,
+                        text_top_y=text_top_y,
+                        text_bottom_y=bottom_y + card_padding_y,
+                        font_name=font_name,
+                        font_size=font_size,
+                        line_gap=line_gap,
+                    )
+                elif not image_drawn:
+                    draw_text_block(
+                        text=card.get("back") or "",
+                        x_left=x_left,
+                        x_center=x_center,
+                        text_width=text_width,
+                        text_top_y=text_top_y,
+                        text_bottom_y=text_bottom_y,
+                        font_name=font_name,
+                        font_size=font_size,
+                        line_gap=line_gap,
+                    )
+                return
 
-                remaining = text_width - total_word_width
-                base_space = pdf.stringWidth(" ", font_name, font_size)
-                space_width = remaining / gaps if gaps else base_space
-
-                # Avoid ugly over-stretching on short lines.
-                if space_width <= 0 or space_width > (base_space * 3):
-                    pdf.drawCentredString(x_center, y_pos, text_line)
-                    return
-
-                x_cursor = x_left
-                for idx_word, (word, w_width) in enumerate(zip(words, word_widths)):
-                    pdf.drawString(x_cursor, y_pos, word)
-                    x_cursor += w_width
-                    if idx_word < gaps:
-                        x_cursor += space_width
-
-            for idx_line, line in enumerate(visible_lines):
-                draw_line = line
-                if idx_line == len(visible_lines) - 1 and not fits_without_cut:
-                    if len(draw_line) > 3:
-                        draw_line = draw_line[:-3].rstrip() + "..."
-                    else:
-                        draw_line = "..."
-                is_last_line = idx_line == (len(visible_lines) - 1)
-                draw_justified_line(draw_line, y, is_last_line)
-                y -= line_gap
+            draw_text_block(
+                text=(card.get(side) or ""),
+                x_left=x_left,
+                x_center=x_center,
+                text_width=text_width,
+                text_top_y=text_top_y,
+                text_bottom_y=text_bottom_y,
+                font_name=font_name,
+                font_size=font_size,
+                line_gap=line_gap,
+            )
 
         for i in range(0, len(cards), 2):
             pair = cards[i:i + 2]
@@ -4280,7 +4409,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             for slot_idx, card in enumerate(pair):
                 draw_slot(
                     slot_idx,
-                    card.get("front") or "",
+                    card,
+                    "front",
                     card_number=i + slot_idx + 1,
                 )
             pdf.showPage()
@@ -4293,7 +4423,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 card_number = (i + slot_idx + 1) if duplex_flip == "long_edge" else (i + len(back_pair) - slot_idx)
                 draw_slot(
                     slot_idx,
-                    card.get("back") or "",
+                    card,
+                    "back",
                     card_number=card_number,
                 )
             pdf.showPage()
@@ -4529,7 +4660,10 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     )
     @transaction.atomic
     def add_rich_card(self, request, pk=None):
-        deck = self.get_object()
+        try:
+            deck = Deck.objects.get(pk=pk)
+        except Deck.DoesNotExist:
+            return Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
 
         if deck.owner_id != request.user.id:
             return Response(

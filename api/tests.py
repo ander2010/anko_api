@@ -362,6 +362,26 @@ class RbacAdminPanelTests(APITestCase):
         self.assertEqual(response.data["render_guidance"]["image_fit"], "contain")
         self.assertTrue(response.data["image_constraints"]["auto_optimize_when_needed"])
 
+    def test_download_flashcards_pdf_supports_back_image(self):
+        self.client.force_authenticate(user=self.user_a)
+        card = Flashcard.objects.create(
+            deck=self.deck_a,
+            front="Front with image back",
+            back="Explanation under exported image",
+            back_image=self._make_test_image(width=900, height=700),
+            back_image_original_size_bytes=1,
+            back_image_size_bytes=1,
+            back_image_width=900,
+            back_image_height=700,
+        )
+
+        response = self.client.get(f"/api/decks/{self.deck_a.id}/download-flashcards-pdf/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("attachment;", response["Content-Disposition"])
+        self.assertTrue(len(response.content) > 0)
+
     def test_add_rich_card_rejects_small_image(self):
         self.client.force_authenticate(user=self.user_a)
         image = self._make_test_image(width=200, height=200)

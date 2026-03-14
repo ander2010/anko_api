@@ -910,11 +910,6 @@ class RichFlashcardCreateSerializer(serializers.Serializer):
                 f"Image resolution too small ({width}x{height}). Min {self.MIN_WIDTH}x{self.MIN_HEIGHT}."
             )
 
-        if width > self.MAX_WIDTH or height > self.MAX_HEIGHT:
-            raise serializers.ValidationError(
-                f"Image resolution too large ({width}x{height}). Max {self.MAX_WIDTH}x{self.MAX_HEIGHT}."
-            )
-
         ratio = max(width / height, height / width)
         if ratio > self.MAX_ASPECT_RATIO:
             raise serializers.ValidationError(
