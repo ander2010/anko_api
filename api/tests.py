@@ -299,7 +299,6 @@ class RbacAdminPanelTests(APITestCase):
         existing_keys = {
             "documents/1/4/New_Microsoft_Word_Document.docx",
             "documents/1/4/New_Microsoft_Word_Document.pdf",
-            "documents/1/4/New_Microsoft_Word_Document_original.docx",
         }
         mock_client = Mock()
 
@@ -321,7 +320,6 @@ class RbacAdminPanelTests(APITestCase):
             deleted_keys,
             [
                 "documents/1/4/New_Microsoft_Word_Document.docx",
-                "documents/1/4/New_Microsoft_Word_Document_original.docx",
                 "documents/1/4/New_Microsoft_Word_Document.pdf",
             ],
         )
@@ -342,7 +340,6 @@ class RbacAdminPanelTests(APITestCase):
         existing_keys = {
             "documents/1/1/slides.pptx",
             "documents/1/1/slides.pdf",
-            "documents/1/1/slides_original.pptx",
         }
         mock_client = Mock()
 
@@ -363,7 +360,6 @@ class RbacAdminPanelTests(APITestCase):
             deleted_keys,
             [
                 "documents/1/1/slides.pptx",
-                "documents/1/1/slides_original.pptx",
                 "documents/1/1/slides.pdf",
             ],
         )

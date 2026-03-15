@@ -1518,10 +1518,6 @@ class DocumentViewSet(viewsets.ModelViewSet):
         is_non_pdf_source = original_ext not in {"", ".pdf"} or normalized_type != "PDF"
 
         if is_non_pdf_source and source_stem:
-            if original_ext:
-                candidates.append(
-                    os.path.join(base_dir, f"{source_stem}_original{original_ext}").replace("\\", "/")
-                )
             candidates.append(
                 os.path.join(base_dir, f"{source_stem}.pdf").replace("\\", "/")
             )
