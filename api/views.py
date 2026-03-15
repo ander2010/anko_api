@@ -1406,6 +1406,7 @@ def normalize_base_url(url: str) -> str:
 DOCUMENT_EXTENSION_TYPE_MAP = {
     ".pdf": "PDF",
     ".doc": "DOC",
+    ".docx": "DOCX",
     ".txt": "TXT",
     ".md": "MD",
     ".markdown": "MARKDOWN",
@@ -1418,6 +1419,7 @@ DOCUMENT_MIME_TYPE_MAP = {
     "application/pdf": "PDF",
     "application/x-pdf": "PDF",
     "application/msword": "DOC",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "DOCX",
     "text/plain": "TXT",
     "text/markdown": "MD",
     "text/x-log": "LOG",
@@ -1431,6 +1433,7 @@ SUPPORTED_DOCUMENT_TYPES = {
     "MARKDOWN",
     "LOG",
     "DOC",
+    "DOCX",
     "PPT",
     "PPTX",
     "PDF",
@@ -1438,7 +1441,7 @@ SUPPORTED_DOCUMENT_TYPES = {
 
 
 def supported_document_types_message() -> str:
-    return "Supported document types: txt, md, markdown, log, doc, ppt, pptx, pdf."
+    return "Supported document types: txt, md, markdown, log, doc, docx, ppt, pptx, pdf."
 
 
 def infer_document_type(*, filename: str = "", file_key: str = "", supplied_type: str = "") -> str:

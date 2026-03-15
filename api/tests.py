@@ -198,6 +198,26 @@ class RbacAdminPanelTests(APITestCase):
         self.assertEqual(document.type, "DOC")
         self.assertEqual(response.data["document"]["type"], "DOC")
 
+    def test_project_documents_infers_supported_docx_type_from_uploaded_filename(self):
+        self.client.force_authenticate(user=self.user_a)
+        upload = SimpleUploadedFile(
+            "chapter-notes.docx",
+            b"wordprocessing-bytes",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+        with patch("api.views.ProjectViewSet._process_document_external", return_value=({"success": True}, None)):
+            response = self.client.post(
+                f"/api/projects/{self.project_a.id}/documents/",
+                {"files": [upload]},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        document = Document.objects.get(project=self.project_a, filename="chapter-notes.docx")
+        self.assertEqual(document.type, "DOCX")
+        self.assertEqual(response.data["uploaded"][0]["type"], "DOCX")
+
     def test_document_register_infers_supported_pptx_type_from_filename_over_payload(self):
         self.client.force_authenticate(user=self.user_a)
         fake_response = Mock()
@@ -222,24 +242,29 @@ class RbacAdminPanelTests(APITestCase):
         self.assertEqual(document.type, "PPTX")
         self.assertEqual(response.data["document"]["type"], "PPTX")
 
-    def test_document_register_rejects_unsupported_docx_type(self):
+    def test_document_register_infers_supported_docx_type_from_filename_over_payload(self):
         self.client.force_authenticate(user=self.user_a)
+        fake_response = Mock()
+        fake_response.json.return_value = {"job_id": "job-docx-register"}
 
-        response = self.client.post(
-            "/api/documents/register/",
-            {
-                "project_id": self.project_a.id,
-                "filename": "report.docx",
-                "file_key": "documents/1/1/report.docx",
-                "size": 1234,
-                "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "hash": "hash-docx-unsupported",
-            },
-            format="json",
-        )
+        with patch("api.views._post_with_logging", return_value=fake_response):
+            response = self.client.post(
+                "/api/documents/register/",
+                {
+                    "project_id": self.project_a.id,
+                    "filename": "report.docx",
+                    "file_key": "documents/1/1/report.docx",
+                    "size": 1234,
+                    "type": "PDF",
+                    "hash": "hash-docx-register",
+                },
+                format="json",
+            )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("Supported document types", response.data["detail"])
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        document = Document.objects.get(project=self.project_a, hash="hash-docx-register")
+        self.assertEqual(document.type, "DOCX")
+        self.assertEqual(response.data["document"]["type"], "DOCX")
 
     def test_project_documents_rejects_unsupported_xlsx_type(self):
         self.client.force_authenticate(user=self.user_a)
