@@ -1184,6 +1184,16 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
         with transaction.atomic():
             for f in files:
+                inferred_type = infer_document_type(
+                    filename=getattr(f, "name", "document"),
+                    supplied_type=getattr(f, "content_type", ""),
+                )
+                if not inferred_type:
+                    return Response(
+                        {"detail": supported_document_types_message()},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
                 # ✅ HASH REAL DEL CONTENIDO
                 hasher = hashlib.sha256()
 
@@ -1211,11 +1221,12 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
 
                 if not doc:
+                    document_name = getattr(f, "name", "document")
                     doc = Document(
                     project=project,
                     file=f,
-                    filename=getattr(f, "name", "document"),
-                    type="PDF",
+                    filename=document_name,
+                    type=inferred_type,
                     size=getattr(f, "size", 0) or 0,
                     hash=file_hash,
                 )
@@ -1246,13 +1257,13 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 # ✅ nombre real en storage
                 stored_path = doc.file.name  # ej: "documents/xxxxx.pdf"
 
-                doc=DocumentUploadEvent.objects.create(
-                user=request.user,
-                project=project,
-                status="success",
-                filename=getattr(f, "name", "") or "",
-                document_hash=file_hash,
-            )
+                DocumentUploadEvent.objects.create(
+                    user=request.user,
+                    project=project,
+                    status="success",
+                    filename=getattr(f, "name", "") or "",
+                    document_hash=file_hash,
+                )
 
                 notify_document_uploaded(request.user, doc.filename)
                 notify_document_ready(request.user, doc.filename)
@@ -1392,6 +1403,66 @@ def normalize_base_url(url: str) -> str:
         return url.rstrip("/")
 
 
+DOCUMENT_EXTENSION_TYPE_MAP = {
+    ".pdf": "PDF",
+    ".doc": "DOC",
+    ".txt": "TXT",
+    ".md": "MD",
+    ".markdown": "MARKDOWN",
+    ".log": "LOG",
+    ".ppt": "PPT",
+    ".pptx": "PPTX",
+}
+
+DOCUMENT_MIME_TYPE_MAP = {
+    "application/pdf": "PDF",
+    "application/x-pdf": "PDF",
+    "application/msword": "DOC",
+    "text/plain": "TXT",
+    "text/markdown": "MD",
+    "text/x-log": "LOG",
+    "application/vnd.ms-powerpoint": "PPT",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PPTX",
+}
+
+SUPPORTED_DOCUMENT_TYPES = {
+    "TXT",
+    "MD",
+    "MARKDOWN",
+    "LOG",
+    "DOC",
+    "PPT",
+    "PPTX",
+    "PDF",
+}
+
+
+def supported_document_types_message() -> str:
+    return "Supported document types: txt, md, markdown, log, doc, ppt, pptx, pdf."
+
+
+def infer_document_type(*, filename: str = "", file_key: str = "", supplied_type: str = "") -> str:
+    for candidate in (filename, file_key):
+        ext = os.path.splitext(os.path.basename(candidate or ""))[1].lower()
+        inferred = DOCUMENT_EXTENSION_TYPE_MAP.get(ext)
+        if inferred:
+            return inferred
+
+    normalized_supplied = str(supplied_type or "").strip()
+    if not normalized_supplied:
+        return ""
+
+    inferred_from_mime = DOCUMENT_MIME_TYPE_MAP.get(normalized_supplied.lower())
+    if inferred_from_mime:
+        return inferred_from_mime
+
+    inferred_from_choice = re.sub(r"[^A-Za-z0-9]+", "", normalized_supplied).upper()
+    if inferred_from_choice in SUPPORTED_DOCUMENT_TYPES:
+        return inferred_from_choice
+
+    return ""
+
+
 class DocumentViewSet(viewsets.ModelViewSet):
     queryset = Document.objects.all()
     serializer_class = DocumentSerializer
@@ -1423,7 +1494,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         return client, bucket
 
     @staticmethod
-    def _candidate_storage_keys(raw_key: str, bucket: str) -> list[str]:
+    def _candidate_storage_keys(raw_key: str, bucket: str, filename: str = "", doc_type: str = "") -> list[str]:
         raw_key = (raw_key or "").strip().lstrip("/")
         if not raw_key:
             return []
@@ -1432,6 +1503,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if raw_key.startswith(f"{bucket}/"):
             candidates.append(raw_key[len(bucket) + 1 :])
         candidates.append(raw_key)
+
+        normalized_key = candidates[0] if candidates else raw_key
+        base_dir = os.path.dirname(normalized_key)
+        storage_name = os.path.basename(normalized_key)
+        source_stem, source_ext = os.path.splitext(storage_name)
+
+        filename_ext = os.path.splitext(os.path.basename(filename or ""))[1].lower()
+        original_ext = (source_ext or filename_ext).lower()
+        normalized_type = str(doc_type or "").strip().upper()
+        is_non_pdf_source = original_ext not in {"", ".pdf"} or normalized_type != "PDF"
+
+        if is_non_pdf_source and source_stem:
+            if original_ext:
+                candidates.append(
+                    os.path.join(base_dir, f"{source_stem}_original{original_ext}").replace("\\", "/")
+                )
+            candidates.append(
+                os.path.join(base_dir, f"{source_stem}.pdf").replace("\\", "/")
+            )
 
         # Dedupe preserving order
         deduped = []
@@ -1448,7 +1538,13 @@ class DocumentViewSet(viewsets.ModelViewSet):
             return {"deleted": False, "reason": "empty_file_key"}
 
         client, bucket = self._build_supabase_s3_client()
-        candidates = self._candidate_storage_keys(raw_key, bucket)
+        candidates = self._candidate_storage_keys(
+            raw_key,
+            bucket,
+            filename=getattr(doc, "filename", ""),
+            doc_type=getattr(doc, "type", ""),
+        )
+        deleted_keys: list[str] = []
 
         for key in candidates:
             try:
@@ -1460,20 +1556,27 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 raise
 
             client.delete_object(Bucket=bucket, Key=key)
-            return {"deleted": True, "key": key}
+            deleted_keys.append(key)
 
-        # Fallback: search in likely project/user prefix and match by filename
-        filename = os.path.basename(raw_key)
+        if deleted_keys:
+            return {"deleted": True, "keys": deleted_keys}
+
+        # Fallback: search in likely project/user prefix and match by expected filenames
+        fallback_filenames = {os.path.basename(key) for key in candidates if key}
         user_id = getattr(doc, "uploaded_by_id", None) or getattr(doc.project, "owner_id", None)
-        if filename and user_id:
+        fallback_deleted_keys: list[str] = []
+        if fallback_filenames and user_id:
             prefix = f"documents/{user_id}/"
             paginator = client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
                     key = obj.get("Key", "")
-                    if key and os.path.basename(key) == filename:
+                    if key and os.path.basename(key) in fallback_filenames:
                         client.delete_object(Bucket=bucket, Key=key)
-                        return {"deleted": True, "key": key, "fallback": True}
+                        fallback_deleted_keys.append(key)
+
+        if fallback_deleted_keys:
+            return {"deleted": True, "keys": fallback_deleted_keys, "fallback": True}
 
         return {"deleted": False, "reason": "not_found", "candidates": candidates}
 
@@ -1636,7 +1739,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
         filename = request.data.get("filename")
         file_key = request.data.get("file_key")
         file_size = request.data.get("size")
-        file_type = request.data.get("type", "PDF")
+        file_type = infer_document_type(
+            filename=request.data.get("filename", ""),
+            file_key=request.data.get("file_key", ""),
+            supplied_type=request.data.get("type", ""),
+        )
         file_hash = request.data.get("hash")
 
         if not all([project_id, filename, file_key, file_hash]):
@@ -1644,6 +1751,11 @@ class DocumentViewSet(viewsets.ModelViewSet):
             return Response(
                 {"detail": "Missing required fields (project_id, filename, file_key, hash)"},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+        if not file_type:
+            return Response(
+                {"detail": supported_document_types_message()},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         project = get_object_or_404(Project, id=project_id)

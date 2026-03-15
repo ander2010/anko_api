@@ -1,9 +1,10 @@
 import io
 import shutil
 import tempfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
+from botocore.exceptions import ClientError
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
@@ -14,6 +15,7 @@ from rest_framework.test import APITestCase
 from api.models import (
     Deck,
     DeckShare,
+    Document,
     Flashcard,
     Project,
     Resource,
@@ -135,6 +137,211 @@ class RbacAdminPanelTests(APITestCase):
         ]
         for key in required:
             self.assertTrue(Resource.objects.filter(key=key).exists(), key)
+
+    def test_project_documents_infers_type_from_uploaded_filename(self):
+        self.client.force_authenticate(user=self.user_a)
+        upload = SimpleUploadedFile("study-notes.txt", b"plain text", content_type="text/plain")
+
+        with patch("api.views.ProjectViewSet._process_document_external", return_value=({"success": True}, None)):
+            response = self.client.post(
+                f"/api/projects/{self.project_a.id}/documents/",
+                {"files": [upload]},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        document = Document.objects.get(project=self.project_a, filename="study-notes.txt")
+        self.assertEqual(document.type, "TXT")
+        self.assertEqual(response.data["uploaded"][0]["type"], "TXT")
+
+    def test_project_documents_infers_supported_pptx_type_from_uploaded_filename(self):
+        self.client.force_authenticate(user=self.user_a)
+        upload = SimpleUploadedFile(
+            "deck-slides.pptx",
+            b"presentation-bytes",
+            content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+
+        with patch("api.views.ProjectViewSet._process_document_external", return_value=({"success": True}, None)):
+            response = self.client.post(
+                f"/api/projects/{self.project_a.id}/documents/",
+                {"files": [upload]},
+                format="multipart",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        document = Document.objects.get(project=self.project_a, filename="deck-slides.pptx")
+        self.assertEqual(document.type, "PPTX")
+        self.assertEqual(response.data["uploaded"][0]["type"], "PPTX")
+
+    def test_document_register_infers_supported_doc_type_from_filename_over_payload(self):
+        self.client.force_authenticate(user=self.user_a)
+        fake_response = Mock()
+        fake_response.json.return_value = {"job_id": "job-doc-register"}
+
+        with patch("api.views._post_with_logging", return_value=fake_response):
+            response = self.client.post(
+                "/api/documents/register/",
+                {
+                    "project_id": self.project_a.id,
+                    "filename": "report.doc",
+                    "file_key": "documents/1/1/report.doc",
+                    "size": 1234,
+                    "type": "PDF",
+                    "hash": "hash-doc-register",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        document = Document.objects.get(project=self.project_a, hash="hash-doc-register")
+        self.assertEqual(document.type, "DOC")
+        self.assertEqual(response.data["document"]["type"], "DOC")
+
+    def test_document_register_infers_supported_pptx_type_from_filename_over_payload(self):
+        self.client.force_authenticate(user=self.user_a)
+        fake_response = Mock()
+        fake_response.json.return_value = {"job_id": "job-pptx-register"}
+
+        with patch("api.views._post_with_logging", return_value=fake_response):
+            response = self.client.post(
+                "/api/documents/register/",
+                {
+                    "project_id": self.project_a.id,
+                    "filename": "slides.pptx",
+                    "file_key": "documents/1/1/slides.pptx",
+                    "size": 4321,
+                    "type": "PDF",
+                    "hash": "hash-pptx-register",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        document = Document.objects.get(project=self.project_a, hash="hash-pptx-register")
+        self.assertEqual(document.type, "PPTX")
+        self.assertEqual(response.data["document"]["type"], "PPTX")
+
+    def test_document_register_rejects_unsupported_docx_type(self):
+        self.client.force_authenticate(user=self.user_a)
+
+        response = self.client.post(
+            "/api/documents/register/",
+            {
+                "project_id": self.project_a.id,
+                "filename": "report.docx",
+                "file_key": "documents/1/1/report.docx",
+                "size": 1234,
+                "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "hash": "hash-docx-unsupported",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Supported document types", response.data["detail"])
+
+    def test_project_documents_rejects_unsupported_xlsx_type(self):
+        self.client.force_authenticate(user=self.user_a)
+        upload = SimpleUploadedFile(
+            "financial-model.xlsx",
+            b"spreadsheet-bytes",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        response = self.client.post(
+            f"/api/projects/{self.project_a.id}/documents/",
+            {"files": [upload]},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Supported document types", response.data["detail"])
+
+    def test_document_delete_removes_converted_source_and_pdf_variants(self):
+        self.client.force_authenticate(user=self.user_a)
+        document = Document.objects.create(
+            project=self.project_a,
+            filename="New Microsoft Word Document.docx",
+            type="DOC",
+            size=639640,
+            hash="hash-delete-doc-variants",
+            uploaded_by=self.user_a,
+        )
+        document.file.name = "documents/1/4/New_Microsoft_Word_Document.docx"
+        document.save(update_fields=["file"])
+
+        existing_keys = {
+            "documents/1/4/New_Microsoft_Word_Document.docx",
+            "documents/1/4/New_Microsoft_Word_Document.pdf",
+            "documents/1/4/New_Microsoft_Word_Document_original.docx",
+        }
+        mock_client = Mock()
+
+        def head_object_side_effect(*, Bucket, Key):
+            if Key not in existing_keys:
+                raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+        mock_client.head_object.side_effect = head_object_side_effect
+        mock_client.get_paginator.return_value.paginate.return_value = []
+
+        with patch("api.views.DocumentViewSet._build_supabase_s3_client", return_value=(mock_client, "anko")):
+            response = self.client.delete(f"/api/documents/{document.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Document.objects.filter(id=document.id).exists())
+        deleted_keys = [call.kwargs["Key"] for call in mock_client.delete_object.call_args_list]
+        self.assertEqual(
+            deleted_keys,
+            [
+                "documents/1/4/New_Microsoft_Word_Document.docx",
+                "documents/1/4/New_Microsoft_Word_Document_original.docx",
+                "documents/1/4/New_Microsoft_Word_Document.pdf",
+            ],
+        )
+
+    def test_document_delete_uses_non_pdf_extension_even_if_row_type_is_stale_pdf(self):
+        self.client.force_authenticate(user=self.user_a)
+        document = Document.objects.create(
+            project=self.project_a,
+            filename="slides.pptx",
+            type="PDF",
+            size=4321,
+            hash="hash-delete-pptx-stale-pdf",
+            uploaded_by=self.user_a,
+        )
+        document.file.name = "documents/1/1/slides.pptx"
+        document.save(update_fields=["file"])
+
+        existing_keys = {
+            "documents/1/1/slides.pptx",
+            "documents/1/1/slides.pdf",
+            "documents/1/1/slides_original.pptx",
+        }
+        mock_client = Mock()
+
+        def head_object_side_effect(*, Bucket, Key):
+            if Key not in existing_keys:
+                raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+        mock_client.head_object.side_effect = head_object_side_effect
+        mock_client.get_paginator.return_value.paginate.return_value = []
+
+        with patch("api.views.DocumentViewSet._build_supabase_s3_client", return_value=(mock_client, "anko")):
+            response = self.client.delete(f"/api/documents/{document.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        deleted_keys = [call.kwargs["Key"] for call in mock_client.delete_object.call_args_list]
+        self.assertEqual(
+            deleted_keys,
+            [
+                "documents/1/1/slides.pptx",
+                "documents/1/1/slides_original.pptx",
+                "documents/1/1/slides.pdf",
+            ],
+        )
 
     def test_authenticated_requests_are_globally_throttled(self):
         throttle_rates = {

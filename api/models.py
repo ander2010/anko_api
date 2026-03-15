@@ -289,11 +289,6 @@ class Project(models.Model):
         return self.title
 
 class Document(models.Model):
-    TYPE_CHOICES = [
-        ('PDF', 'PDF'),
-        ('DOCX', 'DOCX'),
-        ('TXT', 'TXT'),
-    ]
     STATUS_CHOICES = [
         ('pending', 'pending'),
         ('processing', 'processing'),
@@ -305,7 +300,7 @@ class Document(models.Model):
     # file = models.FileField(upload_to='documents/')
     file = models.FileField(upload_to=document_upload_to)
 
-    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    type = models.CharField(max_length=20)
     size = models.PositiveIntegerField(help_text="Size in bytes")
     uploaded_at = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
