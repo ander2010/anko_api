@@ -229,6 +229,23 @@ CORS_ALLOWED_ORIGINS = [
     "https://www.ankard.com",
 ]
 
+THROTTLE_CACHE_URL = os.getenv("THROTTLE_CACHE_URL") or os.getenv("REDIS_URL")
+
+if THROTTLE_CACHE_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": THROTTLE_CACHE_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "anko-api-throttle-cache",
+        }
+    }
+
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -243,6 +260,19 @@ REST_FRAMEWORK = {
         'api.renderers.TranslatingJSONRenderer',
         'rest_framework.renderers.BrowsableAPIRenderer',
     ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'api.throttles.BurstAnonRateThrottle',
+        'api.throttles.SustainedAnonRateThrottle',
+        'api.throttles.BurstUserRateThrottle',
+        'api.throttles.SustainedUserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon_burst': os.getenv("DRF_THROTTLE_ANON_BURST", "20/min"),
+        'anon_sustained': os.getenv("DRF_THROTTLE_ANON_SUSTAINED", "200/hour"),
+        'user_burst': os.getenv("DRF_THROTTLE_USER_BURST", "120/min"),
+        'user_sustained': os.getenv("DRF_THROTTLE_USER_SUSTAINED", "2000/hour"),
+    },
+    'NUM_PROXIES': int(os.getenv("DRF_NUM_PROXIES", "0")),
 }
 
 CORS_ALLOWED_ORIGINS = CSRF_TRUSTED_ORIGINS

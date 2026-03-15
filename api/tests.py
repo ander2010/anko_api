@@ -1,8 +1,10 @@
 import io
 import shutil
 import tempfile
+from unittest.mock import patch
 
 from PIL import Image
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.test import override_settings
@@ -17,6 +19,12 @@ from api.models import (
     Resource,
     SavedDeck,
     User,
+)
+from api.throttles import (
+    BurstAnonRateThrottle,
+    BurstUserRateThrottle,
+    SustainedAnonRateThrottle,
+    SustainedUserRateThrottle,
 )
 from api.urls import router
 
@@ -127,6 +135,49 @@ class RbacAdminPanelTests(APITestCase):
         ]
         for key in required:
             self.assertTrue(Resource.objects.filter(key=key).exists(), key)
+
+    def test_authenticated_requests_are_globally_throttled(self):
+        throttle_rates = {
+            "user_burst": "2/min",
+            "user_sustained": "100/hour",
+            "anon_burst": "100/min",
+            "anon_sustained": "100/hour",
+        }
+        with patch.object(BurstUserRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(SustainedUserRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(BurstAnonRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(SustainedAnonRateThrottle, "THROTTLE_RATES", throttle_rates):
+            cache.clear()
+            self.client.force_authenticate(user=self.user_a)
+
+            first = self.client.get("/api/decks/")
+            second = self.client.get("/api/decks/")
+            third = self.client.get("/api/decks/")
+
+            self.assertEqual(first.status_code, status.HTTP_200_OK)
+            self.assertEqual(second.status_code, status.HTTP_200_OK)
+            self.assertEqual(third.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_anonymous_requests_are_globally_throttled(self):
+        throttle_rates = {
+            "anon_burst": "2/min",
+            "anon_sustained": "100/hour",
+            "user_burst": "100/min",
+            "user_sustained": "100/hour",
+        }
+        with patch.object(BurstUserRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(SustainedUserRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(BurstAnonRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(SustainedAnonRateThrottle, "THROTTLE_RATES", throttle_rates):
+            cache.clear()
+
+            first = self.client.get("/api/plans/")
+            second = self.client.get("/api/plans/")
+            third = self.client.get("/api/plans/")
+
+            self.assertEqual(first.status_code, status.HTTP_200_OK)
+            self.assertEqual(second.status_code, status.HTTP_200_OK)
+            self.assertEqual(third.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
     def test_admin_panels_are_registered_in_router(self):
         expected_prefixes = {
