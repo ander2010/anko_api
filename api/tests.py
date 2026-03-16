@@ -485,6 +485,39 @@ class RbacAdminPanelTests(APITestCase):
         self.assertIn(self.card_b.id, ids)
         self.assertIn(self.card_c.id, ids)
 
+    def test_flashcards_list_prioritizes_new_cards_when_older_rows_have_null_created_at(self):
+        self.client.force_authenticate(user=self.user_a)
+
+        Flashcard.objects.filter(id=self.card_a.id).update(created_at=None)
+        for index in range(9):
+            Flashcard.objects.create(
+                deck=self.deck_a,
+                front=f"Legacy {index}",
+                back="Older imported card",
+                created_at=None,
+            )
+
+        image_card = Flashcard.objects.create(
+            deck=self.deck_a,
+            front="Newest rich card",
+            back="Has image",
+            back_image=self._make_test_image(),
+            back_image_original_size_bytes=1,
+            back_image_size_bytes=1,
+            back_image_width=600,
+            back_image_height=600,
+        )
+
+        response = self.client.get(f"/api/flashcards/?deck={self.deck_a.id}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.data["results"] if isinstance(response.data, dict) else response.data
+        ids = [item["id"] for item in payload]
+        self.assertIn(image_card.id, ids)
+        image_payload = next(item for item in payload if item["id"] == image_card.id)
+        self.assertEqual(image_payload["backImageRenderHint"], "image_top_text_bottom")
+        self.assertIsNotNone(image_payload["backImageUrl"])
+
     def test_deck_owner_can_add_rich_card_with_back_image(self):
         self.client.force_authenticate(user=self.user_a)
         image = self._make_test_image()

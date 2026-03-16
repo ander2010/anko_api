@@ -23,7 +23,7 @@ import json
 import hashlib
 import io
 import secrets
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, F, Q, Sum
 import time
 from django.utils import timezone
 from api.utils.cripto import encrypt_user_id
@@ -5629,6 +5629,9 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         # "shuffle_deck_cards",
     }
 
+    def _ordered_flashcards(self, qs):
+        return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
+
 
 
     @action(
@@ -6049,7 +6052,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             # deck.save(update_fields=["synced_job_id", "synced_at"])
 
         # ✅ Ahora devuelve lo que ya existe en api_flashcard para ese deck
-        qs = Flashcard.objects.filter(deck_id=deck_id_int).order_by("-created_at")
+        qs = self._ordered_flashcards(Flashcard.objects.filter(deck_id=deck_id_int))
 
         page = self.paginate_queryset(qs)
         if page is not None:
@@ -6065,8 +6068,8 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         if _is_rbac_admin_user(user):
             deck_id = self.request.query_params.get("deck")
             if deck_id:
-                return base_qs.filter(deck_id=deck_id).order_by("-created_at")
-            return base_qs.order_by("-created_at")
+                return self._ordered_flashcards(base_qs.filter(deck_id=deck_id))
+            return self._ordered_flashcards(base_qs)
 
         deck_id = self.request.query_params.get("deck")
         if not deck_id:
@@ -6107,7 +6110,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 # Re-query después del sync
                 qs = base_qs.filter(deck_id=deck_id)
 
-        return qs.order_by("-created_at")
+        return self._ordered_flashcards(qs)
 
     # def get_queryset(self):
     #     user = self.request.user
