@@ -1,4 +1,5 @@
 import io
+import os
 import shutil
 import tempfile
 from unittest.mock import Mock, patch
@@ -708,6 +709,72 @@ class RbacAdminPanelTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_ws_pull_card_enriches_learning_payload_with_image_metadata(self):
+        self.client.force_authenticate(user=self.user_a)
+        self.deck_a.external_job_id = "job-learn-1"
+        self.deck_a.save(update_fields=["external_job_id"])
+
+        image_card = Flashcard.objects.create(
+            deck=self.deck_a,
+            front="Learn with image",
+            back="Answer",
+            job_id="job-learn-1",
+            card_id="pipeline-card-1",
+            back_image=self._make_test_image(),
+            back_image_original_size_bytes=1234,
+            back_image_size_bytes=987,
+            back_image_width=600,
+            back_image_height=600,
+        )
+
+        with patch("api.views.async_to_sync") as async_to_sync_mock:
+            async_to_sync_mock.return_value = lambda **kwargs: {
+                "message_type": "card",
+                "seq": 4,
+                "card": {
+                    "card_id": "pipeline-card-1",
+                    "front": "Learn with image",
+                    "back": "Answer",
+                },
+            }
+
+            response = self.client.post(
+                "/api/flashcards/ws-pull-card/",
+                {"deck_id": self.deck_a.id},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.data["card"]
+        self.assertEqual(payload["id"], image_card.id)
+        self.assertEqual(payload["back_image_size_bytes"], 987)
+        self.assertEqual(payload["back_image_original_size_bytes"], 1234)
+        self.assertEqual(payload["back_image_width"], 600)
+        self.assertEqual(payload["back_image_height"], 600)
+        self.assertIsNotNone(payload["backImageUrl"])
+
+    def test_admin_delete_flashcard_removes_image_and_empty_folder(self):
+        self.client.force_authenticate(user=self.admin)
+        image_card = Flashcard.objects.create(
+            deck=self.deck_a,
+            front="Delete me",
+            back="Cleanup image",
+            card_id="folder-cleanup-card",
+            back_image=self._make_test_image(),
+        )
+        image_path = image_card.back_image.path
+        folder_path = os.path.dirname(image_path)
+
+        self.assertTrue(os.path.exists(image_path))
+        self.assertTrue(os.path.isdir(folder_path))
+
+        response = self.client.delete(f"/api/admin/flashcards/{image_card.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Flashcard.objects.filter(id=image_card.id).exists())
+        self.assertFalse(os.path.exists(image_path))
+        self.assertFalse(os.path.exists(folder_path))
 
     def test_deck_shares_non_admin_is_scoped(self):
         self.client.force_authenticate(user=self.user_a)

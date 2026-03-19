@@ -5632,6 +5632,64 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
     def _ordered_flashcards(self, qs):
         return qs.order_by(F("created_at").desc(nulls_last=True), "-id")
 
+    def _find_local_flashcard_for_learning(self, *, deck, job_id: str, payload: dict):
+        if not deck or not isinstance(payload, dict):
+            return None
+
+        base_qs = Flashcard.objects.filter(deck_id=deck.id)
+        if job_id:
+            base_qs = base_qs.filter(job_id=str(job_id))
+
+        external_card_id = payload.get("card_id") or payload.get("cardId")
+        if external_card_id not in (None, ""):
+            card = base_qs.filter(card_id=str(external_card_id)).first()
+            if card:
+                return card
+
+        local_id = payload.get("id")
+        if local_id not in (None, ""):
+            try:
+                return base_qs.filter(id=int(local_id)).first()
+            except (TypeError, ValueError):
+                pass
+
+        front = (payload.get("front") or "").strip()
+        back = (payload.get("back") or "").strip()
+        if front:
+            fallback_qs = base_qs.filter(front=front)
+            if back:
+                fallback_qs = fallback_qs.filter(back=back)
+            return fallback_qs.order_by("-id").first()
+
+        return None
+
+    def _enrich_learning_card_payload(self, *, deck, job_id: str, payload, request):
+        if not isinstance(payload, dict):
+            return payload
+
+        local_card = self._find_local_flashcard_for_learning(deck=deck, job_id=job_id, payload=payload)
+        if not local_card:
+            return payload
+
+        serialized = FlashcardSerializer(local_card, context={"request": request}).data
+        return {
+            **payload,
+            "id": payload.get("id", serialized.get("id")),
+            "deck": serialized.get("deck"),
+            "deckId": serialized.get("deckId"),
+            "notes": serialized.get("notes"),
+            "back_image": serialized.get("back_image"),
+            "backImageUrl": serialized.get("backImageUrl"),
+            "back_image_original_size_bytes": serialized.get("back_image_original_size_bytes"),
+            "back_image_size_bytes": serialized.get("back_image_size_bytes"),
+            "back_image_was_optimized": serialized.get("back_image_was_optimized"),
+            "back_image_width": serialized.get("back_image_width"),
+            "back_image_height": serialized.get("back_image_height"),
+            "backImageWarnings": serialized.get("backImageWarnings"),
+            "backImageRenderHint": serialized.get("backImageRenderHint"),
+            "created_at": serialized.get("created_at"),
+        }
+
 
 
     @action(
@@ -5788,12 +5846,18 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
         mt = msg.get("message_type")
         if mt == "card":
+            card_payload = self._enrich_learning_card_payload(
+                deck=deck,
+                job_id=str(job_id),
+                payload=msg.get("card"),
+                request=request,
+            )
             return Response(
                 {
                     "message_type": "card",
                     "job_id": str(job_id),
                     "seq": msg.get("seq"),
-                    "card": msg.get("card"),
+                    "card": card_payload,
                 },
                 status=status.HTTP_200_OK,
             )
