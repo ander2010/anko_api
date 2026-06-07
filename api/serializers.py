@@ -1127,9 +1127,10 @@ class FrontendPasswordResetSerializer(PasswordResetSerializer):
 
     def get_email_options(self):
         """Override this method to change default e-mail options"""
+        from allauth.account.utils import user_pk_to_url_str
         def url_generator(request, user, temp_key):
-            uid = user.pk  
-            frontend = settings.FRONTEND_URL or  "https://ankard.com"
+            uid = user_pk_to_url_str(user)
+            frontend = settings.FRONTEND_URL or "https://ankard.com"
             return f"{frontend}/reset-password/{uid}/{temp_key}"
         
         return {"url_generator":url_generator}
