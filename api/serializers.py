@@ -39,6 +39,7 @@ def _validate_password_complexity(value):
 class UserSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(required=True)
     last_name = serializers.CharField(required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True, required=False)
     roles = serializers.PrimaryKeyRelatedField(
         queryset=Role.objects.all(),
         many=True,
@@ -47,7 +48,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'avatar', 'first_name', 'last_name','is_active', 'is_staff', 'roles']
+        fields = ['id', 'username', 'email', 'password', 'avatar', 'first_name', 'last_name','is_active', 'is_staff', 'roles']
         read_only_fields = ["id"]
 
     def to_representation(self, instance):
