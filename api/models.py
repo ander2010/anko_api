@@ -252,30 +252,33 @@ def document_upload_to(instance, filename):
     """
     Build the upload path for a document file.
 
-    The final storage path will be:
-        documents/{user_id}/{project_id}/{original_filename}
+    Process-first storage shape:
+        documents/{user_id}/{scope_id}/{original_filename}
 
-    The global storage configuration (e.g. AWS_LOCATION="anko")
-    will automatically prefix this path.
+    `scope_id` prefers the generic `collection_id`. If the document still
+    comes from a legacy business flow, fall back to `project_id`.
     """
 
     # Prefer the uploader user if it was set by the view/serializer
     user_id = getattr(instance, "_uploader_id", None)
 
-    # Fallback to project owner if uploader is not provided
+    # Fallback to collection owner, then project owner, if uploader is not provided.
+    if not user_id and getattr(instance, "collection_id", None):
+        user_id = getattr(instance.collection, "owner_id", None)
     if not user_id and instance.project_id:
         user_id = instance.project.owner_id
 
-    project_id = instance.project_id
+    scope_id = getattr(instance, "collection_id", None) or instance.project_id or "unscoped"
 
     safe_filename = os.path.basename(filename)
-    # unique_filename = f"{uuid.uuid4()}_{safe_filename}"
     unique_filename = f"{safe_filename}"
 
-    return f"documents/{user_id}/{project_id}/{unique_filename}"
+    return f"documents/{user_id}/{scope_id}/{unique_filename}"
 
 
 class Project(models.Model):
+    # Legacy business container kept for ownership/admin UX.
+    # New processing flows should anchor on `Collection`, not `Project`.
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='owned_projects')
@@ -288,14 +291,104 @@ class Project(models.Model):
     def __str__(self):
         return self.title
 
+
+class Collection(models.Model):
+    # Canonical process container.
+    # New document/assessment/flashcard pipelines should start from Collection.
+    KIND_CHOICES = [
+        ("general", "General"),
+        ("study", "Study"),
+        ("enterprise", "Enterprise"),
+        ("batch", "Batch"),
+    ]
+
+    name = models.CharField(max_length=255)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="collections",
+    )
+    kind = models.CharField(max_length=50, choices=KIND_CHOICES, default="general")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return self.name
+
+
+class TagGroup(models.Model):
+    # Canonical grouping entity for generation flows.
+    # Replaces Topic as the process-time unit for "group tags into X and generate outputs".
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("archived", "Archived"),
+    ]
+
+    collection = models.ForeignKey(
+        Collection,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="tag_groups",
+    )
+    name = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return self.name
+
+
+class TagGroupItem(models.Model):
+    tag_group = models.ForeignKey(TagGroup, on_delete=models.CASCADE, related_name="items")
+    value = models.CharField(max_length=255)
+    order = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["order", "id"]
+        unique_together = ("tag_group", "value")
+
+    def __str__(self):
+        return f"{self.tag_group_id}:{self.value}"
+
+
 class Document(models.Model):
+    # Canonical source asset for processing.
+    # `collection` is the primary process container.
+    # `project` is legacy and should not be required by new flows.
     STATUS_CHOICES = [
         ('pending', 'pending'),
         ('processing', 'processing'),
         ('ready', 'ready'),
         ('failed', 'failed'),
     ]
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='documents')
+    project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='documents',
+    )
+    collection = models.ForeignKey(
+        Collection,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="documents",
+    )
     filename = models.CharField(max_length=255)
     # file = models.FileField(upload_to='documents/')
     file = models.FileField(upload_to=document_upload_to)
@@ -319,12 +412,14 @@ class Document(models.Model):
         return self.filename
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["project", "hash"], name="uniq_document_project_hash")
+            models.UniqueConstraint(fields=["collection", "hash"], name="uniq_document_collection_hash")
         ]
    
 
 
 class Section(models.Model):
+    # Processed/extracted unit of a document.
+    # Batteries and decks should prefer linking to Section or TagGroup, not Topic.
     id = models.BigAutoField(primary_key=True)
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='sections')
     job_id = models.TextField(null=True, blank=True, db_index=True)
@@ -339,11 +434,19 @@ class Section(models.Model):
 
 
 class Topic(models.Model):
+    # Legacy presentation/grouping model.
+    # Keep for existing UX, but new generation flows should use TagGroup instead.
     STATUS_CHOICES = [
         ('active', 'active'),
         ('archived', 'archived'),
     ]
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='topics')
+    project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='topics',
+    )
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
@@ -361,6 +464,8 @@ class Topic(models.Model):
         ordering = ["-id"]
 
 class Rule(models.Model):
+    # Legacy quiz policy model.
+    # New reusable generation flows should use GenerationProfile instead.
     STRATEGY_CHOICES = [
         ('singleChoice', 'singleChoice'),
         ('multiSelect', 'multiSelect'),
@@ -372,7 +477,13 @@ class Rule(models.Model):
         ('Medium', 'Medium'),
         ('Hard', 'Hard'),
     ]
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='rules')
+    project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='rules',
+    )
     name = models.CharField(max_length=255)
     topic_scope = models.ForeignKey(Topic, null=True, blank=True, on_delete=models.SET_NULL, help_text="If null, applies globally to project")
     global_count = models.PositiveIntegerField(default=10)
@@ -386,7 +497,39 @@ class Rule(models.Model):
     class Meta:
         ordering = [ "-id"]
 
+
+class GenerationProfile(models.Model):
+    # Canonical reusable generation policy.
+    # Store assessment/flashcard settings in `config` instead of hardcoding Rule semantics.
+    PROFILE_TYPE_CHOICES = [
+        ("assessment", "Assessment"),
+        ("flashcards", "Flashcards"),
+        ("generic", "Generic"),
+    ]
+
+    collection = models.ForeignKey(
+        Collection,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="generation_profiles",
+    )
+    name = models.CharField(max_length=255)
+    profile_type = models.CharField(max_length=50, choices=PROFILE_TYPE_CHOICES, default="assessment")
+    config = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return self.name
+
+
 class Battery(models.Model):
+    # Canonical generated assessment output.
+    # New flows should attach it to Collection + source links, not require Project/Rule.
     VISIBILITY_CHOICES = [
         ("private", "Private"),
         ("shared", "Shared"),
@@ -401,14 +544,35 @@ class Battery(models.Model):
         ('Medium', 'Medium'),
         ('Hard', 'Hard'),
     ]
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='batteries')
+    project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='batteries',
+    )
+    collection = models.ForeignKey(
+        Collection,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="batteries",
+    )
     rule = models.ForeignKey(Rule, null=True, blank=True, on_delete=models.SET_NULL)
+    generation_profile = models.ForeignKey(
+        GenerationProfile,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="batteries",
+    )
     name = models.CharField(max_length=255)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     created_at = models.DateTimeField(auto_now_add=True)
     difficulty = models.CharField(max_length=10, choices=DIFFICULTY_CHOICES)
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default="private")
     description = models.TextField(blank=True, default="")
+    config = models.JSONField(default=dict, blank=True)
     sections = models.ManyToManyField(
         "Section",
         related_name="batteries",
@@ -596,6 +760,8 @@ class Invite(models.Model):
     #     return f"{self.title} ({self.owner})"
 
 class Deck(models.Model):
+    # Canonical generated flashcard container.
+    # New flows should attach it to Collection + source links.
     VISIBILITY = [
         ("private", "Private"),
         ("shared", "Shared"),
@@ -604,9 +770,16 @@ class Deck(models.Model):
 
     project = models.ForeignKey(
         Project,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         related_name="decks",
         null=True, blank=True
+    )
+    collection = models.ForeignKey(
+        Collection,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="decks",
     )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -632,10 +805,78 @@ class Deck(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     topic = models.ForeignKey(Topic, on_delete=models.SET_NULL, null=True, blank=True)
+    config = models.JSONField(default=dict, blank=True)
     # ✅ Job externo asociado (último o actual)
     external_job_id = models.CharField(max_length=64, blank=True, null=True, db_index=True)
     def __str__(self):
         return f"{self.title} ({self.owner})"
+
+
+class BatterySourceDocument(models.Model):
+    # Explicit source links remove the need for a single parent Project/Rule dependency.
+    battery = models.ForeignKey(Battery, on_delete=models.CASCADE, related_name="source_documents")
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="battery_sources")
+    role = models.CharField(max_length=50, default="input")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("battery", "document", "role")
+
+
+class BatterySourceSection(models.Model):
+    battery = models.ForeignKey(Battery, on_delete=models.CASCADE, related_name="source_sections")
+    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="battery_sources")
+    role = models.CharField(max_length=50, default="input")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("battery", "section", "role")
+
+
+class BatterySourceTagGroup(models.Model):
+    battery = models.ForeignKey(Battery, on_delete=models.CASCADE, related_name="source_tag_groups")
+    tag_group = models.ForeignKey(TagGroup, on_delete=models.CASCADE, related_name="battery_sources")
+    role = models.CharField(max_length=50, default="input")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("battery", "tag_group", "role")
+
+
+class DeckSourceDocument(models.Model):
+    deck = models.ForeignKey(Deck, on_delete=models.CASCADE, related_name="source_documents")
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="deck_sources")
+    role = models.CharField(max_length=50, default="input")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("deck", "document", "role")
+
+
+class DeckSourceSection(models.Model):
+    deck = models.ForeignKey(Deck, on_delete=models.CASCADE, related_name="source_sections")
+    section = models.ForeignKey(Section, on_delete=models.CASCADE, related_name="deck_sources")
+    role = models.CharField(max_length=50, default="input")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("deck", "section", "role")
+
+
+class DeckSourceTagGroup(models.Model):
+    deck = models.ForeignKey(Deck, on_delete=models.CASCADE, related_name="source_tag_groups")
+    tag_group = models.ForeignKey(TagGroup, on_delete=models.CASCADE, related_name="deck_sources")
+    role = models.CharField(max_length=50, default="input")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("deck", "tag_group", "role")
 
 class Flashcard(models.Model):
     card_id = models.CharField(max_length=255,  null=True)  # pipeline PK
@@ -965,6 +1206,282 @@ class SummaryJob(models.Model):
                 name="uix_summary_job_type",
             )
         ]
+
+
+class ProcessRun(models.Model):
+    # Canonical workflow/run record for any async or multi-step process.
+    # This is intentionally generic: it references business resources by
+    # resource_type/resource_id instead of hard foreign keys to Battery/Deck/etc.
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Running"
+        PAUSED = "paused", "Paused"
+        WAITING = "waiting", "Waiting"
+        BLOCKED = "blocked", "Blocked"
+        COMPLETED = "completed", "Completed"
+        COMPLETED_WITH_ERRORS = "completed_with_errors", "Completed with errors"
+        FAILED = "failed", "Failed"
+        CANCELED = "canceled", "Canceled"
+
+    class TriggerMode(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        EVENT = "event", "Event"
+        SCHEDULE = "schedule", "Schedule"
+        RETRY = "retry", "Retry"
+        SYSTEM = "system", "System"
+
+    class ControlState(models.TextChoices):
+        ACTIVE = "active", "Active"
+        PAUSE_REQUESTED = "pause_requested", "Pause requested"
+        CANCELED = "canceled", "Canceled"
+
+    id = models.BigAutoField(primary_key=True)
+    run_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, db_index=True)
+    workflow_key = models.CharField(max_length=120, db_index=True)
+    workflow_version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    trigger_mode = models.CharField(max_length=20, choices=TriggerMode.choices, default=TriggerMode.MANUAL)
+    initiated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="process_runs",
+    )
+
+    # Business scope of the run, e.g. collection/tenant/company.
+    scope_type = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    scope_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+
+    # Primary business resource this run is attached to, e.g. battery/deck/document.
+    resource_type = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    resource_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+
+    # External worker/job reference, e.g. Hope/Celery job id.
+    job_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    current_step_key = models.CharField(max_length=120, blank=True, default="")
+    # current_stage is the workflow-facing label shown to Django/frontend progress views.
+    current_stage = models.CharField(max_length=120, blank=True, default="")
+    priority = models.PositiveSmallIntegerField(default=100)
+    retry_count = models.PositiveIntegerField(default=0)
+    # progress_percent is normalized workflow progress, not raw worker progress.
+    progress_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    status_message = models.CharField(max_length=255, blank=True, default="")
+    control_state = models.CharField(
+        max_length=20,
+        choices=ControlState.choices,
+        default=ControlState.ACTIVE,
+        db_index=True,
+    )
+
+    input_payload = models.JSONField(default=dict, blank=True)
+    context_payload = models.JSONField(default=dict, blank=True)
+    result_payload = models.JSONField(default=dict, blank=True)
+    error_payload = models.JSONField(default=dict, blank=True)
+
+    last_progress_at = models.DateTimeField(null=True, blank=True)
+    pause_requested_at = models.DateTimeField(null=True, blank=True)
+    paused_at = models.DateTimeField(null=True, blank=True)
+    resumed_at = models.DateTimeField(null=True, blank=True)
+    pause_reason = models.CharField(max_length=255, blank=True, default="")
+    cancel_requested_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    canceled_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "process_runs"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workflow_key", "status"]),
+            models.Index(fields=["resource_type", "resource_id"]),
+            models.Index(fields=["scope_type", "scope_id"]),
+            models.Index(fields=["job_id"]),
+            models.Index(fields=["idempotency_key"]),
+        ]
+
+    def __str__(self):
+        return f"{self.workflow_key}:{self.run_id}"
+
+
+class ProcessStepRun(models.Model):
+    # Concrete execution record for a single step inside a process run.
+    # item_key allows fan-out/fan-in steps to create multiple siblings with the
+    # same step_key without losing deterministic uniqueness.
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Running"
+        PAUSED = "paused", "Paused"
+        WAITING = "waiting", "Waiting"
+        BLOCKED = "blocked", "Blocked"
+        COMPLETED = "completed", "Completed"
+        COMPLETED_WITH_ERRORS = "completed_with_errors", "Completed with errors"
+        FAILED = "failed", "Failed"
+        SKIPPED = "skipped", "Skipped"
+        CANCELED = "canceled", "Canceled"
+
+    class ExecutionMode(models.TextChoices):
+        SYNC = "sync", "Sync"
+        ASYNC = "async", "Async"
+        BATCH = "batch", "Batch"
+        FANOUT = "fanout", "Fan-out"
+        JOIN = "join", "Join"
+
+    class ControlState(models.TextChoices):
+        ACTIVE = "active", "Active"
+        PAUSE_REQUESTED = "pause_requested", "Pause requested"
+        CANCELED = "canceled", "Canceled"
+
+    id = models.BigAutoField(primary_key=True)
+    run = models.ForeignKey(ProcessRun, on_delete=models.CASCADE, related_name="steps")
+    step_key = models.CharField(max_length=120, db_index=True)
+    item_key = models.CharField(max_length=120, blank=True, default="")
+    step_type = models.CharField(max_length=80, blank=True, default="")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING, db_index=True)
+    execution_mode = models.CharField(max_length=20, choices=ExecutionMode.choices, default=ExecutionMode.ASYNC)
+    sequence = models.PositiveIntegerField(default=0)
+    priority = models.PositiveSmallIntegerField(default=100)
+    attempt_count = models.PositiveIntegerField(default=0)
+    external_job_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    # worker_step captures the Hope/Celery sub-step label, e.g. OCR/embedding/generation.
+    worker_step = models.CharField(max_length=120, blank=True, default="")
+    progress_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    status_message = models.CharField(max_length=255, blank=True, default="")
+    control_state = models.CharField(
+        max_length=20,
+        choices=ControlState.choices,
+        default=ControlState.ACTIVE,
+        db_index=True,
+    )
+    # weight lets the workflow runtime compute overall progress without hard-coded math.
+    weight = models.PositiveIntegerField(default=1)
+
+    input_payload = models.JSONField(default=dict, blank=True)
+    result_payload = models.JSONField(default=dict, blank=True)
+    error_payload = models.JSONField(default=dict, blank=True)
+    runtime_metrics = models.JSONField(default=dict, blank=True)
+    # checkpoint_payload is the restart contract for checkpoint + cancel + restart control flow.
+    checkpoint_payload = models.JSONField(default=dict, blank=True)
+    checkpoint_version = models.PositiveIntegerField(default=0)
+
+    available_at = models.DateTimeField(null=True, blank=True)
+    last_progress_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    pause_requested_at = models.DateTimeField(null=True, blank=True)
+    paused_at = models.DateTimeField(null=True, blank=True)
+    cancel_requested_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    canceled_at = models.DateTimeField(null=True, blank=True)
+    locked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "process_step_runs"
+        ordering = ["sequence", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["run", "step_key", "item_key"], name="uniq_process_step_run_key"),
+        ]
+        indexes = [
+            models.Index(fields=["run", "status"]),
+            models.Index(fields=["step_key", "status"]),
+            models.Index(fields=["external_job_id"]),
+            models.Index(fields=["idempotency_key"]),
+        ]
+
+    def __str__(self):
+        suffix = f":{self.item_key}" if self.item_key else ""
+        return f"{self.run_id}:{self.step_key}{suffix}"
+
+
+class ProcessStepDependency(models.Model):
+    # Explicit dependency edges make workflow ordering data-driven instead of
+    # hard-coded in service methods.
+    class DependencyKind(models.TextChoices):
+        REQUIRES = "requires", "Requires"
+        SOFT_REQUIRES = "soft_requires", "Soft requires"
+        BLOCKS = "blocks", "Blocks"
+        JOINS = "joins", "Joins"
+
+    id = models.BigAutoField(primary_key=True)
+    step = models.ForeignKey(ProcessStepRun, on_delete=models.CASCADE, related_name="dependencies")
+    depends_on = models.ForeignKey(ProcessStepRun, on_delete=models.CASCADE, related_name="dependents")
+    dependency_kind = models.CharField(max_length=20, choices=DependencyKind.choices, default=DependencyKind.REQUIRES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "process_step_dependencies"
+        constraints = [
+            models.UniqueConstraint(fields=["step", "depends_on", "dependency_kind"], name="uniq_process_step_dependency"),
+        ]
+        indexes = [
+            models.Index(fields=["step", "dependency_kind"]),
+            models.Index(fields=["depends_on", "dependency_kind"]),
+        ]
+
+    def __str__(self):
+        return f"{self.step_id}->{self.depends_on_id}:{self.dependency_kind}"
+
+
+class ProcessArtifact(models.Model):
+    # Normalized output/input reference emitted by a process step.
+    # Use this to connect workflow progression to real artifacts such as
+    # documents, tag groups, batteries, decks, summaries, etc.
+    class Role(models.TextChoices):
+        INPUT = "input", "Input"
+        INTERMEDIATE = "intermediate", "Intermediate"
+        OUTPUT = "output", "Output"
+        REFERENCE = "reference", "Reference"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        SUPERSEDED = "superseded", "Superseded"
+        DELETED = "deleted", "Deleted"
+
+    id = models.BigAutoField(primary_key=True)
+    run = models.ForeignKey(ProcessRun, on_delete=models.CASCADE, related_name="artifacts")
+    step = models.ForeignKey(
+        ProcessStepRun,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="artifacts",
+    )
+    artifact_key = models.CharField(max_length=120)
+    artifact_type = models.CharField(max_length=80, db_index=True)
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.OUTPUT)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE, db_index=True)
+
+    resource_type = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    resource_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    fingerprint = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    produced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "process_artifacts"
+        constraints = [
+            models.UniqueConstraint(fields=["run", "artifact_key"], name="uniq_process_artifact_key"),
+        ]
+        indexes = [
+            models.Index(fields=["artifact_type", "status"]),
+            models.Index(fields=["resource_type", "resource_id"]),
+            models.Index(fields=["fingerprint"]),
+        ]
+
+    def __str__(self):
+        return f"{self.artifact_type}:{self.artifact_key}"
 
 class UserSession(models.Model):
     session_id = models.CharField(max_length=255, unique=True,null=True)

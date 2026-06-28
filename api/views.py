@@ -51,14 +51,16 @@ from collections import defaultdict
 from django.contrib.auth import authenticate, login
 
 from api.services.translate import post_translate
-from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery,BatteryOption,BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, UserSession, PdfDecryptionKey
+from api.services.workflow_progress import publish_run_event, recompute_run_progress, update_step_progress
+from api.services.workflow_progress_consumer import enqueue_progress_consumer
+from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion, BatteryAttempt, BatteryAttemptAnswer, UserSession, PdfDecryptionKey, Collection, TagGroup, BatterySourceDocument, BatterySourceSection, BatterySourceTagGroup, ProcessRun, ProcessStepRun, ProcessStepDependency, ProcessArtifact
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
     AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SummaryJobSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
-    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer, BatteryListSerializer, BatteryOptionSerializer, BatteryQuestionSerializer, BatteryAttemptSerializer, DocumentListSerializer
+    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer, BatteryListSerializer, BatteryOptionSerializer, BatteryQuestionSerializer, BatteryAttemptSerializer, DocumentListSerializer, ProcessRunListSerializer, ProcessRunDetailSerializer, ProcessStepRunSerializer, ProcessArtifactSerializer
 )
 from urllib.parse import quote, urlencode
 from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
@@ -100,6 +102,20 @@ from api.services.progressfc_ws import ws_get_latest_progress  # ajusta import
 from api.utils.logging import get_logger
 SECRET_TOKEN = "andelef"
 logger = get_logger(__name__)
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", SECRET_TOKEN)
+
+
+def _get_internal_service_token() -> str:
+    return INTERNAL_SERVICE_TOKEN
+
+
+def _validate_internal_service_token(request) -> bool:
+    token = (
+        request.headers.get("X-Internal-Token")
+        or request.query_params.get("token")
+        or request.data.get("token")
+    )
+    return bool(token) and token == _get_internal_service_token()
 
 
 def _generate_pdf_owner_password() -> str:
@@ -543,6 +559,13 @@ def _build_chat_ws_url(base_url: str, session_id: str) -> str:
     base_url = _normalize_base_url(base_url)
     ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
     return f"{ws_base}/ws/chat/{session_id}"
+
+
+def _build_internal_callback_url(request, path: str) -> str:
+    internal_base_url = os.getenv("INTERNAL_API_BASE_URL", "").strip()
+    if internal_base_url:
+        return f"{_normalize_base_url(internal_base_url)}{path}"
+    return request.build_absolute_uri(path)
 
 
 async def _receive_final(ws: websockets.WebSocketClientProtocol) -> Dict[str, Any]:
@@ -2682,6 +2705,290 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         return Response(ser.data)
 
 
+    @staticmethod
+    def _coerce_int_list(values) -> list[int]:
+        cleaned: list[int] = []
+        seen: set[int] = set()
+        for raw in values or []:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            cleaned.append(value)
+        return cleaned
+
+    @staticmethod
+    def _battery_workflow_key() -> str:
+        return "battery_generation"
+
+    @staticmethod
+    def _battery_step_keys() -> dict[str, str]:
+        return {
+            "prepare": "prepare_sources",
+            "generate": "generate_questions",
+            "finalize": "finalize_battery",
+        }
+
+    @staticmethod
+    def _battery_scope_ref(*, battery) -> tuple[str, str]:
+        if getattr(battery, "collection_id", None):
+            return "collection", str(battery.collection_id)
+        if getattr(battery, "project_id", None):
+            return "project", str(battery.project_id)
+        return "battery", str(battery.id)
+
+    @staticmethod
+    def _get_battery_process_run(*, battery, job_id: str = ""):
+        qs = ProcessRun.objects.filter(
+            workflow_key=BatteryViewSet._battery_workflow_key(),
+            resource_type="battery",
+            resource_id=str(battery.id),
+        )
+        job_id = str(job_id or "").strip()
+        if job_id:
+            run = qs.filter(job_id=job_id).order_by("-created_at", "-id").first()
+            if run:
+                return run
+        return qs.order_by("-created_at", "-id").first()
+
+    @staticmethod
+    @transaction.atomic
+    def _sync_battery_process_artifacts(*, run, battery, source_bundle: dict | None, result: dict | None = None) -> None:
+        source_bundle = source_bundle or {}
+        result = result or {}
+
+        ProcessArtifact.objects.filter(run=run, role=ProcessArtifact.Role.INPUT).delete()
+
+        artifacts: list[ProcessArtifact] = []
+        for document_id in BatteryViewSet._coerce_int_list(source_bundle.get("document_ids")):
+            artifacts.append(
+                ProcessArtifact(
+                    run=run,
+                    artifact_key=f"document:{document_id}",
+                    artifact_type="document",
+                    role=ProcessArtifact.Role.INPUT,
+                    resource_type="document",
+                    resource_id=str(document_id),
+                    payload={"document_id": document_id},
+                )
+            )
+        for section_id in BatteryViewSet._coerce_int_list(source_bundle.get("section_ids")):
+            artifacts.append(
+                ProcessArtifact(
+                    run=run,
+                    artifact_key=f"section:{section_id}",
+                    artifact_type="section",
+                    role=ProcessArtifact.Role.INPUT,
+                    resource_type="section",
+                    resource_id=str(section_id),
+                    payload={"section_id": section_id},
+                )
+            )
+        for tag_group_id in BatteryViewSet._coerce_int_list(source_bundle.get("tag_group_ids")):
+            artifacts.append(
+                ProcessArtifact(
+                    run=run,
+                    artifact_key=f"tag_group:{tag_group_id}",
+                    artifact_type="tag_group",
+                    role=ProcessArtifact.Role.INPUT,
+                    resource_type="tag_group",
+                    resource_id=str(tag_group_id),
+                    payload={"tag_group_id": tag_group_id},
+                )
+            )
+        if artifacts:
+            ProcessArtifact.objects.bulk_create(artifacts)
+
+        output_payload = {
+            "battery_id": battery.id,
+            "job_id": run.job_id,
+            "question_count": int(result.get("questions_created", 0) or 0),
+            "option_count": int(result.get("options_created", 0) or 0),
+            "qa_pairs_found": int(result.get("qa_pairs_found", 0) or 0),
+            "status": battery.status,
+        }
+        ProcessArtifact.objects.update_or_create(
+            run=run,
+            artifact_key=f"battery:{battery.id}",
+            defaults={
+                "step": run.steps.filter(step_key=BatteryViewSet._battery_step_keys()["finalize"]).order_by("-id").first(),
+                "artifact_type": "battery",
+                "role": ProcessArtifact.Role.OUTPUT,
+                "status": ProcessArtifact.Status.ACTIVE,
+                "resource_type": "battery",
+                "resource_id": str(battery.id),
+                "payload": output_payload,
+                "metadata": {
+                    "battery_name": battery.name,
+                    "difficulty": battery.difficulty,
+                },
+                "produced_at": timezone.now() if battery.status == "Ready" else None,
+            },
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def _create_battery_process_run(*, battery, initiated_by, request_payload: dict, source_bundle: dict, planned_job_id: str):
+        scope_type, scope_id = BatteryViewSet._battery_scope_ref(battery=battery)
+        step_keys = BatteryViewSet._battery_step_keys()
+        now = timezone.now()
+        run = ProcessRun.objects.create(
+            workflow_key=BatteryViewSet._battery_workflow_key(),
+            workflow_version=1,
+            status=ProcessRun.Status.QUEUED,
+            trigger_mode=ProcessRun.TriggerMode.MANUAL,
+            initiated_by=initiated_by if getattr(initiated_by, "is_authenticated", False) else None,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            resource_type="battery",
+            resource_id=str(battery.id),
+            job_id=str(planned_job_id or ""),
+            idempotency_key=f"battery-generate:{battery.id}:{planned_job_id}",
+            current_step_key=step_keys["generate"],
+            current_stage=step_keys["generate"],
+            status_message="Queued for generation",
+            input_payload=request_payload,
+            context_payload={"source_bundle": source_bundle, "battery_id": battery.id},
+            started_at=now,
+        )
+        prepare_step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=step_keys["prepare"],
+            step_type="source_prepare",
+            status=ProcessStepRun.Status.COMPLETED,
+            execution_mode=ProcessStepRun.ExecutionMode.SYNC,
+            sequence=10,
+            weight=10,
+            progress_percent=100,
+            status_message="Sources prepared",
+            input_payload={"source_bundle": source_bundle},
+            result_payload={"battery_id": battery.id},
+            started_at=now,
+            finished_at=now,
+        )
+        generate_step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=step_keys["generate"],
+            step_type="hope_battery_generation",
+            status=ProcessStepRun.Status.QUEUED,
+            execution_mode=ProcessStepRun.ExecutionMode.ASYNC,
+            sequence=20,
+            weight=80,
+            status_message="Queued for generation",
+            external_job_id=str(planned_job_id or ""),
+            idempotency_key=f"battery-generate-step:{battery.id}:{planned_job_id}",
+            input_payload=request_payload,
+            available_at=now,
+        )
+        finalize_step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=step_keys["finalize"],
+            step_type="battery_finalize",
+            status=ProcessStepRun.Status.PENDING,
+            execution_mode=ProcessStepRun.ExecutionMode.SYNC,
+            sequence=30,
+            weight=10,
+            input_payload={"battery_id": battery.id},
+        )
+        ProcessStepDependency.objects.bulk_create(
+            [
+                ProcessStepDependency(step=generate_step, depends_on=prepare_step),
+                ProcessStepDependency(step=finalize_step, depends_on=generate_step),
+            ]
+        )
+        BatteryViewSet._sync_battery_process_artifacts(run=run, battery=battery, source_bundle=source_bundle, result={})
+        recompute_run_progress(
+            run=run,
+            status=ProcessRun.Status.QUEUED,
+            current_step_key=step_keys["generate"],
+            current_stage=step_keys["generate"],
+            status_message="Queued for generation",
+            started_at=now,
+        )
+        return run
+
+    @staticmethod
+    @transaction.atomic
+    def sync_battery_source_links(*, battery, source_bundle: dict | None) -> dict[str, list[int]]:
+        source_bundle = source_bundle or {}
+        document_ids = BatteryViewSet._coerce_int_list(source_bundle.get("document_ids"))
+        section_ids = BatteryViewSet._coerce_int_list(source_bundle.get("section_ids"))
+        tag_group_ids = BatteryViewSet._coerce_int_list(source_bundle.get("tag_group_ids"))
+
+        BatterySourceDocument.objects.filter(battery=battery).delete()
+        BatterySourceSection.objects.filter(battery=battery).delete()
+        BatterySourceTagGroup.objects.filter(battery=battery).delete()
+
+        documents = list(Document.objects.filter(id__in=document_ids))
+        sections = list(Section.objects.filter(id__in=section_ids))
+        tag_groups = list(TagGroup.objects.filter(id__in=tag_group_ids))
+
+        if documents:
+            BatterySourceDocument.objects.bulk_create(
+                [
+                    BatterySourceDocument(
+                        battery=battery,
+                        document=document,
+                        role="input",
+                        metadata={},
+                    )
+                    for document in documents
+                ]
+            )
+
+        if sections:
+            BatterySourceSection.objects.bulk_create(
+                [
+                    BatterySourceSection(
+                        battery=battery,
+                        section=section,
+                        role="input",
+                        metadata={},
+                    )
+                    for section in sections
+                ]
+            )
+            battery.sections.set([section.id for section in sections])
+
+        if tag_groups:
+            BatterySourceTagGroup.objects.bulk_create(
+                [
+                    BatterySourceTagGroup(
+                        battery=battery,
+                        tag_group=tag_group,
+                        role="input",
+                        metadata={},
+                    )
+                    for tag_group in tag_groups
+                ]
+            )
+
+        collection_id = source_bundle.get("collection_id")
+        update_fields: list[str] = []
+        if collection_id not in (None, ""):
+            try:
+                normalized_collection_id = int(collection_id)
+            except (TypeError, ValueError):
+                normalized_collection_id = None
+            if normalized_collection_id and Collection.objects.filter(id=normalized_collection_id).exists():
+                battery.collection_id = normalized_collection_id
+                update_fields.append("collection")
+
+        config = dict(battery.config or {})
+        config["source_bundle"] = source_bundle
+        battery.config = config
+        update_fields.append("config")
+        battery.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        return {
+            "document_ids": [document.id for document in documents],
+            "section_ids": [section.id for section in sections],
+            "tag_group_ids": [tag_group.id for tag_group in tag_groups],
+        }
+
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="save-questions-from-qa")
     def save_questions_from_qa(self, request, pk=None):
         battery = self.get_object()
@@ -2690,6 +2997,8 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         question_format = request.data.get("question_format") or "true_false"
         overwrite = bool(request.data.get("overwrite", True))
         points_default = request.data.get("points_default", 1)
+        source_bundle = request.data.get("source_bundle") or {}
+        title = (request.data.get("title") or "").strip()
 
         try:
             result = BatteryViewSet.save_questions_from_qa_pairs(
@@ -2700,20 +3009,197 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 points_default=points_default,
             )
 
+            synced_sources = BatteryViewSet.sync_battery_source_links(battery=battery, source_bundle=source_bundle) if source_bundle else {}
             if result.get("questions_created", 0) > 0:
                 battery.status = "Ready"
+                if title:
+                    battery.name = title
                 if not getattr(battery, "external_job_id", None):
                     battery.external_job_id = str(job_id)
-                    battery.save(update_fields=["status", "external_job_id"])
+                    update_fields = ["status", "external_job_id"]
                 else:
-                    battery.save(update_fields=["status"])
+                    update_fields = ["status"]
+                if title:
+                    update_fields.append("name")
+                battery.save(update_fields=update_fields)
 
-            return Response({"ok": True, "battery_id": battery.id, "job_id": str(job_id), "result": result})
+            return Response({"ok": True, "battery_id": battery.id, "job_id": str(job_id), "result": result, "sources": synced_sources})
         except Exception as e:
             return Response(
                 {"ok": False, "detail": "Failed saving questions from qa_pairs", "error": str(e), "battery_id": battery.id, "job_id": str(job_id)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @action(detail=True, methods=["post"], permission_classes=[AllowAny], url_path="finalize-from-service")
+    @transaction.atomic
+    def finalize_from_service(self, request, pk=None):
+        if not _validate_internal_service_token(request):
+            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+        battery = self.get_object()
+        job_id = str(request.data.get("job_id") or getattr(battery, "external_job_id", "") or "").strip()
+        status_value = str(request.data.get("status") or "").strip().lower()
+        title = (request.data.get("title") or "").strip()
+        question_format = request.data.get("question_format") or "true_false"
+        overwrite = bool(request.data.get("overwrite", True))
+        points_default = request.data.get("points_default", 1)
+        source_bundle = request.data.get("source_bundle") or {}
+        error_message = (request.data.get("error") or "").strip()
+        process_run = BatteryViewSet._get_battery_process_run(battery=battery, job_id=job_id)
+        step_keys = BatteryViewSet._battery_step_keys()
+
+        update_fields: list[str] = []
+        if job_id and battery.external_job_id != job_id:
+            battery.external_job_id = job_id
+            update_fields.append("external_job_id")
+        if title and battery.name != title:
+            battery.name = title
+            update_fields.append("name")
+        if source_bundle:
+            BatteryViewSet.sync_battery_source_links(battery=battery, source_bundle=source_bundle)
+
+        config = dict(battery.config or {})
+        config["last_generation_status"] = status_value or "completed"
+        if error_message:
+            config["last_generation_error"] = error_message
+        elif "last_generation_error" in config:
+            config.pop("last_generation_error", None)
+        battery.config = config
+        update_fields.append("config")
+
+        if status_value in {"failed", "error"}:
+            failed_now = timezone.now()
+            battery.status = "Draft"
+            update_fields.append("status")
+            battery.save(update_fields=list(dict.fromkeys(update_fields)))
+            if process_run:
+                generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+                finalize_step = process_run.steps.filter(step_key=step_keys["finalize"]).order_by("-id").first()
+                if generate_step:
+                    update_step_progress(
+                        step=generate_step,
+                        status=ProcessStepRun.Status.FAILED,
+                        progress_percent=generate_step.progress_percent,
+                        status_message=error_message or "Generation failed",
+                        error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
+                        finished_at=failed_now,
+                    )
+                if finalize_step:
+                    update_step_progress(
+                        step=finalize_step,
+                        status=ProcessStepRun.Status.BLOCKED,
+                        status_message="Blocked by generation failure",
+                        error_payload={"error": error_message or "Generation failed"},
+                    )
+                recompute_run_progress(
+                    run=process_run,
+                    status=ProcessRun.Status.FAILED,
+                    current_step_key=step_keys["generate"],
+                    current_stage=step_keys["generate"],
+                    status_message=error_message or "Generation failed",
+                    error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
+                    finished_at=failed_now,
+                )
+                BatteryViewSet._sync_battery_process_artifacts(run=process_run, battery=battery, source_bundle=source_bundle, result={})
+                publish_run_event(process_run, event="process_run.updated")
+            return Response(
+                {
+                    "ok": False,
+                    "battery_id": battery.id,
+                    "job_id": job_id,
+                    "status": battery.status,
+                    "error": error_message or "Generation failed",
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        result = BatteryViewSet.save_questions_from_qa_pairs(
+            battery=battery,
+            job_id=job_id,
+            question_format=str(question_format),
+            overwrite=overwrite,
+            points_default=points_default,
+        )
+
+        if result.get("questions_created", 0) > 0:
+            battery.status = "Ready"
+            update_fields.append("status")
+        battery.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        if process_run:
+            completed_now = timezone.now()
+            run_completed = result.get("questions_created", 0) > 0
+            run_result_payload = {
+                "battery_id": battery.id,
+                "job_id": job_id,
+                "questions_created": result.get("questions_created", 0),
+                "options_created": result.get("options_created", 0),
+                "qa_pairs_found": result.get("qa_pairs_found", 0),
+            }
+            generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+            finalize_step = process_run.steps.filter(step_key=step_keys["finalize"]).order_by("-id").first()
+            if generate_step:
+                update_step_progress(
+                    step=generate_step,
+                    status=ProcessStepRun.Status.COMPLETED,
+                    progress_percent=100,
+                    status_message="Generation completed",
+                    result_payload={"job_id": job_id, "status": status_value or "completed"},
+                    finished_at=completed_now,
+                )
+            if finalize_step:
+                update_step_progress(
+                    step=finalize_step,
+                    status=ProcessStepRun.Status.COMPLETED if run_completed else ProcessStepRun.Status.FAILED,
+                    progress_percent=100 if run_completed else finalize_step.progress_percent,
+                    status_message="Battery finalized" if run_completed else "Finalization produced no questions",
+                    result_payload=result,
+                    started_at=finalize_step.started_at or completed_now,
+                    error_payload={} if run_completed else {"error": "No questions were created during finalization"},
+                    finished_at=completed_now,
+                )
+            recompute_run_progress(
+                run=process_run,
+                status=ProcessRun.Status.COMPLETED if run_completed else ProcessRun.Status.FAILED,
+                current_step_key=step_keys["finalize"],
+                current_stage=step_keys["finalize"],
+                status_message="Battery finalized" if run_completed else "Finalization produced no questions",
+                result_payload=run_result_payload,
+                error_payload={} if run_completed else {"error": "No questions were created during finalization"},
+                finished_at=completed_now,
+            )
+            BatteryViewSet._sync_battery_process_artifacts(run=process_run, battery=battery, source_bundle=source_bundle, result=result)
+            publish_run_event(
+                process_run,
+                event="process_run.completed" if run_completed else "process_run.updated",
+            )
+
+        notify_user = None
+        if getattr(battery, "project_id", None) and getattr(battery.project, "owner", None):
+            notify_user = battery.project.owner
+        elif getattr(battery, "collection_id", None) and getattr(battery.collection, "owner", None):
+            notify_user = battery.collection.owner
+        if notify_user and result.get("questions_created", 0) > 0:
+            notify_battery_ready(notify_user, battery.name)
+
+        return Response(
+            {
+                "ok": True,
+                "battery_id": battery.id,
+                "job_id": job_id,
+                "status": battery.status,
+                "process_run": (
+                    {
+                        "id": process_run.id,
+                        "run_id": str(process_run.run_id),
+                        "status": process_run.status,
+                    }
+                    if process_run
+                    else None
+                ),
+                "result": result,
+            }
+        )
 
             
 
@@ -2817,7 +3303,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
             qtype = _map_question_type(meta_type) if meta_type else qtype_default
             order_val = int(qa_index) if qa_index is not None else idx
-            topic = Topic.objects.filter(project=battery.project).last()
+            topic = None
 
             q_objs.append(
                 BatteryQuestion(
@@ -3137,18 +3623,8 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # 2) validar que todos pertenezcan al mismo document
-        doc_ids = list({s.document_id for s in sections})
-        if len(doc_ids) != 1:
-            return Response(
-                {
-                    "detail": "All sections must belong to the same document",
-                    "document_ids_found": doc_ids,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        document_id = doc_ids[0]
-        derived_tags = [s.title.strip() for s in sections if (s.title or "").strip()]
+        document_ids = [str(doc_id) for doc_id in sorted({s.document_id for s in sections})]
+        derived_tags = list(dict.fromkeys(s.title.strip() for s in sections if (s.title or "").strip()))
 
         # fallback seguro
         if not derived_tags:
@@ -3176,19 +3652,12 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
      
             # external_doc_id=str(document_id),
         )
-        notify_battery_ready(request.user, battery.name)
         battery.sections.set(section_ids)
-        project=Project.objects.filter(id=project_id).first()  # para asegurar que existe y evitar error en topic creation
-        topic = ensure_topic_for_flashcards(
-        project=project,
         name=battery.name,                 # el título principal
-        description=battery.description,     # si existe
-        question_count_target=int(request.data.get("quantity", 3)),
-        sections=sections_qs,
-    )
 
-        base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
-        url = f"{normalize_base_url(base_url)}/process-request"
+        process_base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+        progress_base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", process_base_url)
+        url = f"{normalize_base_url(process_base_url)}/batteries/create"
 
         job_id = str(uuid.uuid4())
 
@@ -3200,21 +3669,74 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
         payload = {
             "job_id": job_id,
-            "doc_id": str(document_id),
-            "process": "generate_question",
-            "tags": derived_tags,
+            "battery_id": battery.id,
+            "title": request.data.get("name"),
             "query_text": query_text_payload,
             "top_k": request.data.get("top_k"),
             "min_importance": request.data.get("min_importance"),
             "quantity_question": int(request.data.get("quantity", 3)),
             "difficulty": difficulty,
             "question_format": request.data.get("question_format") or "true_false",
-            "options": {},
+            "source_bundle": {
+                "collection_id": str(battery.collection_id) if getattr(battery, "collection_id", None) else None,
+                "document_ids": document_ids,
+                "section_ids": [str(section.id) for section in sections],
+                "tags": derived_tags,
+                "title_hints": derived_tags[:6],
+            },
+            "metadata": {
+                "project_id": project_id,
+                "rule_id": rule.id if rule else None,
+                "section_ids": [section.id for section in sections],
+                "callback_url": _build_internal_callback_url(
+                    request,
+                    f"/api/batteries/{battery.id}/finalize-from-service/",
+                ),
+                "callback_token": _get_internal_service_token(),
+            },
         }
 
+        BatteryViewSet.sync_battery_source_links(battery=battery, source_bundle=payload["source_bundle"])
+        process_run = BatteryViewSet._create_battery_process_run(
+            battery=battery,
+            initiated_by=request.user,
+            request_payload=payload,
+            source_bundle=payload["source_bundle"],
+            planned_job_id=job_id,
+        )
+
         try:
-            resp = _post_with_logging(url, payload, timeout=120, label="process_request_stream")
+            resp = _post_with_logging(url, payload, timeout=120, label="battery_create")
         except requests.RequestException as e:
+            failed_now = timezone.now()
+            step_keys = BatteryViewSet._battery_step_keys()
+            generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+            finalize_step = process_run.steps.filter(step_key=step_keys["finalize"]).order_by("-id").first()
+            if generate_step:
+                update_step_progress(
+                    step=generate_step,
+                    status=ProcessStepRun.Status.FAILED,
+                    status_message="Generation dispatch failed",
+                    error_payload={"error": str(e), "stage": "dispatch"},
+                    finished_at=failed_now,
+                )
+            if finalize_step:
+                update_step_progress(
+                    step=finalize_step,
+                    status=ProcessStepRun.Status.BLOCKED,
+                    status_message="Blocked by dispatch failure",
+                    error_payload={"error": "generation dispatch failed"},
+                )
+            recompute_run_progress(
+                run=process_run,
+                status=ProcessRun.Status.FAILED,
+                current_step_key=step_keys["generate"],
+                current_stage=step_keys["generate"],
+                status_message="Generation dispatch failed",
+                error_payload={"error": str(e), "stage": "dispatch"},
+                finished_at=failed_now,
+            )
+            publish_run_event(process_run, event="process_run.updated")
             return Response(
                 {"detail": "Failed calling microservice", "error": str(e)},
                 status=status.HTTP_502_BAD_GATEWAY,
@@ -3226,15 +3748,47 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             data = {"raw_text": resp.text}
 
         ws_job_id = (data.get("job_id") if isinstance(data, dict) else None) or job_id
-        ws_url = build_ws_url(base_url, ws_job_id)
+        ws_url = build_ws_url(progress_base_url, ws_job_id)
+        resolved_title = data.get("title") if isinstance(data, dict) else None
 
         # guarda job_id en battery (si añadiste el field)
         battery.external_job_id = ws_job_id
-        battery.save(update_fields=["external_job_id"])
+        update_fields = ["external_job_id"]
+        if resolved_title and resolved_title != battery.name:
+            battery.name = resolved_title
+            update_fields.append("name")
+        battery.save(update_fields=update_fields)
+
+        step_keys = BatteryViewSet._battery_step_keys()
+        generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+        if generate_step:
+            update_step_progress(
+                step=generate_step,
+                status=ProcessStepRun.Status.QUEUED,
+                external_job_id=ws_job_id,
+                status_message="Queued in Hope",
+                result_payload={"dispatch_status_code": resp.status_code, "queued": True},
+            )
+        recompute_run_progress(
+            run=process_run,
+            status=ProcessRun.Status.QUEUED,
+            current_step_key=step_keys["generate"],
+            current_stage=step_keys["generate"],
+            status_message="Queued in Hope",
+            job_id=ws_job_id,
+            result_payload={"dispatch_status_code": resp.status_code, "queued": True},
+        )
+        publish_run_event(process_run, event="process_run.updated")
+        enqueue_progress_consumer(run_id=process_run.id, job_id=ws_job_id)
 
         return Response(
             {
                 "battery": BatterySerializer(battery, context={"request": request}).data,
+                "process_run": {
+                    "id": process_run.id,
+                    "run_id": str(process_run.run_id),
+                    "status": process_run.status,
+                },
                 "job_id": ws_job_id,
                 "ws_url": ws_url,
                 "microservice_response": data,
@@ -7064,6 +7618,103 @@ class SummaryJobViewSet(viewsets.ModelViewSet):
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
+
+class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ProcessRunListSerializer
+    permission_classes = [IsAuthenticated]
+    lookup_field = "run_id"
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = (
+            ProcessRun.objects.select_related("initiated_by")
+            .annotate(
+                step_count=Count("steps", distinct=True),
+                artifact_count=Count("artifacts", distinct=True),
+            )
+            .order_by("-created_at", "-id")
+        )
+        if _is_rbac_admin_user(user):
+            return self._apply_filters(qs)
+
+        project_ids = [
+            str(project_id)
+            for project_id in Project.objects.filter(Q(owner=user) | Q(members=user))
+            .distinct()
+            .values_list("id", flat=True)
+        ]
+        collection_ids = [
+            str(collection_id)
+            for collection_id in Collection.objects.filter(owner=user).values_list("id", flat=True)
+        ]
+        qs = qs.filter(
+            Q(initiated_by=user)
+            | Q(scope_type="project", scope_id__in=project_ids)
+            | Q(scope_type="collection", scope_id__in=collection_ids)
+        ).distinct()
+        return self._apply_filters(qs)
+
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "retrieve":
+            return ProcessRunDetailSerializer
+        if getattr(self, "action", None) == "steps":
+            return ProcessStepRunSerializer
+        if getattr(self, "action", None) == "artifacts":
+            return ProcessArtifactSerializer
+        return ProcessRunListSerializer
+
+    def _apply_filters(self, qs):
+        workflow_key = (self.request.query_params.get("workflow_key") or "").strip()
+        status_value = (self.request.query_params.get("status") or "").strip()
+        scope_type = (self.request.query_params.get("scope_type") or "").strip()
+        scope_id = (self.request.query_params.get("scope_id") or "").strip()
+        resource_type = (self.request.query_params.get("resource_type") or "").strip()
+        resource_id = (self.request.query_params.get("resource_id") or "").strip()
+        if workflow_key:
+            qs = qs.filter(workflow_key=workflow_key)
+        if status_value:
+            qs = qs.filter(status=status_value)
+        if scope_type:
+            qs = qs.filter(scope_type=scope_type)
+        if scope_id:
+            qs = qs.filter(scope_id=scope_id)
+        if resource_type:
+            qs = qs.filter(resource_type=resource_type)
+        if resource_id:
+            qs = qs.filter(resource_id=resource_id)
+        return qs
+
+    def retrieve(self, request, *args, **kwargs):
+        queryset = self.get_queryset().prefetch_related(
+            "artifacts",
+            "steps__dependencies",
+            "steps__dependents",
+        )
+        obj = get_object_or_404(queryset, run_id=kwargs.get(self.lookup_field))
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated])
+    def steps(self, request, run_id=None):
+        run = self.get_object()
+        qs = run.steps.prefetch_related("dependencies", "dependents").order_by("sequence", "id")
+        page = self.paginate_queryset(qs)
+        serializer = self.get_serializer(page if page is not None else qs, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated])
+    def artifacts(self, request, run_id=None):
+        run = self.get_object()
+        qs = run.artifacts.select_related("step").order_by("id")
+        page = self.paginate_queryset(qs)
+        serializer = self.get_serializer(page if page is not None else qs, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
 
 from api.services.notifications import send_user_notification  # noqa: E402
 

@@ -10,6 +10,7 @@ from .views import (
     BatteryShareViewSet, SavedBatteryViewSet, InviteViewSet,
     DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet, StatisticsViewSet, GoogleLoginView, FacebookLoginView,
     NotificationViewSet, UserNotificationViewSet,
+    ProcessRunViewSet,
 )
 from dj_rest_auth.views import PasswordResetView, PasswordResetConfirmView
 
@@ -48,6 +49,7 @@ router.register(r"public/decks", PublicDeckViewSet, basename="public-decks")
 router.register(r"access-requests", AccessRequestViewSet, basename="access-requests")
 router.register(r"statistics", StatisticsViewSet, basename="statistics")
 router.register(r"summary-jobs", SummaryJobViewSet, basename="summary-job")
+router.register(r"process-runs", ProcessRunViewSet, basename="process-run")
 # opcional
 # router.register(r"tags", TagViewSet, basename="tags")
 # router.register(r"qa-pairs", QaPairViewSet, basename="qa-pairs")

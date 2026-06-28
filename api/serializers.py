@@ -4,7 +4,7 @@ import os
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import serializers
 from PIL import Image, ImageOps
-from .models import AccessRequest, ConversationMessage, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer
+from .models import AccessRequest, ConversationMessage, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, ProcessRun, ProcessStepRun, ProcessArtifact
 from django.contrib.auth import get_user_model
 from dj_rest_auth.forms import AllAuthPasswordResetForm
 from .models import (
@@ -1291,6 +1291,143 @@ class SummaryJobSerializer(serializers.ModelSerializer):
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
+
+
+class ProcessStepRunSerializer(serializers.ModelSerializer):
+    dependency_ids = serializers.SerializerMethodField()
+    dependent_ids = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProcessStepRun
+        fields = [
+            "id",
+            "run",
+            "step_key",
+            "item_key",
+            "step_type",
+            "status",
+            "execution_mode",
+            "sequence",
+            "priority",
+            "weight",
+            "attempt_count",
+            "external_job_id",
+            "idempotency_key",
+            "worker_step",
+            "progress_percent",
+            "status_message",
+            "control_state",
+            "input_payload",
+            "result_payload",
+            "error_payload",
+            "runtime_metrics",
+            "checkpoint_payload",
+            "checkpoint_version",
+            "available_at",
+            "last_progress_at",
+            "last_heartbeat_at",
+            "pause_requested_at",
+            "paused_at",
+            "cancel_requested_at",
+            "started_at",
+            "finished_at",
+            "canceled_at",
+            "locked_at",
+            "created_at",
+            "updated_at",
+            "dependency_ids",
+            "dependent_ids",
+        ]
+        read_only_fields = fields
+
+    def get_dependency_ids(self, obj):
+        return list(obj.dependencies.values_list("depends_on_id", flat=True))
+
+    def get_dependent_ids(self, obj):
+        return list(obj.dependents.values_list("step_id", flat=True))
+
+
+class ProcessArtifactSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProcessArtifact
+        fields = [
+            "id",
+            "run",
+            "step",
+            "artifact_key",
+            "artifact_type",
+            "role",
+            "status",
+            "resource_type",
+            "resource_id",
+            "fingerprint",
+            "payload",
+            "metadata",
+            "produced_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class ProcessRunListSerializer(serializers.ModelSerializer):
+    step_count = serializers.IntegerField(read_only=True)
+    artifact_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = ProcessRun
+        fields = [
+            "id",
+            "run_id",
+            "workflow_key",
+            "workflow_version",
+            "status",
+            "trigger_mode",
+            "initiated_by",
+            "scope_type",
+            "scope_id",
+            "resource_type",
+            "resource_id",
+            "job_id",
+            "current_step_key",
+            "current_stage",
+            "priority",
+            "retry_count",
+            "progress_percent",
+            "status_message",
+            "control_state",
+            "last_progress_at",
+            "pause_requested_at",
+            "paused_at",
+            "resumed_at",
+            "pause_reason",
+            "cancel_requested_at",
+            "started_at",
+            "finished_at",
+            "canceled_at",
+            "created_at",
+            "updated_at",
+            "step_count",
+            "artifact_count",
+        ]
+        read_only_fields = fields
+
+
+class ProcessRunDetailSerializer(ProcessRunListSerializer):
+    steps = ProcessStepRunSerializer(many=True, read_only=True)
+    artifacts = ProcessArtifactSerializer(many=True, read_only=True)
+
+    class Meta(ProcessRunListSerializer.Meta):
+        fields = ProcessRunListSerializer.Meta.fields + [
+            "idempotency_key",
+            "input_payload",
+            "context_payload",
+            "result_payload",
+            "error_payload",
+            "steps",
+            "artifacts",
+        ]
+        read_only_fields = fields
 
 
 class NotificationSerializer(serializers.ModelSerializer):

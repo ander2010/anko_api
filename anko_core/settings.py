@@ -56,7 +56,13 @@ SECRET_KEY = 'django-insecure-!@@uw(j#in54g*gx_ky!yh7c9k4z1zu2d_z67)fhw@v)t$spxp
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",")
+_configured_allowed_hosts = [
+    host.strip()
+    for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if host.strip()
+]
+# Allow internal Docker service names so Hope can call Django callbacks directly.
+ALLOWED_HOSTS = list(dict.fromkeys(_configured_allowed_hosts + ["anko-api", "hope-api"]))
 
 
 # Application definition
@@ -319,6 +325,12 @@ CHANNEL_LAYERS = {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {"hosts": [REDIS_URL]},
     },
+}
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_TASK_DEFAULT_QUEUE = os.getenv("CELERY_TASK_DEFAULT_QUEUE", "default")
+CELERY_TASK_ROUTES = {
+    "api.tasks.consume_hope_progress_task": {"queue": "workflow-progress"},
 }
 
 

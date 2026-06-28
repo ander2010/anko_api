@@ -1,0 +1,54 @@
+x-anko-env: &anko-environment
+  env_file:
+    - .env
+  environment:
+    DJANGO_SETTINGS_MODULE: anko_core.settings
+    DB_HOST: ${INTERNAL_DB_HOST:-hope-db}
+    DB_PORT: ${INTERNAL_DB_PORT:-5432}
+    DB_NAME: ${INTERNAL_DB_NAME:-anko}
+    DB_USER: ${INTERNAL_DB_USER:-admin}
+    DB_PASSWORD: ${INTERNAL_DB_PASSWORD:-anko2025}
+    DB_SSLMODE: ${INTERNAL_DB_SSLMODE:-disable}
+    REDIS_URL: ${REDIS_URL:-redis://hope-redis:6379/3}
+    CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://hope-redis:6379/3}
+    CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://hope-redis:6379/3}
+    PROCESS_REQUEST_BASE_URL: http://hope-api:8080
+    TRANSLATE_BASE_URL: http://hope-api:8080
+    INTERNAL_API_BASE_URL: http://anko-api:8000
+    WS_PROCESS_REQUEST_BASE_URL: ${WS_PROCESS_REQUEST_BASE_URL:-http://localhost:8080}
+    PROGRESS_REDIS_URL: ${PROGRESS_REDIS_URL:-redis://hope-redis:6379/2}
+    WORKFLOW_PROGRESS_REDIS_URL: ${WORKFLOW_PROGRESS_REDIS_URL:-redis://hope-redis:6379/2}
+
+services:
+  api:
+    container_name: anko-api
+    build: .
+    <<: *anko-environment
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             daphne -b 0.0.0.0 -p 8000 anko_core.asgi:application"
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - default
+      - hope_default
+
+  workflow-progress-worker:
+    container_name: anko-workflow-progress-worker
+    build: .
+    <<: *anko-environment
+    command: celery -A anko_core worker --loglevel=info -Q workflow-progress -n workflow-progress@%h
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    networks:
+      - default
+      - hope_default
+
+networks:
+  hope_default:
+    external: true
