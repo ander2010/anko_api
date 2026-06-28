@@ -76,4 +76,18 @@ urlpatterns = [
         name="password_reset_confirm_post",
     ),
     path('', include(router.urls)),
+    # Enterprise Phase 2 — Learning Engine
+    path('', include('api.enterprise.urls.learning_urls')),
+    # Enterprise Phase 3 — Retention Engine
+    path('', include('api.enterprise.urls.retention_urls')),
+    # Enterprise Phase 4 — Compliance Engine
+    path('', include('api.enterprise.urls.compliance_urls')),
+    # Enterprise Phase 5 — Certifications
+    path('', include('api.enterprise.urls.certification_urls')),
+    # Enterprise Phase 6 — Analytics & Dashboards
+    path('', include('api.enterprise.urls.analytics_urls')),
+    # Enterprise Phase 7 — Document Intelligence
+    path('', include('api.enterprise.urls.document_intelligence_urls')),
+    # Enterprise Phase 8 — Company Management
+    path('', include('api.enterprise.urls.company_urls')),
 ]

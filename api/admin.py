@@ -1,5 +1,6 @@
 from django.contrib import admin
 from api.models import AuditLog
+from api.enterprise.admin import *  # noqa: F401, F403 — registers enterprise admin classes
 
 
 @admin.register(AuditLog)

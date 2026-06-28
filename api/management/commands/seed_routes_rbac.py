@@ -53,6 +53,14 @@ ALL_KEYS = DASHBOARD_KEYS + AUTH_KEYS
 CLIENT_ALLOWED = [
     "dashboard.home",
     "dashboard.projects",
+    "dashboard.my-decks",
+    "dashboard.my-batteries",
+    "dashboard.public-decks",
+    "dashboard.public-batteries",
+    "dashboard.billing",
+    "dashboard.faqs",
+    "dashboard.about-us",
+    "dashboard.contact-us",
 ]
 
 # RBAC admin route keys must be backed by real API models/panels.

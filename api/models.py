@@ -1142,3 +1142,74 @@ class AccessRequest(models.Model):
         self.status = status
         self.decided_at = timezone.now()
         self.save(update_fields=["status", "decided_at"])
+
+
+# ==========================================================================
+# Enterprise models (Phase 1 foundation — additive, nothing above breaks)
+# ==========================================================================
+from api.enterprise_models import (  # noqa: E402, F401
+    Company,
+    TenantMixin,
+    BusinessUnit,
+    CompanyMembership,
+    Team,
+    TeamMembership,
+    EnterpriseProfile,
+    LearningEvent,
+    KnowledgeHealthSnapshot,
+)
+
+# ==========================================================================
+# Enterprise models (Phase 2 — Learning Engine)
+# ==========================================================================
+from api.enterprise_learning_models import (  # noqa: E402, F401
+    LearningPath,
+    LearningModule,
+    LearningModuleItem,
+    TrainingProgram,
+    TrainingProgramVersion,
+    LearningPathAssignment,
+    LearningModuleProgress,
+)
+
+# ==========================================================================
+# Enterprise models (Phase 3 — Retention Engine)
+# ==========================================================================
+from api.enterprise_retention_models import (  # noqa: E402, F401
+    KnowledgeAssessment,
+    RetentionSnapshot,
+    KnowledgeGap,
+    ReviewSchedule,
+)
+
+# ==========================================================================
+# Enterprise models (Phase 4 — Compliance Engine)
+# ==========================================================================
+from api.enterprise_compliance_models import (  # noqa: E402, F401
+    ComplianceProgram,
+    ComplianceRequirement,
+    ComplianceAssignment,
+    ComplianceReview,
+)
+
+# ==========================================================================
+# Enterprise models (Phase 5 — Certifications)
+# ==========================================================================
+from api.enterprise_certification_models import (  # noqa: E402, F401
+    CertificateTemplate,
+    CertificationRequirement,
+    Certification,
+)
+
+# ==========================================================================
+# Enterprise models (Phase 7 — Document Intelligence)
+# ==========================================================================
+from api.enterprise_document_intelligence_models import (  # noqa: E402, F401
+    KnowledgeSource,
+    DocumentVersion,
+    Procedure,
+    ChangeImpactAnalysis,
+    KnowledgeNode,
+    KnowledgeRelationship,
+)
+from api.enterprise_email_models import EmailLog  # noqa: E402, F401
