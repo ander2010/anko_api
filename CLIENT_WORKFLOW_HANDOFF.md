@@ -12,7 +12,7 @@ It explains:
 
 ## Summary
 
-Battery generation is no longer just a fire-and-forget request to Hope.
+Battery generation and tracked flashcard generation are no longer just fire-and-forget requests to Hope.
 
 Now Django (`anko_api`) creates and owns a workflow record for the generation process, tracks progress, and finalizes the run when Hope finishes or fails.
 
@@ -74,6 +74,35 @@ Important:
 - but the intended source of truth for workflow state is Django `process_run`
 
 
+### 1b. Flashcard generation creates a workflow run
+
+New tracked endpoint:
+
+- `POST /api/decks/start-generate/`
+
+That endpoint now:
+
+- creates the deck container
+- creates a `ProcessRun`
+- creates workflow steps
+- dispatches the Hope flashcard job
+- returns both deck info and process run info
+
+Current response includes:
+
+- `deck`
+- `process_run`
+- `job_id`
+- `ws_url`
+- `microservice_response`
+
+Important:
+
+- this is the tracked flashcard generation path for new client screens
+- older deck/flashcard endpoints still exist for legacy/manual flows
+- the intended source of truth for workflow state is Django `process_run`
+
+
 ### 2. Read-only workflow endpoints exist
 
 Available endpoints:
@@ -123,6 +152,7 @@ This means the client can show:
 Hope now calls Django back through:
 
 - `POST /api/batteries/{battery_id}/finalize-from-service/`
+- `POST /api/decks/{deck_id}/finalize-from-service/`
 
 That callback now works correctly inside Docker.
 
@@ -133,6 +163,7 @@ Relevant backend fix:
 Effect:
 
 - the workflow no longer gets stuck waiting for a final state just because the internal callback was rejected
+- tracked deck runs now also close from Django callback finalization after flashcards are synced into the deck
 
 
 ### 5. Hope startup no longer blocks API readiness
@@ -217,10 +248,14 @@ Relevant models:
 - `BatterySourceDocument`
 - `BatterySourceSection`
 - `BatterySourceTagGroup`
+- `DeckSourceDocument`
+- `DeckSourceSection`
+- `DeckSourceTagGroup`
 
 Effect:
 
 - the source of a generated battery is now explicit
+- the source of a generated deck is now explicit too
 - frontend and admin views can later show provenance such as:
   - which documents were used
   - which sections were used
@@ -490,6 +525,98 @@ Why frontend should care:
 - if it fails, user can see stuck or outdated workflow state
 
 
+### 7. Start tracked flashcard generation
+
+Endpoint:
+
+- `POST /api/decks/start-generate/`
+
+This is the recommended endpoint for any new client screen that wants deck generation plus workflow tracking.
+
+Example minimum request:
+
+```json
+{
+  "document_ids": [1, 2],
+  "cards_count": 20,
+  "difficulty": "medium"
+}
+```
+
+Example full request:
+
+```json
+{
+  "project": 1,
+  "collection_id": null,
+  "document_ids": [1, 2],
+  "section_ids": [],
+  "tag_group_ids": [],
+  "tags": [],
+  "cards_count": 20,
+  "difficulty": "medium",
+  "title": "",
+  "description": "",
+  "visibility": "private"
+}
+```
+
+Example response:
+
+```json
+{
+  "deck": {
+    "id": 12,
+    "ownerId": 5,
+    "title": "Cocktail Safety Flashcards",
+    "visibility": "private",
+    "description": "",
+    "cardsCount": 0,
+    "project": 1,
+    "sections": [],
+    "external_job_id": "de5d6c2e-2f7b-4f0d-8dc3-b33b76568f9a"
+  },
+  "process_run": {
+    "id": 15,
+    "run_id": "7a6bf07e-2b51-41d3-8f75-b6abec50f326",
+    "status": "queued"
+  },
+  "job_id": "de5d6c2e-2f7b-4f0d-8dc3-b33b76568f9a",
+  "ws_url": "ws://localhost:8080/ws/progress/de5d6c2e-2f7b-4f0d-8dc3-b33b76568f9a",
+  "microservice_response": {
+    "job_id": "de5d6c2e-2f7b-4f0d-8dc3-b33b76568f9a",
+    "task_id": "de5d6c2e-2f7b-4f0d-8dc3-b33b76568f9a",
+    "status": "queued",
+    "title": "Cocktail Safety Flashcards"
+  }
+}
+```
+
+Notes:
+
+- `title` is optional
+- backend may return a better final `deck.title`
+- cards are attached to the deck during finalization callback
+- do not assume the deck already contains cards immediately after create
+
+
+### 8. Internal deck finalize callback
+
+Endpoint:
+
+- `POST /api/decks/{deck_id}/finalize-from-service/`
+
+This endpoint is internal.
+
+Frontend should know it exists because it is part of the tracked lifecycle, but frontend should not call it.
+
+Why frontend should care:
+
+- this callback is what moves a tracked deck run from in-flight state to final state
+- this callback is what syncs generated cards into the deck
+- if it fails, user can see stuck or outdated workflow state
+
+
 ## Current Client Contract
 
 ### Create request
@@ -497,6 +624,7 @@ Why frontend should care:
 Current implemented generation entry point:
 
 - `POST /api/batteries/start-generate/`
+- `POST /api/decks/start-generate/`
 
 Example response shape:
 
@@ -524,6 +652,12 @@ Client recommendation:
 2. Save `process_run.run_id`
 3. Navigate UI using the Django workflow state, not only the Hope job id
 
+For tracked flashcard generation:
+
+1. Save `deck.id`
+2. Save `process_run.run_id`
+3. Navigate UI using the Django workflow state, not only the Hope job id
+
 
 ### Read workflow state
 
@@ -538,6 +672,11 @@ This should drive:
 - current workflow stage
 - error state
 - completion state
+
+For tracked deck generation:
+
+- treat `completed` as the point where cards are already synced into the deck
+- after `completed`, fetch the deck or deck cards if the screen needs the final content
 
 If detailed UI is needed:
 
@@ -640,6 +779,11 @@ Client recommendation for now:
 - if a workflow event transport is later exposed, use it only as an invalidation trigger
 - after receiving an update event, refetch the run from Django
 
+This same polling contract applies to both:
+
+- battery tracked generation
+- deck tracked generation
+
 
 ## Recommended Client Flow
 
@@ -653,6 +797,19 @@ Client recommendation for now:
    - `failed`
    - `canceled`
 7. If completed, fetch or display final battery data
+8. If failed, show the workflow error from Django
+
+Tracked deck flow:
+
+1. Call `POST /api/decks/start-generate/`
+2. Save `deck.id` and `process_run.run_id`
+3. Show initial state as `queued`
+4. Poll `GET /api/process-runs/{run_id}/`
+5. Optionally fetch `/steps/` for detailed progress UI
+6. Stop polling when run becomes terminal
+7. If completed, fetch:
+   - `GET /api/decks/{deck_id}/`
+   - `GET /api/decks/{deck_id}/cards/`
 8. If failed, show the workflow error from Django
 
 
@@ -677,6 +834,12 @@ Important client rule:
 
 - the client should treat this as one workflow with many stages
 - not as unrelated independent Hope jobs
+
+Important after the latest backend change:
+
+- the flashcard branch of auto-generate now uses the same deck finalization callback path
+- auto-generate flashcard steps are closed by Django only after deck card sync is complete
+- standalone tracked deck generation and auto-generated deck outputs now follow the same completion rule
 
 Expected future entry point:
 
@@ -742,6 +905,14 @@ Client rule:
 - Hope progress is useful for transport/live execution updates
 - Django workflow state is the final mapped state
 
+For tracked flashcard generation specifically:
+
+- Hope emits `flashcard_generation` execution progress
+- Django maps that into the workflow step `generate_flashcards`
+- Hope then calls Django finalization
+- Django syncs the generated cards into the deck
+- only then should the client treat the deck as fully generated
+
 
 ## Frontend Developer Notes
 
@@ -752,6 +923,12 @@ This section is specifically for the frontend developer implementing the UI.
 After creation, store:
 
 - `battery.id`
+- `process_run.run_id`
+- `job_id`
+
+For tracked deck generation, store:
+
+- `deck.id`
 - `process_run.run_id`
 - `job_id`
 
@@ -908,6 +1085,12 @@ Future automatic workflow mapping:
 - `generate_battery` -> `Generating questions`
 - `finalize_outputs` -> `Finalizing results`
 
+Standalone tracked deck workflow mapping:
+
+- `prepare_sources` -> `Preparing sources`
+- `generate_flashcards` -> `Generating flashcards`
+- `finalize_deck` -> `Finalizing deck`
+
 Keep this in one frontend constants file so labels stay maintainable.
 
 
@@ -958,6 +1141,14 @@ Recommended client sequence:
 3. `GET /api/process-runs/{run_id}/`
 4. Optionally `GET /api/process-runs/{run_id}/steps/`
 5. If terminal and successful, navigate to battery detail
+
+Tracked deck generation sequence:
+
+1. `POST /api/decks/start-generate/`
+2. Read `deck.id` and `process_run.run_id`
+3. `GET /api/process-runs/{run_id}/`
+4. Optionally `GET /api/process-runs/{run_id}/steps/`
+5. If terminal and successful, navigate to deck detail or load `GET /api/decks/{deck_id}/cards/`
 
 Do not use `job_id` as the main client route identifier.
 
@@ -1035,6 +1226,12 @@ Later, for the automatic multi-document workflow, this can expand to:
 - `generate_battery`
 - `finalize_outputs`
 
+For standalone tracked deck generation, the detailed list is:
+
+- `prepare_sources`
+- `generate_flashcards`
+- `finalize_deck`
+
 
 ### Polling behavior
 
@@ -1092,3 +1289,5 @@ Not yet the main client contract, but already part of the direction:
 When that larger workflow is exposed, the same client rule should still hold:
 
 - Django workflow state is the source of truth
+- Hope websocket state is only diagnostic/secondary
+- for flashcards, final content should be read from the deck after workflow completion

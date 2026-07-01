@@ -50,6 +50,13 @@ from django.http import HttpResponse, StreamingHttpResponse
 from collections import defaultdict
 from django.contrib.auth import authenticate, login
 
+from api.services.auto_generate_workflow import (
+    AUTO_WORKFLOW_KEY,
+    AutoGenerateWorkflowError,
+    create_auto_generate_run,
+    normalize_auto_generate_request,
+    sync_deck_source_links,
+)
 from api.services.translate import post_translate
 from api.services.workflow_progress import publish_run_event, recompute_run_progress, update_step_progress
 from api.services.workflow_progress_consumer import enqueue_progress_consumer
@@ -3046,6 +3053,16 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         source_bundle = request.data.get("source_bundle") or {}
         error_message = (request.data.get("error") or "").strip()
         process_run = BatteryViewSet._get_battery_process_run(battery=battery, job_id=job_id)
+        auto_workflow_step = (
+            ProcessStepRun.objects.select_related("run")
+            .filter(
+                external_job_id=job_id,
+                run__workflow_key=AUTO_WORKFLOW_KEY,
+                step_key="generate_battery",
+            )
+            .order_by("-id")
+            .first()
+        )
         step_keys = BatteryViewSet._battery_step_keys()
 
         update_fields: list[str] = []
@@ -3102,6 +3119,25 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 )
                 BatteryViewSet._sync_battery_process_artifacts(run=process_run, battery=battery, source_bundle=source_bundle, result={})
                 publish_run_event(process_run, event="process_run.updated")
+            if auto_workflow_step:
+                auto_run = auto_workflow_step.run
+                update_step_progress(
+                    step=auto_workflow_step,
+                    status=ProcessStepRun.Status.FAILED,
+                    progress_percent=auto_workflow_step.progress_percent,
+                    status_message=error_message or "Battery generation failed",
+                    error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
+                    finished_at=failed_now,
+                )
+                recompute_run_progress(
+                    run=auto_run,
+                    status=None,
+                    current_step_key=auto_workflow_step.step_key,
+                    current_stage=auto_workflow_step.step_key,
+                    status_message=error_message or "Battery generation failed",
+                    job_id=job_id,
+                )
+                publish_run_event(auto_run, event="process_run.updated")
             return Response(
                 {
                     "ok": False,
@@ -3173,6 +3209,32 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 process_run,
                 event="process_run.completed" if run_completed else "process_run.updated",
             )
+        if auto_workflow_step:
+            auto_run = auto_workflow_step.run
+            update_step_progress(
+                step=auto_workflow_step,
+                status=ProcessStepRun.Status.COMPLETED if run_completed else ProcessStepRun.Status.FAILED,
+                progress_percent=100 if run_completed else auto_workflow_step.progress_percent,
+                status_message="Battery generated" if run_completed else "Battery finalization produced no questions",
+                result_payload={
+                    "battery_id": battery.id,
+                    "job_id": job_id,
+                    "questions_created": result.get("questions_created", 0),
+                    "options_created": result.get("options_created", 0),
+                    "qa_pairs_found": result.get("qa_pairs_found", 0),
+                },
+                error_payload={} if run_completed else {"error": "No questions were created during finalization"},
+                finished_at=completed_now if process_run else timezone.now(),
+            )
+            recompute_run_progress(
+                run=auto_run,
+                status=None,
+                current_step_key=auto_workflow_step.step_key,
+                current_stage=auto_workflow_step.step_key,
+                status_message="Battery generated" if run_completed else "Battery finalization produced no questions",
+                job_id=job_id,
+            )
+            publish_run_event(auto_run, event="process_run.updated")
 
         notify_user = None
         if getattr(battery, "project_id", None) and getattr(battery.project, "owner", None):
@@ -4539,6 +4601,224 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             return DeckListSerializer
         return DeckSerializer
 
+    @staticmethod
+    def _coerce_int_list(values) -> list[int]:
+        cleaned: list[int] = []
+        seen: set[int] = set()
+        for raw in values or []:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            cleaned.append(value)
+        return cleaned
+
+    @staticmethod
+    def _deck_workflow_key() -> str:
+        return "flashcard_generation"
+
+    @staticmethod
+    def _deck_step_keys() -> dict[str, str]:
+        return {
+            "prepare": "prepare_sources",
+            "generate": "generate_flashcards",
+            "finalize": "finalize_deck",
+        }
+
+    @staticmethod
+    def _deck_scope_ref(*, deck) -> tuple[str, str]:
+        if getattr(deck, "collection_id", None):
+            return "collection", str(deck.collection_id)
+        if getattr(deck, "project_id", None):
+            return "project", str(deck.project_id)
+        return "deck", str(deck.id)
+
+    @staticmethod
+    def _get_deck_process_run(*, deck, job_id: str = ""):
+        qs = ProcessRun.objects.filter(
+            workflow_key=DeckViewSet._deck_workflow_key(),
+            resource_type="deck",
+            resource_id=str(deck.id),
+        )
+        job_id = str(job_id or "").strip()
+        if job_id:
+            run = qs.filter(job_id=job_id).order_by("-created_at", "-id").first()
+            if run:
+                return run
+        return qs.order_by("-created_at", "-id").first()
+
+    @staticmethod
+    @transaction.atomic
+    def _sync_deck_process_artifacts(*, run, deck, source_bundle: dict | None, result: dict | None = None) -> None:
+        source_bundle = source_bundle or {}
+        result = result or {}
+
+        ProcessArtifact.objects.filter(run=run, role=ProcessArtifact.Role.INPUT).delete()
+
+        artifacts: list[ProcessArtifact] = []
+        for document_id in DeckViewSet._coerce_int_list(source_bundle.get("document_ids")):
+            artifacts.append(
+                ProcessArtifact(
+                    run=run,
+                    artifact_key=f"document:{document_id}",
+                    artifact_type="document",
+                    role=ProcessArtifact.Role.INPUT,
+                    resource_type="document",
+                    resource_id=str(document_id),
+                    payload={"document_id": document_id},
+                )
+            )
+        for section_id in DeckViewSet._coerce_int_list(source_bundle.get("section_ids")):
+            artifacts.append(
+                ProcessArtifact(
+                    run=run,
+                    artifact_key=f"section:{section_id}",
+                    artifact_type="section",
+                    role=ProcessArtifact.Role.INPUT,
+                    resource_type="section",
+                    resource_id=str(section_id),
+                    payload={"section_id": section_id},
+                )
+            )
+        for tag_group_id in DeckViewSet._coerce_int_list(source_bundle.get("tag_group_ids")):
+            artifacts.append(
+                ProcessArtifact(
+                    run=run,
+                    artifact_key=f"tag_group:{tag_group_id}",
+                    artifact_type="tag_group",
+                    role=ProcessArtifact.Role.INPUT,
+                    resource_type="tag_group",
+                    resource_id=str(tag_group_id),
+                    payload={"tag_group_id": tag_group_id},
+                )
+            )
+        if artifacts:
+            ProcessArtifact.objects.bulk_create(artifacts)
+
+        output_payload = {
+            "deck_id": deck.id,
+            "job_id": run.job_id,
+            "card_count": int(result.get("card_count", 0) or 0),
+            "cards_synced": int(result.get("cards_synced", 0) or 0),
+        }
+        ProcessArtifact.objects.update_or_create(
+            run=run,
+            artifact_key=f"deck:{deck.id}",
+            defaults={
+                "step": run.steps.filter(step_key=DeckViewSet._deck_step_keys()["finalize"]).order_by("-id").first(),
+                "artifact_type": "deck",
+                "role": ProcessArtifact.Role.OUTPUT,
+                "status": ProcessArtifact.Status.ACTIVE,
+                "resource_type": "deck",
+                "resource_id": str(deck.id),
+                "payload": output_payload,
+                "metadata": {
+                    "title": deck.title,
+                    "difficulty": result.get("difficulty"),
+                },
+                "produced_at": timezone.now() if int(result.get("card_count", 0) or 0) > 0 else None,
+            },
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def _create_deck_process_run(*, deck, initiated_by, request_payload: dict, source_bundle: dict, planned_job_id: str):
+        scope_type, scope_id = DeckViewSet._deck_scope_ref(deck=deck)
+        step_keys = DeckViewSet._deck_step_keys()
+        now = timezone.now()
+        run = ProcessRun.objects.create(
+            workflow_key=DeckViewSet._deck_workflow_key(),
+            workflow_version=1,
+            status=ProcessRun.Status.QUEUED,
+            trigger_mode=ProcessRun.TriggerMode.MANUAL,
+            initiated_by=initiated_by if getattr(initiated_by, "is_authenticated", False) else None,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            resource_type="deck",
+            resource_id=str(deck.id),
+            job_id=str(planned_job_id or ""),
+            idempotency_key=f"deck-generate:{deck.id}:{planned_job_id}",
+            current_step_key=step_keys["generate"],
+            current_stage=step_keys["generate"],
+            status_message="Queued for generation",
+            input_payload=request_payload,
+            context_payload={"source_bundle": source_bundle, "deck_id": deck.id},
+            started_at=now,
+        )
+        prepare_step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=step_keys["prepare"],
+            step_type="source_prepare",
+            status=ProcessStepRun.Status.COMPLETED,
+            execution_mode=ProcessStepRun.ExecutionMode.SYNC,
+            sequence=10,
+            weight=10,
+            progress_percent=100,
+            status_message="Sources prepared",
+            input_payload={"source_bundle": source_bundle},
+            result_payload={"deck_id": deck.id},
+            started_at=now,
+            finished_at=now,
+        )
+        generate_step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=step_keys["generate"],
+            step_type="hope_flashcard_generation",
+            status=ProcessStepRun.Status.QUEUED,
+            execution_mode=ProcessStepRun.ExecutionMode.ASYNC,
+            sequence=20,
+            weight=80,
+            status_message="Queued for generation",
+            external_job_id=str(planned_job_id or ""),
+            idempotency_key=f"deck-generate-step:{deck.id}:{planned_job_id}",
+            input_payload=request_payload,
+            available_at=now,
+        )
+        finalize_step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=step_keys["finalize"],
+            step_type="deck_finalize",
+            status=ProcessStepRun.Status.PENDING,
+            execution_mode=ProcessStepRun.ExecutionMode.SYNC,
+            sequence=30,
+            weight=10,
+            input_payload={"deck_id": deck.id},
+        )
+        ProcessStepDependency.objects.bulk_create(
+            [
+                ProcessStepDependency(step=generate_step, depends_on=prepare_step),
+                ProcessStepDependency(step=finalize_step, depends_on=generate_step),
+            ]
+        )
+        DeckViewSet._sync_deck_process_artifacts(run=run, deck=deck, source_bundle=source_bundle, result={})
+        recompute_run_progress(
+            run=run,
+            status=ProcessRun.Status.QUEUED,
+            current_step_key=step_keys["generate"],
+            current_stage=step_keys["generate"],
+            status_message="Queued for generation",
+            started_at=now,
+        )
+        return run
+
+    @staticmethod
+    @transaction.atomic
+    def _sync_generated_flashcards(*, deck, job_id: str) -> dict[str, int]:
+        updated_count = (
+            Flashcard.objects
+            .filter(job_id=str(job_id))
+            .exclude(deck_id=deck.id)
+            .update(deck_id=deck.id, updated_at=timezone.now())
+        )
+        card_count = Flashcard.objects.filter(deck_id=deck.id).count()
+        return {
+            "cards_synced": int(updated_count or 0),
+            "card_count": int(card_count or 0),
+        }
+
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="job-progress")
     def job_progress(self, request, pk=None):
@@ -5504,6 +5784,313 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         # PlanGuard.assert_flashcards_allowed(user=request.user)
 
 
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate")
+    @transaction.atomic
+    def start_generate(self, request):
+        PlanGuard.assert_flashcards_allowed(user=request.user)
+
+        data = request.data or {}
+        project_id = data.get("project") or data.get("project_id")
+        collection_id = data.get("collection_id")
+        title = (data.get("title") or "").strip()
+        description = data.get("description") or ""
+        visibility = (data.get("visibility") or "private").strip() or "private"
+        difficulty = (data.get("difficulty") or "medium").strip().lower() or "medium"
+        cards_count = data.get("cards_count", data.get("quantity", 20))
+        document_ids = DeckViewSet._coerce_int_list(data.get("document_ids"))
+        section_ids = DeckViewSet._coerce_int_list(data.get("section_ids") or data.get("sections"))
+        tag_group_ids = DeckViewSet._coerce_int_list(data.get("tag_group_ids"))
+        requested_tags = [str(tag).strip() for tag in (data.get("tags") or []) if str(tag).strip()]
+
+        try:
+            cards_count = int(cards_count)
+        except (TypeError, ValueError):
+            return Response({"detail": "cards_count must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if cards_count <= 0:
+            return Response({"detail": "cards_count must be > 0"}, status=status.HTTP_400_BAD_REQUEST)
+        if cards_count > 500:
+            return Response({"detail": "cards_count too large (max 500)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not any([document_ids, section_ids, tag_group_ids, requested_tags]):
+            return Response(
+                {"detail": "Provide at least one source: document_ids, section_ids, tag_group_ids, or tags"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+        PlanGuard.assert_flashcards_allowed(user=user, requested_cards=cards_count)
+
+        docs_qs = Document.objects.select_related("project", "collection", "uploaded_by").filter(id__in=document_ids)
+        if _is_rbac_admin_user(user):
+            documents = list(docs_qs.order_by("id"))
+        else:
+            documents = list(
+                docs_qs.filter(
+                    Q(uploaded_by=user)
+                    | Q(project__owner=user)
+                    | Q(project__members=user)
+                    | Q(collection__owner=user)
+                )
+                .distinct()
+                .order_by("id")
+            )
+        found_document_ids = {document.id for document in documents}
+        missing_document_ids = [document_id for document_id in document_ids if document_id not in found_document_ids]
+        if missing_document_ids:
+            return Response(
+                {"detail": "Some documents were not found or are not accessible", "missing_document_ids": missing_document_ids},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        sections_qs = Section.objects.select_related("document", "document__project", "document__collection", "document__uploaded_by").filter(id__in=section_ids)
+        if _is_rbac_admin_user(user):
+            sections = list(sections_qs.order_by("id"))
+        else:
+            sections = list(
+                sections_qs.filter(
+                    Q(document__uploaded_by=user)
+                    | Q(document__project__owner=user)
+                    | Q(document__project__members=user)
+                    | Q(document__collection__owner=user)
+                )
+                .distinct()
+                .order_by("id")
+            )
+        found_section_ids = {section.id for section in sections}
+        missing_section_ids = [section_id for section_id in section_ids if section_id not in found_section_ids]
+        if missing_section_ids:
+            return Response(
+                {"detail": "Some sections were not found or are not accessible", "missing_section_ids": missing_section_ids},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        tag_groups_qs = TagGroup.objects.prefetch_related("items").select_related("collection").filter(id__in=tag_group_ids)
+        if _is_rbac_admin_user(user):
+            tag_groups = list(tag_groups_qs.order_by("id"))
+        else:
+            tag_groups = list(tag_groups_qs.filter(Q(collection__owner=user)).distinct().order_by("id"))
+        found_tag_group_ids = {tag_group.id for tag_group in tag_groups}
+        missing_tag_group_ids = [tag_group_id for tag_group_id in tag_group_ids if tag_group_id not in found_tag_group_ids]
+        if missing_tag_group_ids:
+            return Response(
+                {"detail": "Some tag groups were not found or are not accessible", "missing_tag_group_ids": missing_tag_group_ids},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        project = None
+        if project_id not in (None, ""):
+            project = Project.objects.filter(id=project_id).first()
+            if not project:
+                return Response({"detail": "project not found"}, status=status.HTTP_404_NOT_FOUND)
+            if not _is_rbac_admin_user(user) and not (
+                project.owner_id == user.id or project.members.filter(id=user.id).exists()
+            ):
+                return Response({"detail": "You do not have access to this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        collection = None
+        if collection_id not in (None, ""):
+            collection = Collection.objects.filter(id=collection_id).first()
+            if not collection:
+                return Response({"detail": "collection not found"}, status=status.HTTP_404_NOT_FOUND)
+            if not _is_rbac_admin_user(user) and collection.owner_id != user.id:
+                return Response({"detail": "You do not have access to this collection."}, status=status.HTTP_403_FORBIDDEN)
+
+        inferred_project_ids = {
+            int(value)
+            for value in (
+                [doc.project_id for doc in documents]
+                + [section.document.project_id for section in sections]
+            )
+            if value
+        }
+        inferred_collection_ids = {
+            int(value)
+            for value in (
+                [doc.collection_id for doc in documents]
+                + [section.document.collection_id for section in sections]
+                + [tag_group.collection_id for tag_group in tag_groups]
+            )
+            if value
+        }
+        if not project and len(inferred_project_ids) == 1:
+            project = Project.objects.filter(id=next(iter(inferred_project_ids))).first()
+        if not collection and len(inferred_collection_ids) == 1:
+            collection = Collection.objects.filter(id=next(iter(inferred_collection_ids))).first()
+
+        derived_tags: list[str] = []
+        derived_seen: set[str] = set()
+
+        def _push_tag(raw_value):
+            value = str(raw_value or "").strip()
+            if not value:
+                return
+            key = value.casefold()
+            if key in derived_seen:
+                return
+            derived_seen.add(key)
+            derived_tags.append(value)
+
+        for tag in requested_tags:
+            _push_tag(tag)
+        for section in sections:
+            _push_tag(section.title)
+        for tag_group in tag_groups:
+            _push_tag(tag_group.name)
+            for item in tag_group.items.all():
+                _push_tag(item.value)
+        for document in documents:
+            _push_tag(document.filename.rsplit(".", 1)[0] if document.filename else "")
+
+        source_bundle = {
+            "collection_id": str(collection.id) if collection else None,
+            "document_ids": [str(document.id) for document in documents],
+            "section_ids": [str(section.id) for section in sections],
+            "tag_group_ids": [str(tag_group.id) for tag_group in tag_groups],
+            "tags": derived_tags,
+            "title_hints": derived_tags[:6],
+        }
+
+        deck = Deck.objects.create(
+            project=project,
+            collection=collection,
+            owner=user,
+            title=title or "Flashcards - Generated",
+            description=description,
+            visibility=visibility,
+        )
+        if sections:
+            deck.sections.set([section.id for section in sections])
+        sync_deck_source_links(deck=deck, source_bundle=source_bundle)
+        notify_deck_created(user, deck.title)
+
+        process_base_url = os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")
+        progress_base_url = os.getenv("WS_PROCESS_REQUEST_BASE_URL", process_base_url)
+        url = f"{normalize_base_url(process_base_url)}/flashcards/create"
+        job_id = str(uuid.uuid4())
+
+        payload = {
+            "job_id": job_id,
+            "user_id": str(user.id),
+            "deck_id": deck.id,
+            "title": title or None,
+            "quantity": cards_count,
+            "difficulty": difficulty,
+            "source_bundle": source_bundle,
+            "metadata": {
+                "project_id": project.id if project else None,
+                "collection_id": collection.id if collection else None,
+                "callback_url": _build_internal_callback_url(
+                    request,
+                    f"/api/decks/{deck.id}/finalize-from-service/",
+                ),
+                "callback_token": _get_internal_service_token(),
+            },
+        }
+
+        process_run = DeckViewSet._create_deck_process_run(
+            deck=deck,
+            initiated_by=user,
+            request_payload=payload,
+            source_bundle=source_bundle,
+            planned_job_id=job_id,
+        )
+
+        try:
+            resp = _post_with_logging(url, payload, timeout=120, label="flashcards_create_tracked")
+        except requests.RequestException as e:
+            failed_now = timezone.now()
+            step_keys = DeckViewSet._deck_step_keys()
+            generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+            finalize_step = process_run.steps.filter(step_key=step_keys["finalize"]).order_by("-id").first()
+            if generate_step:
+                update_step_progress(
+                    step=generate_step,
+                    status=ProcessStepRun.Status.FAILED,
+                    status_message="Generation dispatch failed",
+                    error_payload={"error": str(e), "stage": "dispatch"},
+                    finished_at=failed_now,
+                )
+            if finalize_step:
+                update_step_progress(
+                    step=finalize_step,
+                    status=ProcessStepRun.Status.BLOCKED,
+                    status_message="Blocked by dispatch failure",
+                    error_payload={"error": "generation dispatch failed"},
+                )
+            recompute_run_progress(
+                run=process_run,
+                status=ProcessRun.Status.FAILED,
+                current_step_key=step_keys["generate"],
+                current_stage=step_keys["generate"],
+                status_message="Generation dispatch failed",
+                error_payload={"error": str(e), "stage": "dispatch"},
+                finished_at=failed_now,
+            )
+            publish_run_event(process_run, event="process_run.updated")
+            return Response(
+                {"detail": "Failed calling microservice", "error": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        try:
+            svc_data = resp.json()
+        except Exception:
+            svc_data = {"raw_text": resp.text}
+
+        ws_job_id = (svc_data.get("job_id") if isinstance(svc_data, dict) else None) or job_id
+        ws_url = build_ws_url(progress_base_url, ws_job_id)
+        resolved_title = (svc_data.get("title") if isinstance(svc_data, dict) else None) or deck.title
+
+        update_fields = []
+        if deck.external_job_id != ws_job_id:
+            deck.external_job_id = ws_job_id
+            update_fields.append("external_job_id")
+        if resolved_title and resolved_title != deck.title:
+            deck.title = resolved_title
+            update_fields.append("title")
+        if update_fields:
+            deck.save(update_fields=update_fields)
+
+        step_keys = DeckViewSet._deck_step_keys()
+        generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+        if generate_step:
+            update_step_progress(
+                step=generate_step,
+                status=ProcessStepRun.Status.QUEUED,
+                external_job_id=ws_job_id,
+                status_message="Queued in Hope",
+                result_payload={"dispatch_status_code": resp.status_code, "queued": True},
+            )
+        recompute_run_progress(
+            run=process_run,
+            status=ProcessRun.Status.QUEUED,
+            current_step_key=step_keys["generate"],
+            current_stage=step_keys["generate"],
+            status_message="Queued in Hope",
+            job_id=ws_job_id,
+            result_payload={"dispatch_status_code": resp.status_code, "queued": True},
+        )
+        DeckViewSet._sync_deck_process_artifacts(run=process_run, deck=deck, source_bundle=source_bundle, result={})
+        publish_run_event(process_run, event="process_run.updated")
+        enqueue_progress_consumer(run_id=process_run.id, job_id=ws_job_id)
+        PlanGuard.record_flashcard_job(user=user)
+
+        return Response(
+            {
+                "deck": DeckSerializer(deck, context={"request": request}).data,
+                "process_run": {
+                    "id": process_run.id,
+                    "run_id": str(process_run.run_id),
+                    "status": process_run.status,
+                },
+                "job_id": ws_job_id,
+                "ws_url": ws_url,
+                "microservice_response": svc_data,
+            },
+            status=status.HTTP_201_CREATED if resp.ok else status.HTTP_202_ACCEPTED,
+        )
+
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="create-and-start-job")
     @transaction.atomic
@@ -6163,6 +6750,205 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     #         .order_by("-created_at")
     #     )
 
+    @action(detail=True, methods=["post"], permission_classes=[AllowAny], url_path="finalize-from-service")
+    @transaction.atomic
+    def finalize_from_service(self, request, pk=None):
+        if not _validate_internal_service_token(request):
+            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+
+        deck = self.get_object()
+        job_id = str(request.data.get("job_id") or getattr(deck, "external_job_id", "") or "").strip()
+        status_value = str(request.data.get("status") or "").strip().lower()
+        title = (request.data.get("title") or "").strip()
+        source_bundle = request.data.get("source_bundle") or {}
+        error_message = (request.data.get("error") or "").strip()
+        process_run = DeckViewSet._get_deck_process_run(deck=deck, job_id=job_id)
+        auto_workflow_step = (
+            ProcessStepRun.objects.select_related("run")
+            .filter(
+                external_job_id=job_id,
+                run__workflow_key=AUTO_WORKFLOW_KEY,
+                step_key="generate_flashcards",
+            )
+            .order_by("-id")
+            .first()
+        )
+        step_keys = DeckViewSet._deck_step_keys()
+
+        update_fields: list[str] = []
+        if job_id and deck.external_job_id != job_id:
+            deck.external_job_id = job_id
+            update_fields.append("external_job_id")
+        if title and deck.title != title:
+            deck.title = title
+            update_fields.append("title")
+        if source_bundle:
+            sync_deck_source_links(deck=deck, source_bundle=source_bundle)
+
+        config = dict(deck.config or {})
+        config["last_generation_status"] = status_value or "completed"
+        if error_message:
+            config["last_generation_error"] = error_message
+        else:
+            config.pop("last_generation_error", None)
+        deck.config = config
+        update_fields.append("config")
+
+        if status_value in {"failed", "error"}:
+            failed_now = timezone.now()
+            deck.save(update_fields=list(dict.fromkeys(update_fields)))
+            if process_run:
+                generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+                finalize_step = process_run.steps.filter(step_key=step_keys["finalize"]).order_by("-id").first()
+                if generate_step:
+                    update_step_progress(
+                        step=generate_step,
+                        status=ProcessStepRun.Status.FAILED,
+                        progress_percent=generate_step.progress_percent,
+                        status_message=error_message or "Generation failed",
+                        error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
+                        finished_at=failed_now,
+                    )
+                if finalize_step:
+                    update_step_progress(
+                        step=finalize_step,
+                        status=ProcessStepRun.Status.BLOCKED,
+                        status_message="Blocked by generation failure",
+                        error_payload={"error": error_message or "Generation failed"},
+                    )
+                recompute_run_progress(
+                    run=process_run,
+                    status=ProcessRun.Status.FAILED,
+                    current_step_key=step_keys["generate"],
+                    current_stage=step_keys["generate"],
+                    status_message=error_message or "Generation failed",
+                    error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
+                    finished_at=failed_now,
+                )
+                DeckViewSet._sync_deck_process_artifacts(run=process_run, deck=deck, source_bundle=source_bundle, result={})
+                publish_run_event(process_run, event="process_run.updated")
+            if auto_workflow_step:
+                auto_run = auto_workflow_step.run
+                update_step_progress(
+                    step=auto_workflow_step,
+                    status=ProcessStepRun.Status.FAILED,
+                    progress_percent=auto_workflow_step.progress_percent,
+                    status_message=error_message or "Flashcard generation failed",
+                    error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
+                    finished_at=failed_now,
+                )
+                recompute_run_progress(
+                    run=auto_run,
+                    status=None,
+                    current_step_key=auto_workflow_step.step_key,
+                    current_stage=auto_workflow_step.step_key,
+                    status_message=error_message or "Flashcard generation failed",
+                    job_id=job_id,
+                )
+                publish_run_event(auto_run, event="process_run.updated")
+            return Response(
+                {
+                    "ok": False,
+                    "deck_id": deck.id,
+                    "job_id": job_id,
+                    "error": error_message or "Generation failed",
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        sync_result = DeckViewSet._sync_generated_flashcards(deck=deck, job_id=job_id)
+        deck.save(update_fields=list(dict.fromkeys(update_fields)))
+        completed_now = timezone.now()
+        run_completed = sync_result["card_count"] > 0
+        result_payload = {
+            "deck_id": deck.id,
+            "job_id": job_id,
+            "cards_synced": sync_result["cards_synced"],
+            "card_count": sync_result["card_count"],
+            "difficulty": (
+                process_run.input_payload.get("difficulty")
+                if process_run and isinstance(process_run.input_payload, dict)
+                else None
+            ),
+        }
+
+        if process_run:
+            generate_step = process_run.steps.filter(step_key=step_keys["generate"]).order_by("-id").first()
+            finalize_step = process_run.steps.filter(step_key=step_keys["finalize"]).order_by("-id").first()
+            if generate_step:
+                update_step_progress(
+                    step=generate_step,
+                    status=ProcessStepRun.Status.COMPLETED,
+                    progress_percent=100,
+                    status_message="Generation completed",
+                    result_payload={"job_id": job_id, "status": status_value or "completed"},
+                    finished_at=completed_now,
+                )
+            if finalize_step:
+                update_step_progress(
+                    step=finalize_step,
+                    status=ProcessStepRun.Status.COMPLETED if run_completed else ProcessStepRun.Status.FAILED,
+                    progress_percent=100 if run_completed else finalize_step.progress_percent,
+                    status_message="Deck finalized" if run_completed else "Finalization produced no flashcards",
+                    result_payload=result_payload,
+                    started_at=finalize_step.started_at or completed_now,
+                    error_payload={} if run_completed else {"error": "No flashcards were synced during finalization"},
+                    finished_at=completed_now,
+                )
+            recompute_run_progress(
+                run=process_run,
+                status=ProcessRun.Status.COMPLETED if run_completed else ProcessRun.Status.FAILED,
+                current_step_key=step_keys["finalize"],
+                current_stage=step_keys["finalize"],
+                status_message="Deck finalized" if run_completed else "Finalization produced no flashcards",
+                result_payload=result_payload,
+                error_payload={} if run_completed else {"error": "No flashcards were synced during finalization"},
+                finished_at=completed_now,
+            )
+            DeckViewSet._sync_deck_process_artifacts(run=process_run, deck=deck, source_bundle=source_bundle, result=result_payload)
+            publish_run_event(
+                process_run,
+                event="process_run.completed" if run_completed else "process_run.updated",
+            )
+        if auto_workflow_step:
+            auto_run = auto_workflow_step.run
+            update_step_progress(
+                step=auto_workflow_step,
+                status=ProcessStepRun.Status.COMPLETED if run_completed else ProcessStepRun.Status.FAILED,
+                progress_percent=100 if run_completed else auto_workflow_step.progress_percent,
+                status_message="Flashcards generated" if run_completed else "Flashcard finalization produced no cards",
+                result_payload=result_payload,
+                error_payload={} if run_completed else {"error": "No flashcards were synced during finalization"},
+                finished_at=completed_now,
+            )
+            recompute_run_progress(
+                run=auto_run,
+                status=None,
+                current_step_key=auto_workflow_step.step_key,
+                current_stage=auto_workflow_step.step_key,
+                status_message="Flashcards generated" if run_completed else "Flashcard finalization produced no cards",
+                job_id=job_id,
+            )
+            publish_run_event(auto_run, event="process_run.updated")
+
+        return Response(
+            {
+                "ok": True,
+                "deck_id": deck.id,
+                "job_id": job_id,
+                "process_run": (
+                    {
+                        "id": process_run.id,
+                        "run_id": str(process_run.run_id),
+                        "status": process_run.status,
+                    }
+                    if process_run
+                    else None
+                ),
+                "result": result_payload,
+            }
+        )
+
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
 
@@ -6571,6 +7357,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             Flashcard.objects.bulk_create(to_create)
 
         return len(to_create)
+
 
        # ✅ NUEVO: solo se llama cuando tú quieras (al crear deck o cuando WS termine)
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="sync-from-job")
@@ -7694,6 +8481,82 @@ class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
         obj = get_object_or_404(queryset, run_id=kwargs.get(self.lookup_field))
         serializer = self.get_serializer(obj)
         return Response(serializer.data)
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="auto-generate")
+    @transaction.atomic
+    def auto_generate(self, request):
+        try:
+            normalized = normalize_auto_generate_request(request.data or {})
+        except AutoGenerateWorkflowError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        document_ids = normalized["document_ids"]
+        docs_qs = Document.objects.select_related("project", "collection", "uploaded_by").filter(id__in=document_ids)
+        if _is_rbac_admin_user(request.user):
+            documents = list(docs_qs.order_by("id"))
+        else:
+            documents = list(
+                docs_qs.filter(
+                    Q(uploaded_by=request.user)
+                    | Q(project__owner=request.user)
+                    | Q(project__members=request.user)
+                    | Q(collection__owner=request.user)
+                )
+                .distinct()
+                .order_by("id")
+            )
+
+        found_ids = {document.id for document in documents}
+        missing_ids = [document_id for document_id in document_ids if document_id not in found_ids]
+        if missing_ids:
+            return Response(
+                {"detail": "Some documents were not found or are not accessible", "missing_document_ids": missing_ids},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            process_run = create_auto_generate_run(
+                initiated_by=request.user,
+                documents=documents,
+                payload=normalized,
+            )
+        except AutoGenerateWorkflowError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        publish_run_event(process_run, event="process_run.updated")
+
+        try:
+            from api.tasks import orchestrate_auto_generate_run_task
+
+            orchestrate_auto_generate_run_task.delay(process_run.id)
+        except Exception as exc:
+            recompute_run_progress(
+                run=process_run,
+                status=ProcessRun.Status.FAILED,
+                current_step_key="process_document",
+                current_stage="process_document",
+                status_message="Failed to enqueue auto generation",
+                error_payload={"error": str(exc)},
+                finished_at=timezone.now(),
+            )
+            publish_run_event(process_run, event="process_run.updated")
+            return Response(
+                {"detail": "Failed to enqueue auto generation", "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {
+                "process_run": {
+                    "id": process_run.id,
+                    "run_id": str(process_run.run_id),
+                    "status": process_run.status,
+                    "workflow_key": process_run.workflow_key,
+                },
+                "normalized_request": normalized,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated])
     def steps(self, request, run_id=None):
