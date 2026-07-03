@@ -8583,6 +8583,17 @@ class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
             return self.get_paginated_response(serializer.data)
         return Response(serializer.data)
 
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="cancel")
+    def cancel(self, request, run_id=None):
+        run = get_object_or_404(self.get_queryset(), run_id=run_id)
+        terminal = {"completed", "completed_with_errors", "failed", "canceled"}
+        if run.status in terminal:
+            return Response({"detail": "Run already in terminal state."}, status=status.HTTP_400_BAD_REQUEST)
+        run.status = ProcessRun.Status.CANCELED
+        run.cancel_requested_at = timezone.now()
+        run.save(update_fields=["status", "cancel_requested_at"])
+        return Response({"run_id": str(run.run_id), "status": run.status})
+
 
 from api.services.notifications import send_user_notification  # noqa: E402
 
