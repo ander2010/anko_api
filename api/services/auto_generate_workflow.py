@@ -541,9 +541,95 @@ def _wait_for_steps(
 ) -> list[ProcessStepRun]:
     deadline = time.monotonic() + timeout_seconds
     latest_steps: list[ProcessStepRun] = []
+    stale_step_seconds = max(float(os.getenv("AUTO_GENERATE_STEP_STALE_SECONDS", "300")), poll_interval_seconds)
+    callback_stale_seconds = max(float(os.getenv("AUTO_GENERATE_CALLBACK_STALE_SECONDS", "180")), poll_interval_seconds)
     while time.monotonic() < deadline:
         run = ProcessRun.objects.prefetch_related("steps").get(pk=run_id)
         latest_steps = list(run.steps.filter(step_key=step_key).order_by("sequence", "id"))
+        stale_detected = False
+        now = timezone.now()
+        for step in latest_steps:
+            if step.status in AUTO_TERMINAL_STEP_STATUSES:
+                continue
+
+            activity_at = (
+                step.last_heartbeat_at
+                or step.last_progress_at
+                or step.updated_at
+                or step.started_at
+                or step.created_at
+            )
+            age_seconds = (now - activity_at).total_seconds() if activity_at else None
+            if age_seconds is None or age_seconds < stale_step_seconds:
+                continue
+
+            update_step_progress(
+                step=step,
+                status=ProcessStepRun.Status.FAILED,
+                status_message="Worker heartbeat timed out",
+                error_payload={
+                    "reason": "stale_progress",
+                    "step_key": step_key,
+                    "external_job_id": step.external_job_id,
+                    "stale_after_seconds": stale_step_seconds,
+                    "last_activity_at": activity_at.isoformat() if activity_at else None,
+                },
+                finished_at=now,
+            )
+            stale_detected = True
+
+        if require_callback_status and latest_steps:
+            for step in latest_steps:
+                if step.status != ProcessStepRun.Status.COMPLETED:
+                    continue
+                battery_id = (step.result_payload or {}).get("battery_id") or (step.input_payload or {}).get("battery_id")
+                if not battery_id:
+                    continue
+                battery = Battery.objects.filter(id=battery_id).only("config", "status").first()
+                last_status = str((battery.config or {}).get("last_generation_status") or "").strip().lower() if battery else ""
+                if last_status:
+                    continue
+
+                activity_at = (
+                    step.finished_at
+                    or step.last_heartbeat_at
+                    or step.last_progress_at
+                    or step.updated_at
+                    or step.started_at
+                    or step.created_at
+                )
+                age_seconds = (now - activity_at).total_seconds() if activity_at else None
+                if age_seconds is None or age_seconds < callback_stale_seconds:
+                    continue
+
+                update_step_progress(
+                    step=step,
+                    status=ProcessStepRun.Status.FAILED,
+                    status_message="Finalize callback timed out",
+                    error_payload={
+                        "reason": "callback_timeout",
+                        "step_key": step_key,
+                        "external_job_id": step.external_job_id,
+                        "battery_id": battery_id,
+                        "stale_after_seconds": callback_stale_seconds,
+                        "last_activity_at": activity_at.isoformat() if activity_at else None,
+                    },
+                    finished_at=now,
+                )
+                stale_detected = True
+
+        if stale_detected:
+            run = _refresh_run(run_id)
+            recompute_run_progress(
+                run=run,
+                status=None,
+                current_step_key=step_key,
+                current_stage=step_key,
+                status_message=f"Detected stale {step_key} step",
+            )
+            publish_run_event(run, event="process_run.updated")
+            latest_steps = list(run.steps.filter(step_key=step_key).order_by("sequence", "id"))
+
         if latest_steps and all(step.status in AUTO_TERMINAL_STEP_STATUSES for step in latest_steps):
             if require_callback_status:
                 pending_callback = False
@@ -988,6 +1074,14 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             )
 
     run = _refresh_run(run_id)
+    finalize_step = _step_by_key(run, AUTO_STAGE_KEYS["finalize"])
+    if finalize_step and finalize_step.status == ProcessStepRun.Status.PENDING:
+        update_step_progress(
+            step=finalize_step,
+            status=ProcessStepRun.Status.WAITING,
+            status_message="Waiting for output callbacks",
+        )
+        run = _refresh_run(run_id)
     recompute_run_progress(
         run=run,
         status=ProcessRun.Status.RUNNING,
@@ -1001,8 +1095,12 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
     for step in flashcard_steps:
         deck_id = (step.result_payload or {}).get("deck_id")
         job_id = step.external_job_id
+        if not deck_id and job_id:
+            matched_deck = Deck.objects.filter(external_job_id=job_id).only("id").first()
+            deck_id = matched_deck.id if matched_deck else None
         if not deck_id or not job_id or step.status in {ProcessStepRun.Status.FAILED, ProcessStepRun.Status.CANCELED}:
             continue
+        completed_at = step.finished_at or step.last_heartbeat_at or timezone.now()
         updated_count = (
             Flashcard.objects.filter(job_id=job_id)
             .exclude(deck_id=deck_id)
@@ -1015,7 +1113,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 status=ProcessStepRun.Status.FAILED,
                 status_message="No flashcards were synced",
                 error_payload={"deck_id": deck_id, "job_id": job_id},
-                finished_at=timezone.now(),
+                finished_at=completed_at,
             )
             continue
         update_step_progress(
@@ -1024,7 +1122,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             progress_percent=100,
             status_message="Flashcards generated",
             result_payload={"deck_id": deck_id, "job_id": job_id, "cards_synced": updated_count, "cards_total": card_count},
-            finished_at=timezone.now(),
+            finished_at=completed_at,
         )
         deck = Deck.objects.filter(id=deck_id).first()
         if deck:

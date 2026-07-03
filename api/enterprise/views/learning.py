@@ -359,6 +359,54 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             validate_company_access(self.request.user, company_id)
         except PermissionError as exc:
             raise PermissionDenied(str(exc))
+
+        from api.models import Battery, ProcessArtifact
+        from api.enterprise_learning_models import LearningModuleItem
+
+        items = list(instance.items.select_related("battery", "deck").all())
+
+        # Collect IDs before deletion
+        battery_ids = [i.battery_id for i in items if i.battery_id]
+        deck_ids    = [i.deck_id    for i in items if i.deck_id]
+
+        # Delete ProcessArtifacts (not FK-linked, won't cascade)
+        if battery_ids:
+            ProcessArtifact.objects.filter(
+                artifact_type="battery",
+                resource_id__in=[str(bid) for bid in battery_ids],
+            ).delete()
+        if deck_ids:
+            ProcessArtifact.objects.filter(
+                artifact_type="deck",
+                resource_id__in=[str(did) for did in deck_ids],
+            ).delete()
+
+        # Delete batteries (cascades: questions, options, attempts, shares, source links)
+        if battery_ids:
+            Battery.objects.filter(id__in=battery_ids).delete()
+
+        # Delete decks — cards have SET_NULL so delete them first
+        if deck_ids:
+            from api.models import Deck
+            # Delete cards whose deck is one of ours
+            for deck in Deck.objects.filter(id__in=deck_ids).prefetch_related("cards"):
+                deck.cards.all().delete()
+            Deck.objects.filter(id__in=deck_ids).delete()
+
+        # Prune ProcessRuns that now have zero artifacts left
+        run_ids = list(
+            ProcessArtifact.objects
+            .filter(artifact_type__in=["battery", "deck", "tag_group"])
+            .values_list("run_id", flat=True)
+            .distinct()
+        )
+        from api.models import ProcessRun
+        for run in ProcessRun.objects.exclude(id__in=run_ids).filter(
+            workflow_key="collection_auto_generate",
+            company_id=company_id,
+        ):
+            run.delete()
+
         instance.delete()
 
     @action(detail=True, methods=["post"], url_path="assign-to-user")

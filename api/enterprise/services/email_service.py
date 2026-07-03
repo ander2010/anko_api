@@ -160,6 +160,38 @@ def send_added_to_company(membership) -> None:
 # Informational — added to team
 # ---------------------------------------------------------------------------
 
+def send_invitation_email(invitation) -> None:
+    """
+    Sends an invitation email with a token link.
+    The frontend must handle /join?token=<token>.
+    """
+    company = invitation.company
+    link = f"{FRONTEND_URL}/join?token={invitation.token}"
+    body = (
+        f"Hola,\n\n"
+        f"Has sido invitado a unirte a {company.name} en Ankard "
+        f"como {dict(invitation.ROLE_CHOICES).get(invitation.role, invitation.role)}.\n\n"
+        f"Haz clic en el siguiente enlace para aceptar la invitación:\n{link}\n\n"
+        f"Este enlace expira en 72 horas.\n\n"
+        f"Si no esperabas esta invitación, puedes ignorar este correo."
+    )
+    _send(
+        recipient_email=invitation.email,
+        company=company,
+        email_type="company_invitation",
+        subject=f"Invitación para unirte a {company.name} en Ankard",
+        body=body,
+        metadata={
+            "invitation_id": invitation.id,
+            "company_id": company.id,
+            "company_name": company.name,
+            "role": invitation.role,
+            "token": str(invitation.token),
+            "link": link,
+        },
+    )
+
+
 def send_added_to_team(team_membership) -> None:
     """Informa al usuario que fue agregado a un equipo."""
     user = team_membership.user

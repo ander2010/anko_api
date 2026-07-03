@@ -183,6 +183,76 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         ks.delete()
         return Response(status=204)
 
+    @action(detail=True, methods=["get"], url_path="results")
+    def results(self, request, pk=None):
+        """Returns the generated batteries, decks, and topics for this KnowledgeSource."""
+        company, membership = self._resolve_company_membership()
+        ks = _resolve_ks(company.id, pk)
+
+        from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+        from api.models import ProcessRun, Battery, Deck
+        from api.serializers import BatteryListSerializer, DeckListSerializer
+
+        # Get document IDs linked to this KS (sorted to match resource_id in ProcessRun)
+        doc_ids = sorted(
+            KnowledgeSourceDocument.objects
+            .filter(knowledge_source=ks)
+            .values_list("document_id", flat=True)
+        )
+        if not doc_ids:
+            return Response({"run": None, "batteries": [], "decks": [], "topics": []})
+
+        # Find the most recent meaningful run (skip canceled/queued/draft)
+        resource_id = ",".join(str(d) for d in doc_ids)
+        run = (
+            ProcessRun.objects
+            .filter(
+                workflow_key="collection_auto_generate",
+                resource_type="document_batch",
+                resource_id=resource_id,
+            )
+            .exclude(status__in=["canceled", "cancelled", "queued", "draft"])
+            .order_by("-created_at")
+            .first()
+        )
+        if not run:
+            return Response({"run": None, "batteries": [], "decks": [], "topics": []})
+
+        # Battery artifacts → fetch real Battery objects with names
+        battery_ids = [
+            int(a.resource_id)
+            for a in run.artifacts.filter(artifact_type="battery").order_by("id")
+        ]
+        batteries_qs = Battery.objects.filter(id__in=battery_ids) if battery_ids else Battery.objects.none()
+        batteries_data = BatteryListSerializer(batteries_qs, many=True, context={"request": request}).data
+
+        # Deck artifacts → fetch real Deck objects with titles
+        deck_ids = [
+            int(a.resource_id)
+            for a in run.artifacts.filter(artifact_type="deck").order_by("id")
+        ]
+        decks_qs = Deck.objects.filter(id__in=deck_ids) if deck_ids else Deck.objects.none()
+        decks_data = DeckListSerializer(decks_qs, many=True, context={"request": request}).data
+
+        # Tag-group artifacts → used as "topics"
+        topics = [
+            {"id": a.resource_id, "tags": a.payload.get("tags", [])}
+            for a in run.artifacts.filter(artifact_type="tag_group").order_by("resource_id")
+        ]
+
+        return Response({
+            "run": {
+                "id": run.id,
+                "run_id": str(run.run_id),
+                "status": run.status,
+                "progress_percent": float(run.progress_percent or 0),
+                "status_message": run.status_message or "",
+            },
+            "batteries": batteries_data,
+            "decks": decks_data,
+            "topics": topics,
+        })
+
     @action(detail=True, methods=["post"], url_path="process")
     def process(self, request, pk=None):
         """Triggers AI extraction pipeline synchronously (use Celery in prod)."""

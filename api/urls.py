@@ -92,4 +92,6 @@ urlpatterns = [
     path('', include('api.enterprise.urls.document_intelligence_urls')),
     # Enterprise Phase 8 — Company Management
     path('', include('api.enterprise.urls.company_urls')),
+    # Enterprise — Invitations
+    path('', include('api.enterprise.urls.invitation_urls')),
 ]

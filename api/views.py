@@ -387,6 +387,14 @@ class AuthViewSet(viewsets.GenericViewSet):
         ev.save(update_fields=["token", "expires_at", "verified_at"])
 
         self._send_verify_email(user, ev.token)
+
+        # Auto-accept any pending company invitations for this email
+        try:
+            from api.enterprise.services.invitation_service import InvitationService
+            InvitationService.silent_join(user=user)
+        except Exception:
+            pass
+
         logger.info("register success user_id=%s username=%s", user.id, user.username)
 
         return Response(
@@ -426,6 +434,13 @@ class AuthViewSet(viewsets.GenericViewSet):
             )
 
         login(request, user)
+
+        # Auto-accept any pending company invitations for this email
+        try:
+            from api.enterprise.services.invitation_service import InvitationService
+            InvitationService.silent_join(user=user)
+        except Exception:
+            pass
 
         token, _ = Token.objects.get_or_create(user=user)
         logger.info("login success user_id=%s", user.id)
@@ -514,6 +529,54 @@ class AuthViewSet(viewsets.GenericViewSet):
     #         token, created = Token.objects.get_or_create(user=user)
     #         return Response({'token': token.key, 'user': UserSerializer(user).data})
     #     return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=["get"], url_path="me/context", permission_classes=[IsAuthenticated])
+    def me_context(self, request):
+        """
+        GET /api/auth/me/context/
+
+        Returns the authenticated user plus their company memberships.
+        The frontend uses this to decide which sidebar/role to render.
+
+        Response shape:
+        {
+          "user": { id, username, email, ... },
+          "companies": [
+            {
+              "company_id": 1,
+              "company_name": "Acme Corp",
+              "role": "admin",
+              "employee_stage": "active_employee",
+              "status": "active"
+            }
+          ],
+          "has_company": true
+        }
+        """
+        from api.enterprise_models import CompanyMembership
+        user = request.user
+        memberships = (
+            CompanyMembership.objects.filter(user=user, status="active")
+            .select_related("company")
+            .order_by("company__name")
+        )
+        companies = [
+            {
+                "company_id": m.company_id,
+                "company_name": m.company.name,
+                "role": m.role,
+                "employee_stage": m.employee_stage,
+                "status": m.status,
+            }
+            for m in memberships
+        ]
+        return Response(
+            {
+                "user": UserSerializer(user).data,
+                "companies": companies,
+                "has_company": len(companies) > 0,
+            }
+        )
 
     @action(detail=False, methods=["get", "patch"], url_path="me", permission_classes=[IsAuthenticated])
     def me(self, request):
@@ -2225,9 +2288,10 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         battery = self.get_object()
         user = request.user
         has_access = (
-            battery.project.owner_id == user.id
+            (battery.project_id is not None and battery.project is not None and battery.project.owner_id == user.id)
             or battery.visibility == "public"
             or battery.shares.filter(shared_with=user).exists()
+            or (battery.project_id is None and user.company_memberships.exists())
         )
         if not has_access:
             return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
@@ -2286,6 +2350,20 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         )
         return Response(ser.data)
 
+    def destroy(self, request, *args, **kwargs):
+        battery = self.get_object()
+        user = request.user
+        has_access = (
+            (battery.project_id is not None and battery.project.owner_id == user.id)
+            or (battery.project_id is None and user.company_memberships.exists())
+        )
+        if not has_access:
+            return Response({"detail": "No tienes permiso para eliminar esta batería."}, status=status.HTTP_403_FORBIDDEN)
+        # Remove the ProcessArtifact pointer (not a FK, won't cascade)
+        ProcessArtifact.objects.filter(artifact_type="battery", resource_id=str(battery.id)).delete()
+        battery.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="download-questions-pdf")
     def download_questions_pdf(self, request, pk=None):
         """
@@ -2297,9 +2375,10 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         battery = self.get_object()
         user = request.user
         has_access = (
-            battery.project.owner_id == user.id
+            (battery.project_id is not None and battery.project is not None and battery.project.owner_id == user.id)
             or battery.visibility == "public"
             or battery.shares.filter(shared_with=user).exists()
+            or (battery.project_id is None and user.company_memberships.exists())
         )
         if not has_access:
             return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
@@ -3045,7 +3124,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         if not _validate_internal_service_token(request):
             return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
 
-        battery = self.get_object()
+        battery = get_object_or_404(Battery.objects.all(), pk=pk)
         job_id = str(request.data.get("job_id") or getattr(battery, "external_job_id", "") or "").strip()
         status_value = str(request.data.get("status") or "").strip().lower()
         title = (request.data.get("title") or "").strip()
@@ -3164,9 +3243,10 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             update_fields.append("status")
         battery.save(update_fields=list(dict.fromkeys(update_fields)))
 
+        completed_now = timezone.now()
+        run_completed = result.get("questions_created", 0) > 0
+
         if process_run:
-            completed_now = timezone.now()
-            run_completed = result.get("questions_created", 0) > 0
             run_result_payload = {
                 "battery_id": battery.id,
                 "job_id": job_id,
@@ -4477,7 +4557,7 @@ class BatteryShareViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # valida que el usuario sea dueño del battery
         battery = serializer.validated_data["battery"]
-        if battery.project.owner_id != self.request.user.id:
+        if battery.project is None or battery.project.owner_id != self.request.user.id:
             raise serializers.ValidationError("Only the project owner can share this battery.")
         share = serializer.save()
         logger.info("battery_share created by_user=%s battery_id=%s shared_with=%s", self.request.user.id, battery.id, share.shared_with_id)

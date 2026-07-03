@@ -470,3 +470,85 @@ class KnowledgeHealthSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.company} — snapshot {self.snapshot_date}"
+
+
+# ---------------------------------------------------------------------------
+# CompanyInvitation
+# ---------------------------------------------------------------------------
+
+class CompanyInvitation(models.Model):
+    """
+    Invitation token sent to a user's email to join a company.
+
+    Lifecycle:
+        pending  → email sent, awaiting acceptance
+        accepted → user accepted (membership activated)
+        expired  → token TTL passed without acceptance
+        cancelled → admin revoked it manually
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_ACCEPTED = "accepted"
+    STATUS_EXPIRED = "expired"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_ACCEPTED, "Accepted"),
+        (STATUS_EXPIRED, "Expired"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    ROLE_CHOICES = CompanyMembership.ROLE_CHOICES
+    STAGE_CHOICES = CompanyMembership.STAGE_CHOICES
+
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="invitations",
+    )
+    email = models.EmailField(db_index=True)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="employee")
+    employee_stage = models.CharField(
+        max_length=30, choices=STAGE_CHOICES, default="onboarding"
+    )
+    token = models.UUIDField(unique=True, db_index=True)
+    expires_at = models.DateTimeField()
+
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING
+    )
+
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sent_invitations",
+    )
+    accepted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="accepted_invitations",
+    )
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "enterprise_company_invitations"
+        indexes = [
+            models.Index(fields=["company", "status"]),
+            models.Index(fields=["email", "status"]),
+            models.Index(fields=["token"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"Invitation({self.email} → {self.company} [{self.status}])"
+
+    def is_usable(self) -> bool:
+        from django.utils import timezone
+        return self.status == self.STATUS_PENDING and self.expires_at > timezone.now()
