@@ -118,6 +118,44 @@ class KnowledgeSource(TenantMixin):
 
 
 # ==========================================================================
+# KnowledgeSourceDocument  (many documents per KnowledgeSource)
+# ==========================================================================
+
+class KnowledgeSourceDocument(models.Model):
+    """
+    Links one or more Documents to a KnowledgeSource.
+    Supports adding new document versions over time without replacing old ones.
+    """
+    knowledge_source = models.ForeignKey(
+        KnowledgeSource,
+        on_delete=models.CASCADE,
+        related_name="source_documents",
+    )
+    document = models.ForeignKey(
+        "api.Document",
+        on_delete=models.CASCADE,
+        related_name="knowledge_source_links",
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    version_note = models.TextField(blank=True)
+
+    class Meta:
+        db_table = "enterprise_knowledge_source_documents"
+        ordering = ["added_at"]
+        unique_together = [("knowledge_source", "document")]
+
+    def __str__(self) -> str:
+        return f"{self.knowledge_source.title} → {self.document.filename}"
+
+
+# ==========================================================================
 # DocumentVersion
 # ==========================================================================
 

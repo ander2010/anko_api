@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from django.conf import settings
 from api.utils.subscriptionstouser import ensure_free_subscription_for_user
 from dj_rest_auth.views import PasswordResetView

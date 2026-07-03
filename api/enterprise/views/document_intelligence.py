@@ -101,14 +101,6 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         from api.enterprise_document_intelligence_models import KnowledgeSource
         from api.enterprise_models import BusinessUnit
 
-        document = None
-        if d.get("document_id"):
-            from api.models import Document
-            try:
-                document = Document.objects.get(pk=d["document_id"])
-            except Document.DoesNotExist:
-                raise ValidationError({"document_id": "Document not found."})
-
         bu = None
         if d.get("business_unit_id"):
             try:
@@ -118,7 +110,6 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
 
         ks = KnowledgeSource.objects.create(
             company=company,
-            document=document,
             title=d["title"],
             description=d.get("description", ""),
             source_type=d["source_type"],
@@ -130,6 +121,54 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             status="pending",
             created_by=request.user,
         )
+        return Response(KnowledgeSourceSerializer(ks).data, status=201)
+
+    @action(detail=True, methods=["post"], url_path="add-document")
+    def add_document(self, request, pk=None):
+        """
+        Uploads a file, creates a Document, and links it to this KnowledgeSource.
+        Accepts multipart/form-data with:
+          - file       : the uploaded file (required)
+          - version_note: optional text describing this addition (e.g. "Actualización Q2")
+        """
+        import hashlib
+
+        company, membership = self._resolve_company_membership()
+        self._require_trainer(membership)
+        ks = _resolve_ks(company.id, pk)
+
+        if "file" not in request.FILES:
+            raise ValidationError({"file": "A file is required."})
+
+        uploaded_file = request.FILES["file"]
+        content = uploaded_file.read()
+        uploaded_file.seek(0)
+
+        ext = uploaded_file.name.rsplit(".", 1)[-1].lower() if "." in uploaded_file.name else "bin"
+        file_hash = hashlib.sha256(content).hexdigest()
+
+        from api.models import Document
+        from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+
+        document = Document.objects.create(
+            filename=uploaded_file.name,
+            file=uploaded_file,
+            type=ext,
+            size=len(content),
+            hash=file_hash,
+            uploaded_by=request.user,
+        )
+
+        KnowledgeSourceDocument.objects.get_or_create(
+            knowledge_source=ks,
+            document=document,
+            defaults={
+                "added_by": request.user,
+                "version_note": request.data.get("version_note", ""),
+            },
+        )
+
+        ks.refresh_from_db()
         return Response(KnowledgeSourceSerializer(ks).data, status=201)
 
     def retrieve(self, request, pk=None):

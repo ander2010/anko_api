@@ -97,6 +97,8 @@ class DocumentIntelligenceService:
             KnowledgeRelationship, KnowledgeSource, Procedure,
         )
 
+        from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+
         try:
             ks = KnowledgeSource.objects.select_related(
                 "document", "company"
@@ -110,14 +112,24 @@ class DocumentIntelligenceService:
         ks.save(update_fields=["status", "processing_started_at", "updated_at"])
 
         try:
-            if not ks.document_id:
-                raise ValueError(
-                    "This KnowledgeSource has no document attached. Attach a document before processing."
-                )
-            text = ks.document.extracted_text or ""
+            # Gather text from all linked documents (new model), fallback to legacy FK
+            linked_docs = list(
+                KnowledgeSourceDocument.objects.filter(knowledge_source=ks)
+                .select_related("document")
+                .order_by("added_at")
+            )
+
+            if linked_docs:
+                texts = [d.document.extracted_text or "" for d in linked_docs]
+                text = "\n\n---\n\n".join(t for t in texts if t.strip())
+            elif ks.document_id:
+                text = ks.document.extracted_text or ""
+            else:
+                text = ""
+
             if not text.strip():
                 raise ValueError(
-                    "Document has no extracted text. Process the document first."
+                    "No documents with extracted text found. Upload and process documents first."
                 )
 
             extraction = DocumentIntelligenceService._extract_with_ai(
@@ -184,19 +196,21 @@ class DocumentIntelligenceService:
                     },
                 )
 
-            # --- Initial DocumentVersion ---
-            content_text = ks.document.extracted_text or ""
-            DocumentVersion.objects.create(
-                knowledge_source=ks,
-                document=ks.document,
-                version_number=1,
-                file_hash=ks.document.hash or "",
-                content_hash=_content_hash(content_text),
-                extracted_at=timezone.now(),
-                summary=extraction.get("summary", ""),
-                key_changes=[],
-                topic_count=len(nodes_data),
-            )
+            # --- Initial DocumentVersion (use first linked doc or legacy FK) ---
+            primary_doc = linked_docs[0].document if linked_docs else ks.document
+            if primary_doc:
+                content_text = primary_doc.extracted_text or ""
+                DocumentVersion.objects.create(
+                    knowledge_source=ks,
+                    document=primary_doc,
+                    version_number=1,
+                    file_hash=primary_doc.hash or "",
+                    content_hash=_content_hash(content_text),
+                    extracted_at=timezone.now(),
+                    summary=extraction.get("summary", ""),
+                    key_changes=[],
+                    topic_count=len(nodes_data),
+                )
 
             # --- Update KnowledgeSource ---
             ks.status = "processed"

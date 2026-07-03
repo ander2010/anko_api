@@ -48,6 +48,7 @@ class KnowledgeSourceSerializer(serializers.Serializer):
     status = serializers.CharField()
     document_id = serializers.IntegerField(allow_null=True)
     document_filename = serializers.SerializerMethodField()
+    documents = serializers.SerializerMethodField()
     business_unit_id = serializers.IntegerField(allow_null=True)
     process_type = serializers.CharField()
     difficulty = serializers.CharField()
@@ -66,6 +67,28 @@ class KnowledgeSourceSerializer(serializers.Serializer):
 
     def get_document_filename(self, obj) -> str:
         return obj.document.filename if obj.document_id else ""
+
+    def get_documents(self, obj) -> list:
+        from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+        links = (
+            KnowledgeSourceDocument.objects
+            .filter(knowledge_source=obj)
+            .select_related("document", "added_by")
+            .order_by("added_at")
+        )
+        return [
+            {
+                "id": link.document.id,
+                "filename": link.document.filename,
+                "type": link.document.type,
+                "size": link.document.size,
+                "status": link.document.status,
+                "added_at": link.added_at.isoformat(),
+                "added_by": link.added_by.username if link.added_by else None,
+                "version_note": link.version_note,
+            }
+            for link in links
+        ]
 
 
 class ProcessingStatusSerializer(serializers.Serializer):
