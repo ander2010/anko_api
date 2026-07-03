@@ -3045,7 +3045,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         if not _validate_internal_service_token(request):
             return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
 
-        battery = self.get_object()
+        battery = get_object_or_404(Battery.objects.all(), pk=pk)
         job_id = str(request.data.get("job_id") or getattr(battery, "external_job_id", "") or "").strip()
         status_value = str(request.data.get("status") or "").strip().lower()
         title = (request.data.get("title") or "").strip()
@@ -3164,9 +3164,10 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             update_fields.append("status")
         battery.save(update_fields=list(dict.fromkeys(update_fields)))
 
+        completed_now = timezone.now()
+        run_completed = result.get("questions_created", 0) > 0
+
         if process_run:
-            completed_now = timezone.now()
-            run_completed = result.get("questions_created", 0) > 0
             run_result_payload = {
                 "battery_id": battery.id,
                 "job_id": job_id,
