@@ -6756,7 +6756,10 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if not _validate_internal_service_token(request):
             return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
 
-        deck = self.get_object()
+        deck = get_object_or_404(
+            Deck.objects.select_related("owner", "project").prefetch_related("cards"),
+            pk=pk,
+        )
         job_id = str(request.data.get("job_id") or getattr(deck, "external_job_id", "") or "").strip()
         status_value = str(request.data.get("status") or "").strip().lower()
         title = (request.data.get("title") or "").strip()
