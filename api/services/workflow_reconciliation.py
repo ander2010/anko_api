@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 
-class ReconciliationPolicy(StrEnum):
+class ReconciliationPolicy(str, Enum):
     MERGE = "merge"
     OVERRIDE = "override"
     KEEP_BOTH = "keep_both"
 
 
-@dataclass(slots=True)
+@dataclass()
 class ReconciliationPreview:
     # Placeholder response model for the first workflow preflight stage.
     # We keep the structure now so later conflict detection can fill it without
