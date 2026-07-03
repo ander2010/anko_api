@@ -1074,6 +1074,14 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             )
 
     run = _refresh_run(run_id)
+    finalize_step = _step_by_key(run, AUTO_STAGE_KEYS["finalize"])
+    if finalize_step and finalize_step.status == ProcessStepRun.Status.PENDING:
+        update_step_progress(
+            step=finalize_step,
+            status=ProcessStepRun.Status.WAITING,
+            status_message="Waiting for output callbacks",
+        )
+        run = _refresh_run(run_id)
     recompute_run_progress(
         run=run,
         status=ProcessRun.Status.RUNNING,
@@ -1087,6 +1095,9 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
     for step in flashcard_steps:
         deck_id = (step.result_payload or {}).get("deck_id")
         job_id = step.external_job_id
+        if not deck_id and job_id:
+            matched_deck = Deck.objects.filter(external_job_id=job_id).only("id").first()
+            deck_id = matched_deck.id if matched_deck else None
         if not deck_id or not job_id or step.status in {ProcessStepRun.Status.FAILED, ProcessStepRun.Status.CANCELED}:
             continue
         completed_at = step.finished_at or step.last_heartbeat_at or timezone.now()

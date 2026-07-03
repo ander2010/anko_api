@@ -130,16 +130,32 @@ def _apply_progress_snapshot(run_id: str | int, snapshot: HopeProgressSnapshot) 
     current_step = str(payload.get("current_step") or "").strip()
     progress_percent = _normalize_progress(payload.get("progress"))
     runtime_metrics = _runtime_metrics_from_payload(payload)
+    result_payload = payload if hope_status == "COMPLETED" else None
+    status_message = current_step or hope_status.title()
+    worker_step = current_step
+
+    if hope_status == "COMPLETED":
+        existing_result = dict(step.result_payload or {})
+        preserves_callback_state = (
+            (step.step_key == "generate_flashcards" and existing_result.get("deck_id"))
+            or (step.step_key == "generate_battery" and existing_result.get("battery_id"))
+        )
+        if preserves_callback_state:
+            merged_payload = dict(payload)
+            merged_payload.update(existing_result)
+            result_payload = merged_payload
+            status_message = step.status_message or status_message
+            worker_step = step.worker_step or worker_step
 
     update_step_progress(
         step=step,
         status=_map_hope_status(hope_status),
         progress_percent=progress_percent,
-        status_message=current_step or hope_status.title(),
-        worker_step=current_step,
+        status_message=status_message,
+        worker_step=worker_step,
         external_job_id=snapshot.job_id,
         runtime_metrics=runtime_metrics if runtime_metrics else None,
-        result_payload=payload if hope_status == "COMPLETED" else None,
+        result_payload=result_payload,
         error_payload=payload if hope_status in {"FAILED", "ERROR"} else None,
         last_heartbeat_at=timezone.now(),
     )
