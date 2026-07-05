@@ -822,6 +822,14 @@ def _document_ready(document: Document) -> bool:
     return document.status == "ready" and Section.objects.filter(document_id=document.id).exists()
 
 
+def _document_processing_job_id(document: Document) -> str:
+    return str(document.job_id or "").strip()
+
+
+def _document_has_inflight_processing(document: Document) -> bool:
+    return document.status in {"pending", "processing"} and bool(_document_processing_job_id(document))
+
+
 def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.0) -> None:
     run = _refresh_run(run_id)
     payload = normalize_auto_generate_request(run.input_payload or {})
@@ -860,6 +868,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
         step = _step_by_key(run, AUTO_STAGE_KEYS["process_document"], item_key=str(document.id))
         if not step:
             continue
+        existing_job_id = _document_processing_job_id(document)
         if _document_ready(document):
             update_step_progress(
                 step=step,
@@ -870,6 +879,18 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 started_at=timezone.now(),
                 finished_at=timezone.now(),
             )
+            continue
+        if _document_has_inflight_processing(document):
+            update_step_progress(
+                step=step,
+                status=ProcessStepRun.Status.QUEUED,
+                progress_percent=0,
+                status_message="Reusing existing document processing",
+                external_job_id=existing_job_id,
+                result_payload={"document_id": document.id, "job_id": existing_job_id, "reused_existing_job": True},
+                started_at=step.started_at or timezone.now(),
+            )
+            enqueue_progress_consumer(run_id=run.id, job_id=existing_job_id)
             continue
 
         job_id = str(uuid.uuid4())
@@ -1118,6 +1139,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 "run_id": str(run.run_id),
                 "tag_group_id": tag_group_id,
                 "group_index": group_index,
+                "skip_summary": True,
                 "callback_url": f"{_build_internal_callback_base()}/api/decks/{deck.id}/finalize-from-service/",
                 "callback_token": _internal_service_token(),
             },
@@ -1174,6 +1196,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 "run_id": str(run.run_id),
                 "tag_group_id": tag_group_id,
                 "group_index": group_index,
+                "skip_summary": True,
                 "callback_url": f"{_build_internal_callback_base()}/api/batteries/{battery.id}/finalize-from-service/",
                 "callback_token": _internal_service_token(),
             },

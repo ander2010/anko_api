@@ -27,6 +27,7 @@ from api.models import (
 )
 from api.services.auto_generate_workflow import (
     AUTO_STAGE_KEYS,
+    _document_has_inflight_processing,
     _step_finalize_callback_status,
     _step_requires_finalize_callback,
 )
@@ -862,3 +863,30 @@ class AutoGenerateWorkflowCallbackTests(TestCase):
         self.battery.save(update_fields=["config"])
 
         self.assertEqual(_step_finalize_callback_status(step), "completed")
+
+    def test_document_with_active_job_reuses_existing_processing(self):
+        document = Document.objects.create(
+            project=self.project,
+            filename="active.pdf",
+            type="PDF",
+            size=1,
+            hash="hash-active",
+            status="processing",
+            job_id="hope-job-1",
+            uploaded_by=self.user,
+        )
+
+        self.assertTrue(_document_has_inflight_processing(document))
+
+    def test_document_without_job_does_not_reuse_processing(self):
+        document = Document.objects.create(
+            project=self.project,
+            filename="pending.pdf",
+            type="PDF",
+            size=1,
+            hash="hash-pending",
+            status="pending",
+            uploaded_by=self.user,
+        )
+
+        self.assertFalse(_document_has_inflight_processing(document))

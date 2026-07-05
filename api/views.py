@@ -1213,6 +1213,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
         data = r.json()
         job_id = data.get("job_id", job_id)
+        Document.objects.filter(id=doc_id).update(status="processing", job_id=job_id, processing_error=None)
 
         ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
         ws_url = f"{ws_base}/ws/progress/{job_id}"
@@ -1926,6 +1927,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
             r = _post_with_logging(url, payload, timeout=60, label="process_request_retry")
             data = r.json()
             job_id = data.get("job_id", job_id)
+            Document.objects.filter(id=doc.id).update(status="processing", job_id=job_id, processing_error=None)
 
             ws_base = base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
             ws_url = f"{ws_base}/ws/progress/{job_id}"
