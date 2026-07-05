@@ -2,6 +2,7 @@ import io
 import os
 import shutil
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PIL import Image
@@ -9,11 +10,12 @@ from botocore.exceptions import ClientError
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import override_settings
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from api.models import (
+    Battery,
     Deck,
     DeckShare,
     Document,
@@ -22,6 +24,12 @@ from api.models import (
     Resource,
     SavedDeck,
     User,
+)
+from api.services.auto_generate_workflow import (
+    AUTO_STAGE_KEYS,
+    _document_has_inflight_processing,
+    _step_finalize_callback_status,
+    _step_requires_finalize_callback,
 )
 from api.throttles import (
     BurstAnonRateThrottle,
@@ -811,3 +819,74 @@ class RbacAdminPanelTests(APITestCase):
         ids = set(self._extract_ids(response))
         self.assertIn(self.saved_a.id, ids)
         self.assertIn(self.saved_b.id, ids)
+
+
+class AutoGenerateWorkflowCallbackTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="workflow_user",
+            email="workflow@example.com",
+            password="StrongPass123!",
+        )
+        self.project = Project.objects.create(title="Workflow Project", owner=self.user)
+        self.deck = Deck.objects.create(project=self.project, owner=self.user, title="Workflow Deck")
+        self.battery = Battery.objects.create(name="Workflow Battery", status="Draft")
+
+    def test_flashcard_step_requires_finalize_callback(self):
+        step = SimpleNamespace(step_key=AUTO_STAGE_KEYS["generate_flashcards"])
+        self.assertTrue(_step_requires_finalize_callback(step))
+
+    def test_flashcard_finalize_status_reads_deck_callback_state(self):
+        step = SimpleNamespace(
+            step_key=AUTO_STAGE_KEYS["generate_flashcards"],
+            result_payload={"deck_id": self.deck.id},
+            input_payload={},
+        )
+
+        self.assertEqual(_step_finalize_callback_status(step), "")
+
+        self.deck.config = {"last_generation_status": "completed"}
+        self.deck.save(update_fields=["config"])
+
+        self.assertEqual(_step_finalize_callback_status(step), "completed")
+
+    def test_battery_finalize_status_reads_battery_callback_state(self):
+        step = SimpleNamespace(
+            step_key=AUTO_STAGE_KEYS["generate_battery"],
+            result_payload={"battery_id": self.battery.id},
+            input_payload={},
+        )
+
+        self.assertEqual(_step_finalize_callback_status(step), "")
+
+        self.battery.config = {"last_generation_status": "completed"}
+        self.battery.save(update_fields=["config"])
+
+        self.assertEqual(_step_finalize_callback_status(step), "completed")
+
+    def test_document_with_active_job_reuses_existing_processing(self):
+        document = Document.objects.create(
+            project=self.project,
+            filename="active.pdf",
+            type="PDF",
+            size=1,
+            hash="hash-active",
+            status="processing",
+            job_id="hope-job-1",
+            uploaded_by=self.user,
+        )
+
+        self.assertTrue(_document_has_inflight_processing(document))
+
+    def test_document_without_job_does_not_reuse_processing(self):
+        document = Document.objects.create(
+            project=self.project,
+            filename="pending.pdf",
+            type="PDF",
+            size=1,
+            hash="hash-pending",
+            status="pending",
+            uploaded_by=self.user,
+        )
+
+        self.assertFalse(_document_has_inflight_processing(document))

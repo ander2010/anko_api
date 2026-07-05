@@ -1,0 +1,5 @@
+services:
+  api:
+    command: /bin/sh -c "while sleep 1000; do :; done"
+    stdin_open: true
+    tty: true
