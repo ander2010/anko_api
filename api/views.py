@@ -28,6 +28,7 @@ import secrets
 from django.db.models import Count, F, Q, Sum
 import time
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from api.utils.cripto import encrypt_user_id
 import websockets
 from typing import Any, Dict, Iterable, Optional
@@ -671,6 +672,48 @@ def _post_with_logging(url: str, payload: dict, *, timeout: int, label: str = "e
             e,
         )
         raise
+
+
+def _internal_service_headers() -> dict[str, str]:
+    token = _get_internal_service_token()
+    return {"X-Internal-Token": token} if token else {}
+
+
+def _fetch_generated_flashcards_from_hope(*, job_id: str, user_id: str, timeout: int = 30) -> list[dict[str, Any]]:
+    if not job_id or not user_id:
+        return []
+    base_url = _normalize_base_url(os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
+    url = f"{base_url}/flashcards/jobs/{quote(str(job_id), safe='')}"
+    start = time.perf_counter()
+    try:
+        resp = requests.get(
+            url,
+            params={"user_id": str(user_id)},
+            headers=_internal_service_headers(),
+            timeout=timeout,
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "External HTTP flashcards_fetch url=%s status=%s ok=%s duration_ms=%s",
+            url,
+            resp.status_code,
+            resp.ok,
+            duration_ms,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException:
+        logger.warning("Failed to fetch generated flashcards from Hope | job_id=%s user_id=%s", job_id, user_id, exc_info=True)
+        return []
+    except ValueError:
+        logger.warning("Invalid flashcards fetch payload from Hope | job_id=%s user_id=%s", job_id, user_id, exc_info=True)
+        return []
+
+    cards = data.get("cards") if isinstance(data, dict) else None
+    if not isinstance(cards, list):
+        logger.warning("Hope flashcards fetch returned unexpected payload | job_id=%s user_id=%s payload_type=%s", job_id, user_id, type(data).__name__)
+        return []
+    return [item for item in cards if isinstance(item, dict)]
 
 class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
@@ -4816,9 +4859,134 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             .exclude(deck_id=deck.id)
             .update(deck_id=deck.id, updated_at=timezone.now())
         )
+        imported_count = 0
+        user_id = str(getattr(deck, "owner_id", "") or "")
+        fetched_cards = _fetch_generated_flashcards_from_hope(job_id=str(job_id), user_id=user_id)
+        if fetched_cards:
+            existing_cards = list(
+                Flashcard.objects.filter(
+                    Q(job_id=str(job_id)) | Q(deck_id=deck.id)
+                )
+            )
+            existing_by_card_id = {
+                str(card.card_id): card
+                for card in existing_cards
+                if getattr(card, "card_id", None)
+            }
+            existing_by_signature = {
+                (str(card.front or ""), str(card.back or "")): card
+                for card in existing_cards
+            }
+            new_cards: list[Flashcard] = []
+            now = timezone.now()
+
+            for item in fetched_cards:
+                card_id = str(item.get("card_id") or item.get("id") or "").strip()
+                front = str(item.get("front") or "").strip()
+                back = str(item.get("back") or "").strip()
+                if not front and not back:
+                    continue
+
+                existing = existing_by_card_id.get(card_id) if card_id else None
+                if existing is None:
+                    existing = existing_by_signature.get((front, back))
+
+                due_at = parse_datetime(str(item.get("due_at"))) if item.get("due_at") else None
+                first_seen_at = parse_datetime(str(item.get("first_seen_at"))) if item.get("first_seen_at") else None
+                created_at = parse_datetime(str(item.get("created_at"))) if item.get("created_at") else None
+                tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+                notes = item.get("notes")
+                difficulty = str(item.get("difficulty") or "").strip() or None
+                source_doc_id = str(item.get("source_doc_id") or "").strip() or None
+                kind = str(item.get("kind") or "new").strip() or "new"
+                status_value = str(item.get("status") or "learning").strip() or "learning"
+                learning_step_index = int(item.get("learning_step_index") or 0)
+                repetition = int(item.get("repetition") or 0)
+                interval_days = int(item.get("interval_days") or 0)
+                ease_factor = float(item.get("ease_factor") or 2.5)
+
+                if existing is not None:
+                    existing.deck = deck
+                    existing.user_id = user_id
+                    existing.job_id = str(job_id)
+                    existing.card_id = card_id or existing.card_id
+                    existing.front = front
+                    existing.back = back
+                    existing.source_doc_id = source_doc_id
+                    existing.tags = tags
+                    existing.difficulty = difficulty
+                    existing.notes = notes
+                    existing.kind = kind
+                    existing.status = status_value
+                    existing.learning_step_index = learning_step_index
+                    existing.repetition = repetition
+                    existing.interval_days = interval_days
+                    existing.ease_factor = ease_factor
+                    existing.due_at = due_at
+                    existing.first_seen_at = first_seen_at
+                    if created_at is not None:
+                        existing.created_at = created_at
+                    existing.updated_at = now
+                    existing.save(
+                        update_fields=[
+                            "deck",
+                            "user_id",
+                            "job_id",
+                            "card_id",
+                            "front",
+                            "back",
+                            "source_doc_id",
+                            "tags",
+                            "difficulty",
+                            "notes",
+                            "kind",
+                            "status",
+                            "learning_step_index",
+                            "repetition",
+                            "interval_days",
+                            "ease_factor",
+                            "due_at",
+                            "first_seen_at",
+                            "created_at",
+                            "updated_at",
+                        ]
+                    )
+                    updated_count += 1
+                    continue
+
+                card = Flashcard(
+                    deck=deck,
+                    card_id=card_id or None,
+                    user_id=user_id,
+                    job_id=str(job_id),
+                    front=front,
+                    back=back,
+                    source_doc_id=source_doc_id,
+                    tags=tags,
+                    difficulty=difficulty,
+                    kind=kind,
+                    status=status_value,
+                    learning_step_index=learning_step_index,
+                    repetition=repetition,
+                    interval_days=interval_days,
+                    ease_factor=ease_factor,
+                    due_at=due_at,
+                    first_seen_at=first_seen_at,
+                    created_at=created_at or now,
+                    updated_at=now,
+                    notes=notes,
+                )
+                new_cards.append(card)
+                if card_id:
+                    existing_by_card_id[card_id] = card
+                existing_by_signature[(front, back)] = card
+
+            if new_cards:
+                Flashcard.objects.bulk_create(new_cards, batch_size=500)
+                imported_count = len(new_cards)
         card_count = Flashcard.objects.filter(deck_id=deck.id).count()
         return {
-            "cards_synced": int(updated_count or 0),
+            "cards_synced": int((updated_count or 0) + imported_count),
             "card_count": int(card_count or 0),
         }
 

@@ -201,6 +201,30 @@ def _chunk_tags(tags: list[str], group_size: int) -> list[list[str]]:
     return [tags[idx: idx + group_size] for idx in range(0, len(tags), group_size)]
 
 
+def _step_requires_finalize_callback(step: ProcessStepRun) -> bool:
+    return step.step_key in {
+        AUTO_STAGE_KEYS["generate_flashcards"],
+        AUTO_STAGE_KEYS["generate_battery"],
+    }
+
+
+def _step_finalize_callback_status(step: ProcessStepRun) -> str:
+    payload = dict(step.result_payload or {})
+    payload.update(step.input_payload or {})
+
+    if step.step_key == AUTO_STAGE_KEYS["generate_flashcards"]:
+        deck_id = payload.get("deck_id")
+        deck = Deck.objects.filter(id=deck_id).only("config").first() if deck_id else None
+        return str((deck.config or {}).get("last_generation_status") or "").strip().lower() if deck else ""
+
+    if step.step_key == AUTO_STAGE_KEYS["generate_battery"]:
+        battery_id = payload.get("battery_id")
+        battery = Battery.objects.filter(id=battery_id).only("config").first() if battery_id else None
+        return str((battery.config or {}).get("last_generation_status") or "").strip().lower() if battery else ""
+
+    return ""
+
+
 def _title_case(text: str) -> str:
     words = [word for word in str(text or "").strip().split() if word]
     return " ".join(word[:1].upper() + word[1:] for word in words)
@@ -547,6 +571,7 @@ def _wait_for_steps(
         run = ProcessRun.objects.prefetch_related("steps").get(pk=run_id)
         latest_steps = list(run.steps.filter(step_key=step_key).order_by("sequence", "id"))
         stale_detected = False
+        state_changed = False
         now = timezone.now()
         for step in latest_steps:
             if step.status in AUTO_TERMINAL_STEP_STATUSES:
@@ -582,11 +607,12 @@ def _wait_for_steps(
             for step in latest_steps:
                 if step.status != ProcessStepRun.Status.COMPLETED:
                     continue
-                battery_id = (step.result_payload or {}).get("battery_id") or (step.input_payload or {}).get("battery_id")
-                if not battery_id:
+                if not _step_requires_finalize_callback(step):
                     continue
-                battery = Battery.objects.filter(id=battery_id).only("config", "status").first()
-                last_status = str((battery.config or {}).get("last_generation_status") or "").strip().lower() if battery else ""
+                if _finalize_completed_output_step(run_id=run_id, step=step):
+                    state_changed = True
+                    continue
+                last_status = _step_finalize_callback_status(step)
                 if last_status:
                     continue
 
@@ -610,7 +636,12 @@ def _wait_for_steps(
                         "reason": "callback_timeout",
                         "step_key": step_key,
                         "external_job_id": step.external_job_id,
-                        "battery_id": battery_id,
+                        "resource_id": (
+                            (step.result_payload or {}).get("deck_id")
+                            or (step.input_payload or {}).get("deck_id")
+                            or (step.result_payload or {}).get("battery_id")
+                            or (step.input_payload or {}).get("battery_id")
+                        ),
                         "stale_after_seconds": callback_stale_seconds,
                         "last_activity_at": activity_at.isoformat() if activity_at else None,
                     },
@@ -618,14 +649,14 @@ def _wait_for_steps(
                 )
                 stale_detected = True
 
-        if stale_detected:
+        if stale_detected or state_changed:
             run = _refresh_run(run_id)
             recompute_run_progress(
                 run=run,
                 status=None,
                 current_step_key=step_key,
                 current_stage=step_key,
-                status_message=f"Detected stale {step_key} step",
+                status_message=f"Detected stale {step_key} step" if stale_detected else run.status_message,
             )
             publish_run_event(run, event="process_run.updated")
             latest_steps = list(run.steps.filter(step_key=step_key).order_by("sequence", "id"))
@@ -634,14 +665,10 @@ def _wait_for_steps(
             if require_callback_status:
                 pending_callback = False
                 for step in latest_steps:
-                    if step.status == ProcessStepRun.Status.COMPLETED:
-                        battery_id = (step.result_payload or {}).get("battery_id") or (step.input_payload or {}).get("battery_id")
-                        if battery_id:
-                            battery = Battery.objects.filter(id=battery_id).only("config", "status").first()
-                            last_status = str((battery.config or {}).get("last_generation_status") or "").strip().lower() if battery else ""
-                            if not last_status:
-                                pending_callback = True
-                                break
+                    if step.status == ProcessStepRun.Status.COMPLETED and _step_requires_finalize_callback(step):
+                        if not _step_finalize_callback_status(step):
+                            pending_callback = True
+                            break
                 if not pending_callback:
                     return latest_steps
             else:
@@ -652,6 +679,113 @@ def _wait_for_steps(
 
 def _refresh_run(run_id: int) -> ProcessRun:
     return ProcessRun.objects.prefetch_related("steps").get(pk=run_id)
+
+
+def _finalize_completed_output_step(*, run_id: int, step: ProcessStepRun) -> bool:
+    if step.step_key == AUTO_STAGE_KEYS["generate_flashcards"]:
+        return _finalize_completed_flashcard_step(run_id=run_id, step=step)
+    if step.step_key == AUTO_STAGE_KEYS["generate_battery"]:
+        return _finalize_completed_battery_step(run_id=run_id, step=step)
+    return False
+
+
+def _finalize_completed_flashcard_step(*, run_id: int, step: ProcessStepRun) -> bool:
+    result_payload = dict(step.result_payload or {})
+    deck_id = result_payload.get("deck_id") or (step.input_payload or {}).get("deck_id")
+    job_id = str(step.external_job_id or result_payload.get("job_id") or "").strip()
+    if not deck_id or not job_id:
+        return False
+
+    deck = Deck.objects.filter(id=deck_id).first()
+    if deck is None:
+        return False
+
+    from api.views import DeckViewSet
+
+    sync_result = DeckViewSet._sync_generated_flashcards(deck=deck, job_id=job_id)
+    config = dict(deck.config or {})
+    config["last_generation_status"] = "completed"
+    deck.config = config
+    if deck.external_job_id != job_id:
+        deck.external_job_id = job_id
+        deck.save(update_fields=["external_job_id", "config"])
+    else:
+        deck.save(update_fields=["config"])
+
+    if sync_result.get("card_count", 0) <= 0:
+        return False
+
+    update_step_progress(
+        step=step,
+        status=ProcessStepRun.Status.COMPLETED,
+        progress_percent=100,
+        status_message="Flashcards generated",
+        result_payload={
+            **result_payload,
+            "deck_id": deck.id,
+            "job_id": job_id,
+            "cards_synced": sync_result.get("cards_synced", 0),
+            "cards_total": sync_result.get("card_count", 0),
+        },
+        finished_at=step.finished_at or timezone.now(),
+    )
+    return True
+
+
+def _finalize_completed_battery_step(*, run_id: int, step: ProcessStepRun) -> bool:
+    result_payload = dict(step.result_payload or {})
+    battery_id = result_payload.get("battery_id") or (step.input_payload or {}).get("battery_id")
+    job_id = str(step.external_job_id or result_payload.get("job_id") or "").strip()
+    if not battery_id or not job_id:
+        return False
+
+    battery = Battery.objects.filter(id=battery_id).first()
+    if battery is None:
+        return False
+
+    from api.views import BatteryViewSet
+
+    run = _refresh_run(run_id)
+    battery_options = dict((run.input_payload or {}).get("battery_options") or {})
+    question_format = battery_options.get("question_format") or "true_false"
+    result = BatteryViewSet.save_questions_from_qa_pairs(
+        battery=battery,
+        job_id=job_id,
+        question_format=str(question_format),
+        overwrite=True,
+        points_default=1,
+    )
+    config = dict(battery.config or {})
+    config["last_generation_status"] = "completed"
+    battery.config = config
+    update_fields = ["config"]
+    if battery.external_job_id != job_id:
+        battery.external_job_id = job_id
+        update_fields.append("external_job_id")
+    if result.get("questions_created", 0) > 0 and battery.status != "Ready":
+        battery.status = "Ready"
+        update_fields.append("status")
+    battery.save(update_fields=update_fields)
+
+    if result.get("questions_created", 0) <= 0:
+        return False
+
+    update_step_progress(
+        step=step,
+        status=ProcessStepRun.Status.COMPLETED,
+        progress_percent=100,
+        status_message="Battery generated",
+        result_payload={
+            **result_payload,
+            "battery_id": battery.id,
+            "job_id": job_id,
+            "questions_created": result.get("questions_created", 0),
+            "options_created": result.get("options_created", 0),
+            "qa_pairs_found": result.get("qa_pairs_found", 0),
+        },
+        finished_at=step.finished_at or timezone.now(),
+    )
+    return True
 
 
 def _mark_run_failed(*, run: ProcessRun, step: ProcessStepRun | None, message: str, error_payload: dict[str, Any]) -> None:
@@ -1091,7 +1225,12 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
     )
     publish_run_event(run, event="process_run.updated")
 
-    flashcard_steps = _wait_for_steps(run_id=run.id, step_key=AUTO_STAGE_KEYS["generate_flashcards"], timeout_seconds=timeout_seconds)
+    flashcard_steps = _wait_for_steps(
+        run_id=run.id,
+        step_key=AUTO_STAGE_KEYS["generate_flashcards"],
+        timeout_seconds=timeout_seconds,
+        require_callback_status=True,
+    )
     for step in flashcard_steps:
         deck_id = (step.result_payload or {}).get("deck_id")
         job_id = step.external_job_id
@@ -1101,12 +1240,14 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
         if not deck_id or not job_id or step.status in {ProcessStepRun.Status.FAILED, ProcessStepRun.Status.CANCELED}:
             continue
         completed_at = step.finished_at or step.last_heartbeat_at or timezone.now()
-        updated_count = (
-            Flashcard.objects.filter(job_id=job_id)
-            .exclude(deck_id=deck_id)
-            .update(deck_id=deck_id, updated_at=timezone.now())
-        )
-        card_count = Flashcard.objects.filter(deck_id=deck_id).count()
+        deck = Deck.objects.filter(id=deck_id).first()
+        if deck is None:
+            continue
+        from api.views import DeckViewSet
+
+        sync_result = DeckViewSet._sync_generated_flashcards(deck=deck, job_id=job_id)
+        updated_count = int(sync_result.get("cards_synced", 0) or 0)
+        card_count = int(sync_result.get("card_count", 0) or 0)
         if card_count <= 0:
             update_step_progress(
                 step=step,

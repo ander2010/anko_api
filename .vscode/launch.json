@@ -2,70 +2,141 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Uvicorn ASGI (Windows dev, 3 workers)",
-      "type": "python",
-      "request": "launch",
-      "module": "uvicorn",
-      "args": [
-        "anko_core.asgi:application",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000",
-        "--workers",
-        "3",
-        "--log-level",
-        "debug"
-      ],
-      "django": false,
-      "justMyCode": true,
-      "cwd": "${workspaceFolder}",
-      "envFile": "${workspaceFolder}/.env",
-      "console": "integratedTerminal"
-    },
-    {
-      "name": "Gunicorn ASGI (Linux only, 3 workers)",
-      "type": "python",
-      "request": "launch",
-      "module": "gunicorn",
-      "args": [
-        "anko_core.asgi:application",
-        "-k",
-        "uvicorn.workers.UvicornWorker",
-        "--bind",
-        "0.0.0.0:8000",
-        "--workers",
-        "3",
-        "--timeout",
-        "120",
-        "--log-level",
-        "debug",
-        "--access-logfile",
-        "-",
-        "--error-logfile",
-        "-",
-        "--capture-output"
-      ],
-      "django": false,
-      "justMyCode": true,
-      "cwd": "${workspaceFolder}",
-      "envFile": "${workspaceFolder}/.env",
-      "console": "integratedTerminal"
-    },
-    {
-      "name": "Django Runserver",
+      "name": "API: Django runserver (Dev Container)",
       "type": "python",
       "request": "launch",
       "program": "${workspaceFolder}/manage.py",
       "args": [
         "runserver",
-        "0.0.0.0:8000"
+        "0.0.0.0:8000",
+        "--noreload"
       ],
       "django": true,
       "justMyCode": true,
       "cwd": "${workspaceFolder}",
       "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "DJANGO_SETTINGS_MODULE": "anko_core.settings",
+        "DB_HOST": "hope-db",
+        "DB_PORT": "5432",
+        "DB_NAME": "anko",
+        "DB_USER": "admin",
+        "DB_PASSWORD": "anko2025",
+        "DB_SSLMODE": "disable",
+        "REDIS_URL": "redis://hope-redis:6379/3",
+        "CELERY_BROKER_URL": "redis://hope-redis:6379/3",
+        "CELERY_RESULT_BACKEND": "redis://hope-redis:6379/3",
+        "PROCESS_REQUEST_BASE_URL": "http://hope-api:8080",
+        "TRANSLATE_BASE_URL": "http://hope-api:8080",
+        "INTERNAL_API_BASE_URL": "http://127.0.0.1:8000",
+        "WS_PROCESS_REQUEST_BASE_URL": "http://localhost:8080",
+        "PROGRESS_REDIS_URL": "redis://hope-redis:6379/2",
+        "WORKFLOW_PROGRESS_REDIS_URL": "redis://hope-redis:6379/2"
+      },
       "console": "integratedTerminal"
+    },
+    {
+      "name": "Worker: Celery workflow-progress (Dev Container)",
+      "type": "python",
+      "request": "launch",
+      "module": "celery",
+      "args": [
+        "-A",
+        "anko_core",
+        "worker",
+        "--loglevel=info",
+        "-Q",
+        "workflow-progress",
+        "-P",
+        "solo",
+        "-n",
+        "workflow-progress@%h"
+      ],
+      "django": false,
+      "justMyCode": true,
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "DJANGO_SETTINGS_MODULE": "anko_core.settings",
+        "DB_HOST": "hope-db",
+        "DB_PORT": "5432",
+        "DB_NAME": "anko",
+        "DB_USER": "admin",
+        "DB_PASSWORD": "anko2025",
+        "DB_SSLMODE": "disable",
+        "REDIS_URL": "redis://hope-redis:6379/3",
+        "CELERY_BROKER_URL": "redis://hope-redis:6379/3",
+        "CELERY_RESULT_BACKEND": "redis://hope-redis:6379/3",
+        "PROCESS_REQUEST_BASE_URL": "http://hope-api:8080",
+        "TRANSLATE_BASE_URL": "http://hope-api:8080",
+        "INTERNAL_API_BASE_URL": "http://127.0.0.1:8000",
+        "WS_PROCESS_REQUEST_BASE_URL": "http://localhost:8080",
+        "PROGRESS_REDIS_URL": "redis://hope-redis:6379/2",
+        "WORKFLOW_PROGRESS_REDIS_URL": "redis://hope-redis:6379/2"
+      },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Tests: auto-generate workflow",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/manage.py",
+      "args": [
+        "test",
+        "api.tests.AutoGenerateWorkflowCallbackTests"
+      ],
+      "django": true,
+      "justMyCode": true,
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "DJANGO_SETTINGS_MODULE": "anko_core.settings",
+        "DB_HOST": "hope-db",
+        "DB_PORT": "5432",
+        "DB_NAME": "anko",
+        "DB_USER": "admin",
+        "DB_PASSWORD": "anko2025",
+        "DB_SSLMODE": "disable"
+      },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Command: debug_process_runs",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/manage.py",
+      "args": [
+        "debug_process_runs",
+        "--workflow",
+        "collection_auto_generate"
+      ],
+      "django": true,
+      "justMyCode": true,
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "DJANGO_SETTINGS_MODULE": "anko_core.settings",
+        "DB_HOST": "hope-db",
+        "DB_PORT": "5432",
+        "DB_NAME": "anko",
+        "DB_USER": "admin",
+        "DB_PASSWORD": "anko2025",
+        "DB_SSLMODE": "disable",
+        "REDIS_URL": "redis://hope-redis:6379/3",
+        "CELERY_BROKER_URL": "redis://hope-redis:6379/3",
+        "CELERY_RESULT_BACKEND": "redis://hope-redis:6379/3"
+      },
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Auto-generate: API + worker",
+      "configurations": [
+        "API: Django runserver (Dev Container)",
+        "Worker: Celery workflow-progress (Dev Container)"
+      ],
+      "stopAll": true
     }
   ]
 }
