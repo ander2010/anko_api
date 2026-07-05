@@ -58,6 +58,7 @@ from api.services.auto_generate_workflow import (
     AutoGenerateWorkflowError,
     create_auto_generate_run,
     normalize_auto_generate_request,
+    reconcile_late_auto_generate_output,
     sync_deck_source_links,
 )
 from api.services.translate import post_translate
@@ -3362,6 +3363,9 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 job_id=job_id,
             )
             publish_run_event(auto_run, event="process_run.updated")
+            # Backfill the battery artifact if the auto-generate run's watchdog
+            # already finalized before this (possibly late) callback arrived.
+            reconcile_late_auto_generate_output(step=auto_workflow_step)
 
         notify_user = None
         if getattr(battery, "project_id", None) and getattr(battery.project, "owner", None):
@@ -7185,6 +7189,9 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 job_id=job_id,
             )
             publish_run_event(auto_run, event="process_run.updated")
+            # Backfill the deck artifact if the auto-generate run's watchdog
+            # already finalized before this (possibly late) callback arrived.
+            reconcile_late_auto_generate_output(step=auto_workflow_step)
 
         return Response(
             {

@@ -565,8 +565,8 @@ def _wait_for_steps(
 ) -> list[ProcessStepRun]:
     deadline = time.monotonic() + timeout_seconds
     latest_steps: list[ProcessStepRun] = []
-    stale_step_seconds = max(float(os.getenv("AUTO_GENERATE_STEP_STALE_SECONDS", "300")), poll_interval_seconds)
-    callback_stale_seconds = max(float(os.getenv("AUTO_GENERATE_CALLBACK_STALE_SECONDS", "180")), poll_interval_seconds)
+    stale_step_seconds = max(float(os.getenv("AUTO_GENERATE_STEP_STALE_SECONDS", "900")), poll_interval_seconds)
+    callback_stale_seconds = max(float(os.getenv("AUTO_GENERATE_CALLBACK_STALE_SECONDS", "600")), poll_interval_seconds)
     while time.monotonic() < deadline:
         run = ProcessRun.objects.prefetch_related("steps").get(pk=run_id)
         latest_steps = list(run.steps.filter(step_key=step_key).order_by("sequence", "id"))
@@ -828,6 +828,86 @@ def _document_processing_job_id(document: Document) -> str:
 
 def _document_has_inflight_processing(document: Document) -> bool:
     return document.status in {"pending", "processing"} and bool(_document_processing_job_id(document))
+
+
+def _finalize_run_summary(*, run: ProcessRun, dispatch_errors: list[dict[str, Any]] | None = None) -> str:
+    """Compute and persist the finalize_outputs step + run-level summary.
+
+    Shared by the live orchestrator (orchestrate_auto_generate_run) and by
+    reconcile_late_auto_generate_output, which re-runs this same computation
+    when a Hope callback backfills an output artifact after the run already
+    finalized. Keeping one implementation avoids the two call sites drifting
+    apart on how deck/battery/tag_group counts and run status are derived.
+    """
+    finalize_step = _step_by_key(run, AUTO_STAGE_KEYS["finalize"])
+    if finalize_step is None:
+        logger.warning("auto-generate run %s has no finalize_outputs step; skipping summary recompute", run.run_id)
+        return run.status
+
+    if dispatch_errors is None:
+        # Preserve dispatch errors recorded during the original run instead of
+        # wiping them out when this is called again for a late callback.
+        dispatch_errors = list((finalize_step.error_payload or {}).get("dispatch_errors") or [])
+
+    flashcard_failures = [
+        step for step in run.steps.filter(step_key=AUTO_STAGE_KEYS["generate_flashcards"])
+        if step.status == ProcessStepRun.Status.FAILED
+    ]
+    battery_failures = [
+        step for step in run.steps.filter(step_key=AUTO_STAGE_KEYS["generate_battery"])
+        if step.status == ProcessStepRun.Status.FAILED
+    ]
+    completed_outputs = [
+        step
+        for step in run.steps.filter(step_key__in=[AUTO_STAGE_KEYS["generate_flashcards"], AUTO_STAGE_KEYS["generate_battery"]])
+        if step.status in {ProcessStepRun.Status.COMPLETED, ProcessStepRun.Status.COMPLETED_WITH_ERRORS}
+    ]
+
+    if flashcard_failures or battery_failures or dispatch_errors:
+        final_status = ProcessRun.Status.COMPLETED_WITH_ERRORS if completed_outputs else ProcessRun.Status.FAILED
+        finalize_step_status = (
+            ProcessStepRun.Status.COMPLETED_WITH_ERRORS if completed_outputs else ProcessStepRun.Status.FAILED
+        )
+        finalize_message = "Auto generation finished with errors" if completed_outputs else "Auto generation failed"
+    else:
+        final_status = ProcessRun.Status.COMPLETED
+        finalize_step_status = ProcessStepRun.Status.COMPLETED
+        finalize_message = "Auto generation completed"
+
+    tag_group_count = run.artifacts.filter(artifact_type="tag_group").count()
+    update_step_progress(
+        step=finalize_step,
+        status=finalize_step_status,
+        progress_percent=100 if finalize_step_status != ProcessStepRun.Status.FAILED else finalize_step.progress_percent,
+        status_message=finalize_message,
+        result_payload={
+            "tag_group_count": tag_group_count,
+            "deck_count": run.artifacts.filter(artifact_type="deck").count(),
+            "battery_count": run.artifacts.filter(artifact_type="battery").count(),
+        },
+        error_payload={"dispatch_errors": dispatch_errors} if dispatch_errors else {},
+        started_at=finalize_step.started_at or timezone.now(),
+        finished_at=timezone.now(),
+    )
+    recompute_run_progress(
+        run=run,
+        status=final_status,
+        current_step_key=AUTO_STAGE_KEYS["finalize"],
+        current_stage=AUTO_STAGE_KEYS["finalize"],
+        status_message=finalize_message,
+        result_payload={
+            "tag_group_count": tag_group_count,
+            "deck_ids": list(run.artifacts.filter(artifact_type="deck").values_list("resource_id", flat=True)),
+            "battery_ids": list(run.artifacts.filter(artifact_type="battery").values_list("resource_id", flat=True)),
+        },
+        error_payload={"dispatch_errors": dispatch_errors} if dispatch_errors else {},
+        finished_at=timezone.now(),
+    )
+    publish_run_event(
+        run,
+        event="process_run.completed" if final_status in {ProcessRun.Status.COMPLETED, ProcessRun.Status.COMPLETED_WITH_ERRORS} else "process_run.updated",
+    )
+    return final_status
 
 
 def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.0) -> None:
@@ -1325,55 +1405,99 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             )
 
     run = _refresh_run(run_id)
+    _finalize_run_summary(run=run, dispatch_errors=dispatch_errors)
+
+
+def reconcile_late_auto_generate_output(*, step: ProcessStepRun) -> None:
+    """Backfill a missing deck/battery artifact from a late Hope callback.
+
+    orchestrate_auto_generate_run's watchdog (_wait_for_steps) can mark a
+    generate_flashcards/generate_battery step FAILED for a "stale worker" if
+    Hope takes longer than the stale-timeout to call back (e.g. a slow LLM
+    generation with no intermediate heartbeat). When Hope's real callback
+    (DeckViewSet/BatteryViewSet.finalize_from_service) arrives afterward, it
+    already overwrites that step back to COMPLETED with the correct
+    deck_id/battery_id - but by then the orchestrator has already finalized
+    the run without ever creating the corresponding ProcessArtifact, so the
+    run stays stuck reporting e.g. deck_count=0 even though generation
+    actually succeeded.
+
+    Call this right after finalize_from_service marks its auto_workflow_step
+    COMPLETED. It only acts if the run's finalize_outputs step already
+    reached a terminal state (i.e. the orchestrator is no longer waiting on
+    this step itself) - otherwise the live orchestrator will pick up the
+    output through its normal aggregation loop and this is a no-op.
+    """
+    run = step.run
+    if run.workflow_key != AUTO_WORKFLOW_KEY or step.status != ProcessStepRun.Status.COMPLETED:
+        return
+    if step.step_key not in {AUTO_STAGE_KEYS["generate_flashcards"], AUTO_STAGE_KEYS["generate_battery"]}:
+        return
+
+    run = _refresh_run(run.id)
     finalize_step = _step_by_key(run, AUTO_STAGE_KEYS["finalize"])
-    flashcard_failures = [step for step in run.steps.filter(step_key=AUTO_STAGE_KEYS["generate_flashcards"]) if step.status == ProcessStepRun.Status.FAILED]
-    battery_failures = [step for step in run.steps.filter(step_key=AUTO_STAGE_KEYS["generate_battery"]) if step.status == ProcessStepRun.Status.FAILED]
-    completed_outputs = [
-        step
-        for step in run.steps.filter(step_key__in=[AUTO_STAGE_KEYS["generate_flashcards"], AUTO_STAGE_KEYS["generate_battery"]])
-        if step.status in {ProcessStepRun.Status.COMPLETED, ProcessStepRun.Status.COMPLETED_WITH_ERRORS}
-    ]
+    if finalize_step is None or finalize_step.status not in AUTO_TERMINAL_STEP_STATUSES:
+        return
 
-    if flashcard_failures or battery_failures or dispatch_errors:
-        final_status = ProcessRun.Status.COMPLETED_WITH_ERRORS if completed_outputs else ProcessRun.Status.FAILED
-        finalize_step_status = (
-            ProcessStepRun.Status.COMPLETED_WITH_ERRORS if completed_outputs else ProcessStepRun.Status.FAILED
-        )
-        finalize_message = "Auto generation finished with errors" if completed_outputs else "Auto generation failed"
+    logger.info(
+        "Reconciling late auto-generate callback for run %s step %s (%s) after finalize already ran at %s",
+        run.run_id,
+        step.id,
+        step.step_key,
+        finalize_step.finished_at,
+    )
+
+    result_payload = dict(step.result_payload or {})
+    if step.step_key == AUTO_STAGE_KEYS["generate_flashcards"]:
+        deck_id = result_payload.get("deck_id")
+        deck = Deck.objects.filter(id=deck_id).first() if deck_id else None
+        if deck is not None:
+            _sync_run_output_artifact(
+                run=run,
+                step=step,
+                artifact_key=f"deck:{deck.id}",
+                artifact_type="deck",
+                resource_type="deck",
+                resource_id=str(deck.id),
+                payload={
+                    "deck_id": deck.id,
+                    "job_id": step.external_job_id,
+                    "card_count": result_payload.get("card_count", 0),
+                },
+                metadata={"title": deck.title},
+            )
+        else:
+            logger.warning(
+                "Late auto-generate callback for run %s step %s had no resolvable deck (deck_id=%s)",
+                run.run_id,
+                step.id,
+                deck_id,
+            )
     else:
-        final_status = ProcessRun.Status.COMPLETED
-        finalize_step_status = ProcessStepRun.Status.COMPLETED
-        finalize_message = "Auto generation completed"
+        battery_id = result_payload.get("battery_id")
+        battery = Battery.objects.filter(id=battery_id).first() if battery_id else None
+        if battery is not None:
+            _sync_run_output_artifact(
+                run=run,
+                step=step,
+                artifact_key=f"battery:{battery.id}",
+                artifact_type="battery",
+                resource_type="battery",
+                resource_id=str(battery.id),
+                payload={
+                    "battery_id": battery.id,
+                    "job_id": step.external_job_id,
+                    "question_count": battery.questions_rel.count(),
+                },
+                metadata={"title": battery.name, "status": battery.status},
+                produced=battery.status == "Ready",
+            )
+        else:
+            logger.warning(
+                "Late auto-generate callback for run %s step %s had no resolvable battery (battery_id=%s)",
+                run.run_id,
+                step.id,
+                battery_id,
+            )
 
-    update_step_progress(
-        step=finalize_step,
-        status=finalize_step_status,
-        progress_percent=100 if finalize_step_status != ProcessStepRun.Status.FAILED else finalize_step.progress_percent,
-        status_message=finalize_message,
-        result_payload={
-            "tag_group_count": len(created_groups),
-            "deck_count": run.artifacts.filter(artifact_type="deck").count(),
-            "battery_count": run.artifacts.filter(artifact_type="battery").count(),
-        },
-        error_payload={"dispatch_errors": dispatch_errors} if dispatch_errors else {},
-        started_at=finalize_step.started_at or timezone.now(),
-        finished_at=timezone.now(),
-    )
-    recompute_run_progress(
-        run=run,
-        status=final_status,
-        current_step_key=AUTO_STAGE_KEYS["finalize"],
-        current_stage=AUTO_STAGE_KEYS["finalize"],
-        status_message=finalize_message,
-        result_payload={
-            "tag_group_count": len(created_groups),
-            "deck_ids": list(run.artifacts.filter(artifact_type="deck").values_list("resource_id", flat=True)),
-            "battery_ids": list(run.artifacts.filter(artifact_type="battery").values_list("resource_id", flat=True)),
-        },
-        error_payload={"dispatch_errors": dispatch_errors} if dispatch_errors else {},
-        finished_at=timezone.now(),
-    )
-    publish_run_event(
-        run,
-        event="process_run.completed" if final_status in {ProcessRun.Status.COMPLETED, ProcessRun.Status.COMPLETED_WITH_ERRORS} else "process_run.updated",
-    )
+    _finalize_run_summary(run=run)
