@@ -573,6 +573,8 @@ class Battery(models.Model):
     visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default="private")
     description = models.TextField(blank=True, default="")
     config = models.JSONField(default=dict, blank=True)
+    # Manual display order within its topic (TagGroup), set via the reorder endpoint.
+    order = models.PositiveIntegerField(default=0)
     sections = models.ManyToManyField(
         "Section",
         related_name="batteries",
@@ -806,6 +808,8 @@ class Deck(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     topic = models.ForeignKey(Topic, on_delete=models.SET_NULL, null=True, blank=True)
     config = models.JSONField(default=dict, blank=True)
+    # Manual display order within its topic (TagGroup), set via the reorder endpoint.
+    order = models.PositiveIntegerField(default=0)
     # ✅ Job externo asociado (último o actual)
     external_job_id = models.CharField(max_length=64, blank=True, null=True, db_index=True)
     def __str__(self):

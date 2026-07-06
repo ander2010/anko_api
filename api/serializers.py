@@ -4,7 +4,7 @@ import os
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import serializers
 from PIL import Image, ImageOps
-from .models import AccessRequest, ConversationMessage, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, ProcessRun, ProcessStepRun, ProcessArtifact
+from .models import AccessRequest, ConversationMessage, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, ProcessRun, ProcessStepRun, ProcessArtifact, Collection, TagGroup
 from django.contrib.auth import get_user_model
 from dj_rest_auth.forms import AllAuthPasswordResetForm
 from .models import (
@@ -224,6 +224,21 @@ class SectionSerializer(serializers.ModelSerializer):
         model = Section
         fields = '__all__'
 
+
+class CollectionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Collection
+        fields = ["id", "name", "owner", "kind", "metadata", "created_at", "updated_at"]
+        read_only_fields = ["owner", "created_at", "updated_at"]
+
+
+class TagGroupSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TagGroup
+        fields = ["id", "collection", "name", "status", "metadata", "created_at", "updated_at"]
+        read_only_fields = ["created_at", "updated_at"]
+
+
 class TopicSerializer(serializers.ModelSerializer):
     related_sections = serializers.PrimaryKeyRelatedField(
         queryset=Section.objects.all(),  # 👈 NO none()
@@ -398,12 +413,16 @@ class BatterySerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
     approved_count = serializers.SerializerMethodField()
     rejected_count = serializers.SerializerMethodField()
+    tag_group_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Battery
         fields = [
             "id",
             "project",
+            "collection",
+            "tag_group_id",
+            "order",
             "rule",
             "name",
             "status",
@@ -425,6 +444,10 @@ class BatterySerializer(serializers.ModelSerializer):
 
     def get_rejected_count(self, obj):
         return obj.access_requests.filter(status="rejected").count()
+
+    def get_tag_group_id(self, obj):
+        link = obj.source_tag_groups.values_list("tag_group_id", flat=True).first()
+        return link
 
     def get_attempts_count(self, obj):
         request = self.context.get("request")
@@ -450,12 +473,16 @@ class BatteryListSerializer(serializers.ModelSerializer):
     owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
     approved_count = serializers.SerializerMethodField()
     rejected_count = serializers.SerializerMethodField()
+    tag_group_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Battery
         fields = [
             "id",
             "project",
+            "collection",
+            "tag_group_id",
+            "order",
             "rule",
             "name",
             "status",
@@ -477,6 +504,10 @@ class BatteryListSerializer(serializers.ModelSerializer):
 
     def get_rejected_count(self, obj):
         return obj.access_requests.filter(status="rejected").count()
+
+    def get_tag_group_id(self, obj):
+        link = obj.source_tag_groups.values_list("tag_group_id", flat=True).first()
+        return link
 
     def get_question_count(self, obj):
         annotated = getattr(obj, "question_count", None)
@@ -950,10 +981,11 @@ class DeckSerializer(serializers.ModelSerializer):
     cards = FlashcardSerializer(many=True, read_only=True)
     approved_count = serializers.SerializerMethodField()
     rejected_count = serializers.SerializerMethodField()
+    tag_group_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Deck
-        fields = ["id", "ownerId", "title", "visibility", "created_at", "description", "cardsCount", "cards","project","sections","external_job_id", "approved_count", "rejected_count"]
+        fields = ["id", "ownerId", "title", "visibility", "created_at", "description", "cardsCount", "cards","project","collection","tag_group_id","order","sections","external_job_id", "approved_count", "rejected_count"]
         read_only_fields = ["created_at", "ownerId", "cardsCount", "cards","external_job_id"]
 
     def get_cardsCount(self, obj):
@@ -968,12 +1000,16 @@ class DeckSerializer(serializers.ModelSerializer):
     def get_rejected_count(self, obj):
         return obj.access_requests.filter(status="rejected").count()
 
+    def get_tag_group_id(self, obj):
+        return obj.source_tag_groups.values_list("tag_group_id", flat=True).first()
+
 
 class DeckListSerializer(serializers.ModelSerializer):
     ownerId = serializers.IntegerField(source="owner_id", read_only=True)
     cardsCount = serializers.SerializerMethodField()
     approved_count = serializers.SerializerMethodField()
     rejected_count = serializers.SerializerMethodField()
+    tag_group_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Deck
@@ -986,12 +1022,18 @@ class DeckListSerializer(serializers.ModelSerializer):
             "description",
             "cardsCount",
             "project",
+            "collection",
+            "tag_group_id",
+            "order",
             "sections",
             "external_job_id",
             "approved_count",
             "rejected_count",
         ]
         read_only_fields = ["created_at", "ownerId", "cardsCount", "external_job_id"]
+
+    def get_tag_group_id(self, obj):
+        return obj.source_tag_groups.values_list("tag_group_id", flat=True).first()
 
     def get_cardsCount(self, obj):
         annotated = getattr(obj, "card_count", None)

@@ -64,14 +64,15 @@ from api.services.auto_generate_workflow import (
 from api.services.translate import post_translate
 from api.services.workflow_progress import publish_run_event, recompute_run_progress, update_step_progress
 from api.services.workflow_progress_consumer import enqueue_progress_consumer
-from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion, BatteryAttempt, BatteryAttemptAnswer, UserSession, PdfDecryptionKey, Collection, TagGroup, BatterySourceDocument, BatterySourceSection, BatterySourceTagGroup, ProcessRun, ProcessStepRun, ProcessStepDependency, ProcessArtifact
+from .models import AccessRequest, ConversationMessage, DocumentUploadEvent, EmailVerification, QaPair, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion, BatteryAttempt, BatteryAttemptAnswer, UserSession, PdfDecryptionKey, Collection, TagGroup, BatterySourceDocument, BatterySourceSection, BatterySourceTagGroup, DeckSourceTagGroup, ProcessRun, ProcessStepRun, ProcessStepDependency, ProcessArtifact
 from decimal import Decimal
 from django.db.models import Q
 from .services.question_generator import generate_questions_for_rule
 from django.db import transaction
 from .serializers import (
-    AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SummaryJobSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer, 
-    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer, BatteryListSerializer, BatteryOptionSerializer, BatteryQuestionSerializer, BatteryAttemptSerializer, DocumentListSerializer, ProcessRunListSerializer, ProcessRunDetailSerializer, ProcessStepRunSerializer, ProcessArtifactSerializer
+    AccessRequestCreateSerializer, AccessRequestSerializer, AllowedRoutesSerializer, CardFeedbackRequestSerializer, ChangePasswordSerializer, ConversationMessageSerializer, DocumentEsSerializer, DocumentWithSectionsSerializer, FrontendPasswordResetSerializer, NextCardRequestSerializer, PublicBatteryCardSerializer, PublicDeckCardSerializer, PublicDeckCardSerializer, SummaryJobSerializer, SupportRequestSerializer, UserSerializer, ProjectSerializer, DocumentSerializer,
+    SectionSerializer, TopicSerializer, RuleSerializer, BatterySerializer, BatteryListSerializer, BatteryOptionSerializer, BatteryQuestionSerializer, BatteryAttemptSerializer, DocumentListSerializer, ProcessRunListSerializer, ProcessRunDetailSerializer, ProcessStepRunSerializer, ProcessArtifactSerializer,
+    CollectionSerializer, TagGroupSerializer,
 )
 from urllib.parse import quote, urlencode
 from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
@@ -2217,7 +2218,46 @@ class SectionViewSet(viewsets.ModelViewSet):
     queryset = Section.objects.all()
     serializer_class = SectionSerializer
 
-   
+
+class CollectionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/collections/       -> processes (Collections) visible to the caller
+    GET /api/collections/{id}/  -> a single process
+
+    Read-only: Collections are created by the auto-generate workflow, not
+    through this API. Regular users only see their own; RBAC admins see all.
+    """
+    serializer_class = CollectionSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        user = self.request.user
+        if _is_rbac_admin_user(user):
+            return Collection.objects.all()
+        return Collection.objects.filter(owner=user)
+
+
+class TagGroupViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    GET /api/tag-groups/?collection=<id>  -> topics (TagGroups) within a process
+
+    Read-only: TagGroups are created by the auto-generate workflow, not
+    through this API.
+    """
+    serializer_class = TagGroupSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = TagGroup.objects.all() if _is_rbac_admin_user(user) else TagGroup.objects.filter(collection__owner=user)
+        collection_id = self.request.query_params.get("collection")
+        if collection_id:
+            qs = qs.filter(collection_id=collection_id)
+        return qs
+
+
 class TopicViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = TopicSerializer
@@ -2324,7 +2364,64 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         project_id = self.request.query_params.get("project")
         if project_id:
             qs = qs.filter(project_id=project_id)
+        collection_id = self.request.query_params.get("collection")
+        if collection_id:
+            qs = qs.filter(collection_id=collection_id)
+        tag_group_id = self.request.query_params.get("tag_group")
+        if tag_group_id:
+            qs = qs.filter(source_tag_groups__tag_group_id=tag_group_id).distinct()
+            # Within a topic, respect the manual display order first.
+            qs = qs.order_by("order", "-created_at")
         return qs
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="reorder")
+    def reorder(self, request):
+        """
+        POST /api/batteries/reorder/
+        Body: {"tag_group_id": <id>, "ordered_ids": [<battery_id>, ...]}
+
+        Sets the display order of the batteries within a topic (TagGroup).
+        Only the owning Collection's owner or an RBAC admin may reorder.
+        ordered_ids must match exactly the batteries already linked to that
+        tag_group - this endpoint only changes order, not membership.
+        """
+        tag_group_id = request.data.get("tag_group_id")
+        ordered_ids = request.data.get("ordered_ids")
+
+        if not tag_group_id:
+            return Response({"detail": "tag_group_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(ordered_ids, list) or not ordered_ids:
+            return Response({"detail": "ordered_ids must be a non-empty list"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tag_group = TagGroup.objects.filter(id=tag_group_id).select_related("collection").first()
+        if tag_group is None:
+            return Response({"detail": "tag_group not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        collection = tag_group.collection
+        is_owner = collection is not None and collection.owner_id == request.user.id
+        if not is_owner and not _is_rbac_admin_user(request.user):
+            return Response({"detail": "Not allowed to reorder this topic."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            ordered_ids = [int(value) for value in ordered_ids]
+        except (TypeError, ValueError):
+            return Response({"detail": "ordered_ids must contain battery ids"}, status=status.HTTP_400_BAD_REQUEST)
+
+        linked_ids = set(
+            BatterySourceTagGroup.objects.filter(tag_group_id=tag_group_id).values_list("battery_id", flat=True)
+        )
+        if set(ordered_ids) != linked_ids:
+            return Response(
+                {"detail": "ordered_ids must match exactly the batteries linked to this tag_group"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        batteries_by_id = {battery.id: battery for battery in Battery.objects.filter(id__in=ordered_ids)}
+        for position, battery_id in enumerate(ordered_ids):
+            batteries_by_id[battery_id].order = position
+        Battery.objects.bulk_update(batteries_by_id.values(), ["order"])
+
+        return Response({"tag_group_id": tag_group_id, "ordered_ids": ordered_ids})
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated], url_path="questions")
     def questions(self, request, pk=None):
@@ -4732,6 +4829,55 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             return DeckListSerializer
         return DeckSerializer
 
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="reorder")
+    def reorder(self, request):
+        """
+        POST /api/decks/reorder/
+        Body: {"tag_group_id": <id>, "ordered_ids": [<deck_id>, ...]}
+
+        Sets the display order of the decks within a topic (TagGroup).
+        Only the owning Collection's owner or an RBAC admin may reorder.
+        ordered_ids must match exactly the decks already linked to that
+        tag_group - this endpoint only changes order, not membership.
+        """
+        tag_group_id = request.data.get("tag_group_id")
+        ordered_ids = request.data.get("ordered_ids")
+
+        if not tag_group_id:
+            return Response({"detail": "tag_group_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(ordered_ids, list) or not ordered_ids:
+            return Response({"detail": "ordered_ids must be a non-empty list"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tag_group = TagGroup.objects.filter(id=tag_group_id).select_related("collection").first()
+        if tag_group is None:
+            return Response({"detail": "tag_group not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        collection = tag_group.collection
+        is_owner = collection is not None and collection.owner_id == request.user.id
+        if not is_owner and not _is_rbac_admin_user(request.user):
+            return Response({"detail": "Not allowed to reorder this topic."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            ordered_ids = [int(value) for value in ordered_ids]
+        except (TypeError, ValueError):
+            return Response({"detail": "ordered_ids must contain deck ids"}, status=status.HTTP_400_BAD_REQUEST)
+
+        linked_ids = set(
+            DeckSourceTagGroup.objects.filter(tag_group_id=tag_group_id).values_list("deck_id", flat=True)
+        )
+        if set(ordered_ids) != linked_ids:
+            return Response(
+                {"detail": "ordered_ids must match exactly the decks linked to this tag_group"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        decks_by_id = {deck.id: deck for deck in Deck.objects.filter(id__in=ordered_ids)}
+        for position, deck_id in enumerate(ordered_ids):
+            decks_by_id[deck_id].order = position
+        Deck.objects.bulk_update(decks_by_id.values(), ["order"])
+
+        return Response({"tag_group_id": tag_group_id, "ordered_ids": ordered_ids})
+
     @staticmethod
     def _coerce_int_list(values) -> list[int]:
         cleaned: list[int] = []
@@ -6032,6 +6178,16 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         project_id = self.request.query_params.get("project")
         if project_id:
             qs = qs.filter(project_id=project_id)
+
+        collection_id = self.request.query_params.get("collection")
+        if collection_id:
+            qs = qs.filter(collection_id=collection_id)
+
+        tag_group_id = self.request.query_params.get("tag_group")
+        if tag_group_id:
+            qs = qs.filter(source_tag_groups__tag_group_id=tag_group_id).distinct()
+            # Within a topic, respect the manual display order first.
+            return qs.order_by("order", "-created_at")
 
         return qs.order_by("-id")
 

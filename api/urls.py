@@ -10,7 +10,7 @@ from .views import (
     BatteryShareViewSet, SavedBatteryViewSet, InviteViewSet,
     DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet, StatisticsViewSet, GoogleLoginView, FacebookLoginView,
     NotificationViewSet, UserNotificationViewSet,
-    ProcessRunViewSet,
+    ProcessRunViewSet, CollectionViewSet, TagGroupViewSet,
 )
 from dj_rest_auth.views import PasswordResetView, PasswordResetConfirmView
 
@@ -24,6 +24,8 @@ router.register(r"projects", ProjectViewSet, basename="projects")
 router.register(r'documents', DocumentViewSet)
 router.register(r'sections', SectionViewSet)
 router.register(r'topics', TopicViewSet, basename="topics")
+router.register(r'collections', CollectionViewSet, basename="collections")
+router.register(r'tag-groups', TagGroupViewSet, basename="tag-groups")
 router.register(r'rules', RuleViewSet, basename="rules")
 router.register(r'batteries', BatteryViewSet, basename="batteries")
 
