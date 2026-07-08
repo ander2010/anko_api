@@ -6600,12 +6600,15 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
        
 
         svc_payload = {
-            "document_ids": document_ids,
-            "tags": tags,
             "quantity": cards_count,
             "difficulty": difficulty,
             "user_id": str(request.user.id),
-            "job_id":job_id,
+            "job_id": job_id,
+            "source_bundle": {
+                "document_ids": [str(doc_id) for doc_id in document_ids],
+                "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+                "title_hints": [str(tag).strip() for tag in tags if str(tag).strip()][:6],
+            },
         }
 
         # --- Call microservice ---
@@ -6971,15 +6974,18 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         difficulty = (data.get("difficulty") or "medium").lower()
         job_id = str(uuid.uuid4())
       
+        normalized_tags = [str(tag).strip() for tag in tags if str(tag).strip()]
         svc_payload = {
-        #      "document_ids": ["test"],
-        # "tags": ["Barcelona"],
-            "document_ids": document_ids,            
-            "tags": tags,
-            "quantity": cards_count,                
+            "quantity": cards_count,
             "difficulty": difficulty,
-            "user_id": str(request.user.id),   
-            "job_id": job_id,       
+            "user_id": str(request.user.id),
+            "job_id": job_id,
+            "source_bundle": {
+                "document_ids": [str(doc_id) for doc_id in document_ids],
+                "section_ids": [str(section_id) for section_id in attached_section_ids],
+                "tags": normalized_tags,
+                "title_hints": normalized_tags[:6],
+            },
         }
 
         # --- Call microservice ---
