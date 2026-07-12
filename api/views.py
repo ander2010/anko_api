@@ -48,6 +48,8 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from api.permissions import IsPlatformAdmin
+from api.enterprise.serializers.company import MembershipSerializer
 from django.db.models import Prefetch
 from django.http import HttpResponse, StreamingHttpResponse
 from collections import defaultdict
@@ -605,7 +607,7 @@ class AuthViewSet(viewsets.GenericViewSet):
 def flashcard_redis_key(job_id: str) -> str:
     return f"flashcards:cards:{job_id}"
 class UserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all()
+    queryset = User.objects.all().prefetch_related("roles", "company_memberships__company")
     serializer_class = UserSerializer
 
 
@@ -2240,10 +2242,13 @@ class CollectionViewSet(viewsets.ReadOnlyModelViewSet):
 
 class TagGroupViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    GET /api/tag-groups/?collection=<id>  -> topics (TagGroups) within a process
+    GET    /api/tag-groups/?collection=<id>  -> topics (TagGroups) within a process
+    DELETE /api/tag-groups/{id}/             -> deletes the topic AND every deck/battery in it
 
-    Read-only: TagGroups are created by the auto-generate workflow, not
-    through this API.
+    Mostly read-only: TagGroups are created by the auto-generate workflow, not
+    through this API — `destroy` is the one deliberate exception, letting a
+    user remove an entire topic (and everything generated or manually added
+    under it) in one action instead of deleting each deck/battery one by one.
     """
     serializer_class = TagGroupSerializer
     permission_classes = [IsAuthenticated]
@@ -2256,6 +2261,37 @@ class TagGroupViewSet(viewsets.ReadOnlyModelViewSet):
         if collection_id:
             qs = qs.filter(collection_id=collection_id)
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        tag_group = self.get_object()
+
+        deck_ids = list(
+            DeckSourceTagGroup.objects.filter(tag_group=tag_group).values_list("deck_id", flat=True)
+        )
+        battery_ids = list(
+            BatterySourceTagGroup.objects.filter(tag_group=tag_group).values_list("battery_id", flat=True)
+        )
+
+        # Flashcard.deck is SET_NULL (not CASCADE) — delete cards explicitly first,
+        # otherwise they'd survive as orphans instead of being removed.
+        if deck_ids:
+            for deck in Deck.objects.filter(id__in=deck_ids).prefetch_related("cards"):
+                deck.cards.all().delete()
+            Deck.objects.filter(id__in=deck_ids).delete()
+
+        # Battery's questions/options/attempts/shares/source-links are all CASCADE.
+        if battery_ids:
+            Battery.objects.filter(id__in=battery_ids).delete()
+
+        # ProcessArtifacts reference by resource_id, not FK — won't cascade on their own.
+        ProcessArtifact.objects.filter(artifact_type="tag_group", resource_id=str(tag_group.id)).delete()
+        if deck_ids:
+            ProcessArtifact.objects.filter(artifact_type="deck", resource_id__in=[str(d) for d in deck_ids]).delete()
+        if battery_ids:
+            ProcessArtifact.objects.filter(artifact_type="battery", resource_id__in=[str(b) for b in battery_ids]).delete()
+
+        tag_group.delete()  # cascades TagGroupItem + any remaining source-link rows
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class TopicViewSet(viewsets.ModelViewSet):
@@ -2330,6 +2366,80 @@ def normalize_storage_key(key: str) -> str:
 
     return key
 
+
+def _resolve_ks_for_battery(battery):
+    """Reverse-resolve the KnowledgeSource a battery was generated under, if any.
+
+    A Battery has no direct FK to KnowledgeSource — the real path is
+    Battery -> BatterySourceTagGroup -> tag_group_id -> ProcessArtifact
+    (artifact_type="tag_group") -> its ProcessRun -> resource_id (comma-joined
+    document ids) -> KnowledgeSourceDocument -> KnowledgeSource. Returns None
+    for personal/project batteries that were never part of an Enterprise
+    Knowledge Source process (the common case for most batteries app-wide).
+    """
+    tag_group_ids = list(
+        BatterySourceTagGroup.objects.filter(battery=battery).values_list("tag_group_id", flat=True)
+    )
+    if not tag_group_ids:
+        return None
+
+    run_ids = list(
+        ProcessArtifact.objects.filter(
+            artifact_type="tag_group", resource_id__in=[str(t) for t in tag_group_ids]
+        ).values_list("run_id", flat=True).distinct()
+    )
+    if not run_ids:
+        return None
+
+    from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+    from api.enterprise_document_intelligence_models import KnowledgeSource
+
+    for resource_id in ProcessRun.objects.filter(id__in=run_ids).values_list("resource_id", flat=True):
+        try:
+            doc_ids = [int(v) for v in resource_id.split(",") if v.strip()]
+        except ValueError:
+            continue
+        ks_id = (
+            KnowledgeSourceDocument.objects
+            .filter(document_id__in=doc_ids)
+            .values_list("knowledge_source_id", flat=True)
+            .first()
+        )
+        if ks_id:
+            return KnowledgeSource.objects.filter(id=ks_id).select_related("company").first()
+    return None
+
+
+def _record_enterprise_battery_completion(battery, user, total_score, max_score, correct_count, total_questions):
+    """Best-effort hook: if this battery belongs to an Enterprise Knowledge
+    Source process, record a KnowledgeAssessment and schedule the first
+    spaced-repetition review for it (SM-2, see ReviewSchedule). No-op for
+    personal/project batteries. Never raises — a failure here must not break
+    the actual battery-finishing flow.
+    """
+    try:
+        ks = _resolve_ks_for_battery(battery)
+        if not ks:
+            return
+        from api.enterprise.services.retention_service import RetentionService
+        from api.enterprise_retention_models import ReviewSchedule
+
+        score_pct = (total_score / max_score * Decimal("100")) if max_score > 0 else Decimal("0")
+        RetentionService.create_assessment(
+            user=user, company=ks.company, score=score_pct,
+            assessment_type="battery", items_total=total_questions,
+            items_correct=correct_count, battery=battery,
+        )
+        already_scheduled = ReviewSchedule.objects.filter(
+            user=user, battery=battery, status="pending"
+        ).exists()
+        if not already_scheduled:
+            RetentionService.schedule_review(
+                user=user, company=ks.company, review_type="battery",
+                battery=battery, priority="medium",
+            )
+    except Exception:
+        logger.exception("Failed to record enterprise retention/review for battery %s", battery.id)
 
 
 class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
@@ -3895,10 +4005,33 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if not project_id:
-            return Response({"detail": "project is required"}, status=status.HTTP_400_BAD_REQUEST)
-        # if not doc_id:
-        #     return Response({"detail": "doc_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        # doc_id required — removed, project is now optional (see Battery model comment:
+        # "New flows should attach it to Collection + source links, not require Project/Rule").
+        # Callers like the Enterprise Knowledge Source flow have no Project at all — only
+        # sections/tag_group_ids — so requiring it here would force them to pass an
+        # unrelated id (e.g. a KnowledgeSource id), which either 404s or silently attaches
+        # the battery to the wrong Project.
+        project = None
+        if project_id not in (None, ""):
+            project = Project.objects.filter(id=project_id).first()
+            if not project:
+                return Response({"detail": "project not found"}, status=status.HTTP_404_NOT_FOUND)
+            if not _is_rbac_admin_user(request.user) and not (
+                project.owner_id == request.user.id or project.members.filter(id=request.user.id).exists()
+            ):
+                return Response({"detail": "You do not have access to this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        tag_group_ids = BatteryViewSet._coerce_int_list(request.data.get("tag_group_ids"))
+        tag_groups = []
+        if tag_group_ids:
+            tag_groups = list(TagGroup.objects.filter(id__in=tag_group_ids))
+            found_tag_group_ids = {tag_group.id for tag_group in tag_groups}
+            missing_tag_group_ids = [tgid for tgid in tag_group_ids if tgid not in found_tag_group_ids]
+            if missing_tag_group_ids:
+                return Response(
+                    {"detail": "Some tag groups were not found", "missing_tag_group_ids": missing_tag_group_ids},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
 
         # 1) cargar sections
@@ -3934,7 +4067,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         difficulty_db = {"easy": "Easy", "medium": "Medium", "hard": "Hard"}.get(difficulty, "Medium")
 
         battery = Battery.objects.create(
-            project_id=project_id,
+            project_id=project.id if project else None,
             rule=rule,
             name=request.data.get("name") or (f"Battery - {rule.name}" if rule else "Battery - Generated"),
             status="Draft",
@@ -3971,6 +4104,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 "collection_id": str(battery.collection_id) if getattr(battery, "collection_id", None) else None,
                 "document_ids": document_ids,
                 "section_ids": [str(section.id) for section in sections],
+                "tag_group_ids": [str(tag_group.id) for tag_group in tag_groups],
                 "tags": derived_tags,
                 "title_hints": derived_tags[:6],
             },
@@ -4506,6 +4640,10 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             total_questions=total_questions,
         )
 
+        _record_enterprise_battery_completion(
+            battery, request.user, total_score, max_score, correct_count, total_questions
+        )
+
         return Response(BatteryAttemptSerializer(attempt).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated])
@@ -4526,19 +4664,36 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 class ResourceViewSet(viewsets.ModelViewSet):
     queryset = Resource.objects.all().order_by("key")
     serializer_class = ResourceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
 
 
 class PermissionViewSet(viewsets.ModelViewSet):
     queryset = Permission.objects.select_related("resource").all().order_by("resource__key", "action", "code")
     serializer_class = PermissionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
 
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.prefetch_related("permissions").all().order_by("name")
     serializer_class = RoleSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+
+class GlobalCompanyMembershipViewSet(viewsets.ModelViewSet):
+    """
+    Platform-admin-only edit/delete of any user's CompanyMembership, across any
+    company. Backs the "Roles por empresa" column on the Global Users admin
+    page — deliberately NOT gated by validate_company_access (that requires
+    the caller to belong to the target company, which a platform admin
+    reviewing an arbitrary user often won't).
+    """
+    serializer_class = MembershipSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        from api.enterprise_models import CompanyMembership
+        return CompanyMembership.objects.select_related("user", "company").all()
 
 
 # ==========================================================
@@ -8335,7 +8490,7 @@ class RBACViewSet(viewsets.ViewSet):
                 .order_by("resource__key")
             )
         else:
-            # Usuario normal: permisos por roles
+            # Usuario normal: permisos por roles (dashboard.* via User.roles, global)
             allowed = list(
                 Permission.objects.filter(
                     action="view",
@@ -8346,6 +8501,28 @@ class RBACViewSet(viewsets.ViewSet):
                 .distinct()
                 .order_by("resource__key")
             )
+
+            # enterprise.* is scoped by CompanyMembership.role, not User.roles —
+            # a company role never gets attached to User.roles (see
+            # api/enterprise/services/rbac_service.py). Resolve it separately
+            # from whichever company the caller asks about.
+            company_id = request.query_params.get("company_id")
+            if company_id:
+                from api.enterprise_models import CompanyMembership
+                membership = CompanyMembership.objects.filter(
+                    user=user, company_id=company_id, status="active"
+                ).first()
+                if membership:
+                    enterprise_allowed = list(
+                        Permission.objects.filter(
+                            action="view",
+                            roles__name=f"enterprise.{membership.role}",
+                            resource__key__startswith="enterprise.",
+                        )
+                        .values_list("resource__key", flat=True)
+                        .distinct()
+                    )
+                    allowed = sorted(set(allowed) | set(enterprise_allowed))
 
         payload = {
             "user_id": user.id,

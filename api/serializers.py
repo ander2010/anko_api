@@ -45,11 +45,28 @@ class UserSerializer(serializers.ModelSerializer):
         many=True,
         required=False
     )
+    # Read-only: per-company roles (CompanyMembership.role) are a separate axis
+    # from the global roles above (User.roles) — a user can be "admin" globally
+    # here while independently holding a different role in each company they
+    # belong to. Shown together so Global Users doesn't hide that distinction.
+    company_memberships = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'password', 'avatar', 'first_name', 'last_name','is_active', 'is_staff', 'roles']
-        read_only_fields = ["id"]
+        fields = ['id', 'username', 'email', 'password', 'avatar', 'first_name', 'last_name','is_active', 'is_staff', 'roles', 'company_memberships']
+        read_only_fields = ["id", "company_memberships"]
+
+    def get_company_memberships(self, obj):
+        return [
+            {
+                "id": m.id,
+                "company_id": m.company_id,
+                "company_name": m.company.name,
+                "role": m.role,
+                "status": m.status,
+            }
+            for m in obj.company_memberships.all()
+        ]
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
@@ -391,6 +408,7 @@ class SectionMiniSerializer(serializers.ModelSerializer):
 
 class DocumentWithSectionsSerializer(serializers.ModelSerializer):
     sections = SectionMiniSerializer(many=True, read_only=True)
+    url = serializers.SerializerMethodField()
 
     class Meta:
         model = Document
@@ -402,7 +420,18 @@ class DocumentWithSectionsSerializer(serializers.ModelSerializer):
             "uploaded_at",
             "status",
             "sections",
+            "url",
         ]
+
+    def get_url(self, obj):
+        if not obj.file:
+            return None
+        request = self.context.get("request")
+        try:
+            u = obj.file.url
+        except Exception:
+            return None
+        return request.build_absolute_uri(u) if request else u
 
 class BatterySerializer(serializers.ModelSerializer):
     questions = BatteryQuestionSerializer(source="questions_rel", many=True, read_only=True)

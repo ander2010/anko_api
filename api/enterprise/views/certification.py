@@ -67,11 +67,13 @@ class CertificateTemplateViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        company = self._get_company(*CONTENT_ROLES)
+        membership = self._require_permission("enterprise.ent-certs-templates", "manage")
+        from api.enterprise_models import Company
+        company = Company.objects.get(id=membership.company_id)
         serializer.save(company=company, created_by=self.request.user)
 
     def perform_update(self, serializer):
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-certs-templates", "manage")
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -81,7 +83,7 @@ class CertificateTemplateViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def activate(self, request, pk=None):
         template = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-certs-templates", "manage")
         template.is_active = True
         template.save(update_fields=["is_active", "updated_at"])
         return Response(CertificateTemplateSerializer(template).data)
@@ -97,7 +99,7 @@ class CertificateTemplateViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], url_path="check-eligibility")
     def check_eligibility(self, request, pk=None):
         template = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-certs-templates", "manage")
 
         user_id = request.query_params.get("user_id")
         if not user_id:
@@ -118,7 +120,7 @@ class CertificateTemplateViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="issue")
     def issue(self, request, pk=None):
         template = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-certs-templates", "manage")
 
         user_id = request.data.get("user_id")
         if not user_id:
@@ -308,7 +310,7 @@ class CertificationViewSet(EnterpriseViewSetMixin, viewsets.ReadOnlyModelViewSet
         company_id = self._get_company_id()
         if not company_id:
             raise ValidationError({"company_id": "This field is required."})
-        self._require_membership("owner", "admin", "auditor")
+        self._require_permission("enterprise.ent-certs-company", "view")
         from api.enterprise_models import Company
         company = Company.objects.get(id=company_id)
         data = CertificationService.get_company_certification_stats(company)

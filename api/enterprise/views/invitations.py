@@ -26,9 +26,8 @@ from api.enterprise.serializers.invitations import (
 )
 from api.enterprise.services.email_service import send_invitation_email
 from api.enterprise.services.invitation_service import InvitationService
+from api.enterprise.services.rbac_service import has_permission
 from api.enterprise_models import Company, CompanyInvitation, CompanyMembership
-
-ADMIN_ROLES = ("owner", "admin")
 
 
 def _get_company_or_404(company_id):
@@ -39,10 +38,12 @@ def _get_company_or_404(company_id):
 
 
 def _require_admin(user, company):
+    if user.is_staff:
+        return None
     membership = CompanyMembership.objects.filter(
-        company=company, user=user, status="active", role__in=ADMIN_ROLES
+        company=company, user=user, status="active"
     ).first()
-    if not membership and not user.is_staff:
+    if not membership or not has_permission(membership.role, "enterprise.ent-invitations", "manage"):
         raise PermissionDenied("Owner or Admin role required.")
     return membership
 

@@ -18,6 +18,8 @@ from api.enterprise.services.company_service import (
     TeamService,
 )
 from api.enterprise.services.security_service import validate_company_access
+from api.enterprise.services.rbac_service import require_permission
+from api.enterprise.views.learning import EnterpriseViewSetMixin
 from api.enterprise.serializers.company import (
     AddTeamMemberSerializer,
     BusinessUnitSerializer,
@@ -42,43 +44,7 @@ from api.enterprise_models import (
 
 
 ADMIN_ROLES = ("owner", "admin")
-MANAGE_ROLES = ("owner", "admin", "manager")
 READ_ROLES = ("owner", "admin", "manager", "trainer", "employee", "auditor")
-
-
-class EnterpriseViewSetMixin:
-    def _get_company_id(self):
-        for key in ("company_pk", "company_id"):
-            v = self.kwargs.get(key)
-            if v:
-                return v
-        v = self.request.query_params.get("company_id")
-        if v:
-            return v
-        return self.request.data.get("company_id")
-
-    def _require_membership(self, *allowed_roles):
-        company_id = self._get_company_id()
-        if not company_id:
-            raise ValidationError({"company_id": "This field is required."})
-        try:
-            membership = validate_company_access(self.request.user, company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
-        if allowed_roles and membership.role not in allowed_roles:
-            raise PermissionDenied(
-                f"This action requires one of: {', '.join(allowed_roles)}."
-            )
-        return membership
-
-    def _get_company(self, *allowed_roles):
-        membership = self._require_membership(*allowed_roles)
-        return Company.objects.get(id=membership.company_id)
-
-    def _user_company_ids(self):
-        return CompanyMembership.objects.filter(
-            user=self.request.user, status="active"
-        ).values_list("company_id", flat=True)
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +168,7 @@ class CompanyViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
     def members(self, request, pk=None):
         company = self._get_company_obj(pk)
         if not request.user.is_staff:
-            self._check_manage_access(company)
+            require_permission(self.request.user, company.id, "enterprise.ent-members", "manage")
         status_filter = request.query_params.get("status", "active")
         qs = (
             CompanyMembership.objects.filter(company=company)
@@ -240,16 +206,6 @@ class CompanyViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         ).first()
         if not membership:
             raise PermissionDenied("Owner or Admin role required.")
-
-    def _check_manage_access(self, company):
-        membership = CompanyMembership.objects.filter(
-            company=company,
-            user=self.request.user,
-            status="active",
-            role__in=MANAGE_ROLES,
-        ).first()
-        if not membership:
-            raise PermissionDenied("Manager role or higher required.")
 
 
 # ---------------------------------------------------------------------------
@@ -348,11 +304,12 @@ class TeamViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        company = self._get_company(*MANAGE_ROLES)
+        membership = require_permission(self.request.user, self._get_company_id(), "enterprise.ent-teams", "manage")
+        company = Company.objects.get(id=membership.company_id)
         serializer.save(company=company)
 
     def perform_update(self, serializer):
-        self._check_team_access(serializer.instance.company_id, *MANAGE_ROLES)
+        require_permission(self.request.user, serializer.instance.company_id, "enterprise.ent-teams", "manage")
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -362,7 +319,7 @@ class TeamViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="add-member")
     def add_member(self, request, pk=None):
         team = self.get_object()
-        self._check_team_access(team.company_id, *MANAGE_ROLES)
+        require_permission(self.request.user, team.company_id, "enterprise.ent-teams", "manage")
         serializer = AddTeamMemberSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
@@ -381,7 +338,7 @@ class TeamViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="remove-member")
     def remove_member(self, request, pk=None):
         team = self.get_object()
-        self._check_team_access(team.company_id, *MANAGE_ROLES)
+        require_permission(self.request.user, team.company_id, "enterprise.ent-teams", "manage")
         user_id = request.data.get("user_id")
         if not user_id:
             raise ValidationError({"user_id": "This field is required."})

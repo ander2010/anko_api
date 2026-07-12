@@ -131,7 +131,7 @@ class RetentionViewSet(EnterpriseViewSetMixin, viewsets.GenericViewSet):
                 "company_id": "Required.",
                 "team_id": "Required.",
             })
-        self._require_membership("owner", "admin", "manager")
+        self._require_permission("enterprise.ent-retention-team", "view")
 
         from api.enterprise_models import Company, Team
         company = Company.objects.get(id=company_id)
@@ -148,7 +148,7 @@ class RetentionViewSet(EnterpriseViewSetMixin, viewsets.GenericViewSet):
         company_id = self._get_company_id()
         if not company_id:
             raise ValidationError({"company_id": "This field is required."})
-        self._require_membership("owner", "admin", "manager", "auditor")
+        self._require_permission("enterprise.ent-retention-company", "view")
 
         from api.enterprise_models import Company
         company = Company.objects.get(id=company_id)
@@ -246,14 +246,14 @@ class KnowledgeGapViewSet(EnterpriseViewSetMixin, viewsets.ReadOnlyModelViewSet)
     @action(detail=False, methods=["get"])
     def open(self, request):
         company_id = self._get_company_id()
-        self._require_membership("owner", "admin", "manager", "auditor", "employee")
+        self._require_permission("enterprise.ent-gaps", "view")
         qs = self.get_queryset().filter(status="open")
         return Response(KnowledgeGapSerializer(qs, many=True).data)
 
     @action(detail=True, methods=["post"])
     def acknowledge(self, request, pk=None):
         gap = self.get_object()
-        self._require_membership("owner", "admin", "manager")
+        self._require_permission("enterprise.ent-gaps", "manage")
         if gap.status != "open":
             raise ValidationError({"detail": "Only open gaps can be acknowledged."})
         from django.utils import timezone as tz
@@ -266,7 +266,7 @@ class KnowledgeGapViewSet(EnterpriseViewSetMixin, viewsets.ReadOnlyModelViewSet)
     @action(detail=True, methods=["post"])
     def resolve(self, request, pk=None):
         gap = self.get_object()
-        self._require_membership("owner", "admin", "manager")
+        self._require_permission("enterprise.ent-gaps", "manage")
         if gap.status == "resolved":
             raise ValidationError({"detail": "Gap is already resolved."})
         from django.utils import timezone as tz
@@ -283,7 +283,7 @@ class KnowledgeGapViewSet(EnterpriseViewSetMixin, viewsets.ReadOnlyModelViewSet)
         company_id = self._get_company_id()
         if not company_id:
             raise ValidationError({"company_id": "This field is required."})
-        self._require_membership("owner", "admin", "manager")
+        self._require_permission("enterprise.ent-gaps", "manage")
 
         from api.enterprise_models import Company
         company = Company.objects.get(id=company_id)

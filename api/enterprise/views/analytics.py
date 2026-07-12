@@ -10,6 +10,7 @@ from rest_framework.response import Response
 
 from api.enterprise.services.analytics_service import AnalyticsService
 from api.enterprise.services.security_service import validate_company_access
+from api.enterprise.services.rbac_service import has_permission
 from api.enterprise.views.learning import EnterpriseViewSetMixin
 from api.enterprise.serializers.analytics import (
     AuditorDashboardSerializer,
@@ -132,7 +133,7 @@ class AnalyticsDashboardViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
     @action(detail=False, methods=["get"], url_path="company-health")
     def company_health(self, request):
         company, membership = self._resolve_company(request)
-        if membership.role not in ("owner", "admin", "auditor"):
+        if not has_permission(membership.role, "enterprise.ent-analytics-health", "view"):
             raise PermissionDenied("Auditor role or higher required.")
 
         health_score = AnalyticsService.get_company_health_score(company)
@@ -149,7 +150,7 @@ class AnalyticsDashboardViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
     @action(detail=False, methods=["get"], url_path="retention-trends")
     def retention_trends(self, request):
         company, membership = self._resolve_company(request)
-        if membership.role not in ("owner", "admin", "manager", "auditor"):
+        if not has_permission(membership.role, "enterprise.ent-analytics-retention", "view"):
             raise PermissionDenied("Manager role or higher required.")
 
         days = int(request.query_params.get("days", 90))
@@ -159,7 +160,7 @@ class AnalyticsDashboardViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
     @action(detail=False, methods=["get"], url_path="compliance-trends")
     def compliance_trends(self, request):
         company, membership = self._resolve_company(request)
-        if membership.role not in ("owner", "admin", "auditor"):
+        if not has_permission(membership.role, "enterprise.ent-analytics-compliance", "view"):
             raise PermissionDenied("Auditor role or higher required.")
 
         days = int(request.query_params.get("days", 90))
@@ -169,7 +170,7 @@ class AnalyticsDashboardViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
     @action(detail=False, methods=["get"], url_path="learning-trends")
     def learning_trends(self, request):
         company, membership = self._resolve_company(request)
-        if membership.role not in ("owner", "admin", "trainer", "manager"):
+        if not has_permission(membership.role, "enterprise.ent-analytics-learning", "view"):
             raise PermissionDenied("Trainer role or higher required.")
 
         days = int(request.query_params.get("days", 90))

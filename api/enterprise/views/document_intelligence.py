@@ -190,7 +190,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         ks = _resolve_ks(company.id, pk)
 
         from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
-        from api.models import ProcessRun, Battery, Deck
+        from api.models import ProcessRun, Battery, Deck, DeckSourceTagGroup, BatterySourceTagGroup
         from api.serializers import BatteryListSerializer, DeckListSerializer
 
         # Get document IDs linked to this KS (sorted to match resource_id in ProcessRun)
@@ -202,56 +202,124 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         if not doc_ids:
             return Response({"run": None, "batteries": [], "decks": [], "topics": []})
 
-        # Find the most recent meaningful run (skip canceled/queued/draft)
-        resource_id = ",".join(str(d) for d in doc_ids)
-        run = (
+        doc_id_set = set(doc_ids)
+
+        # Every auto-generate run ever launched for a subset of this KS's currently
+        # linked documents "belongs" to this process — not just the one matching the
+        # exact current document set. Re-running Auto-generar after adding a new
+        # document changes that exact-match key (e.g. "75" -> "75,76"), so matching
+        # only the latest run made earlier topics — and anything manually added
+        # under them via "+ Agregar deck/batería" — vanish from view even though
+        # nothing was actually deleted. Aggregating every qualifying run keeps old
+        # topics and manual content visible forever while still layering in
+        # whatever a fresh Auto-generar run produces.
+        candidate_runs = (
             ProcessRun.objects
-            .filter(
-                workflow_key="collection_auto_generate",
-                resource_type="document_batch",
-                resource_id=resource_id,
-            )
+            .filter(workflow_key="collection_auto_generate", resource_type="document_batch")
             .exclude(status__in=["canceled", "cancelled", "queued", "draft"])
-            .order_by("-created_at")
-            .first()
+            .order_by("created_at")
         )
-        if not run:
+        runs = []
+        for candidate in candidate_runs:
+            try:
+                run_doc_ids = {int(v) for v in candidate.resource_id.split(",") if v.strip()}
+            except ValueError:
+                continue
+            if run_doc_ids and run_doc_ids.issubset(doc_id_set):
+                runs.append(candidate)
+
+        if not runs:
             return Response({"run": None, "batteries": [], "decks": [], "topics": []})
 
-        # Battery artifacts → fetch real Battery objects with names
-        battery_ids = [
-            int(a.resource_id)
-            for a in run.artifacts.filter(artifact_type="battery").order_by("id")
-        ]
-        batteries_qs = Battery.objects.filter(id__in=battery_ids) if battery_ids else Battery.objects.none()
+        # Tag-group artifacts across every qualifying run → used as "topics"
+        tag_group_ids: list[int] = []
+        topics = []
+        seen_tag_group_ids = set()
+        for run in runs:
+            for a in run.artifacts.filter(artifact_type="tag_group").order_by("resource_id"):
+                if a.resource_id in seen_tag_group_ids:
+                    continue
+                seen_tag_group_ids.add(a.resource_id)
+                tag_group_ids.append(int(a.resource_id))
+                topics.append({"id": a.resource_id, "tags": a.payload.get("tags", [])})
+
+        # Battery/deck artifacts across every qualifying run, unioned with anything
+        # linked afterward via "+ Agregar deck/batería" (which links through
+        # BatterySourceTagGroup/DeckSourceTagGroup to one of these tag_groups but
+        # was never registered as an artifact of any run).
+        battery_ids = set()
+        deck_ids = set()
+        for run in runs:
+            battery_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="battery"))
+            deck_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="deck"))
+        if tag_group_ids:
+            battery_ids |= set(
+                BatterySourceTagGroup.objects
+                .filter(tag_group_id__in=tag_group_ids)
+                .values_list("battery_id", flat=True)
+            )
+            deck_ids |= set(
+                DeckSourceTagGroup.objects
+                .filter(tag_group_id__in=tag_group_ids)
+                .values_list("deck_id", flat=True)
+            )
+
+        # Respect manual display order set via /batteries/reorder/ and /decks/reorder/
+        # (same convention as the /batteries/?tag_group= and /decks/?tag_group= querysets).
+        batteries_qs = (
+            Battery.objects.filter(id__in=battery_ids).order_by("order", "-created_at")
+            if battery_ids else Battery.objects.none()
+        )
         batteries_data = BatteryListSerializer(batteries_qs, many=True, context={"request": request}).data
 
-        # Deck artifacts → fetch real Deck objects with titles
-        deck_ids = [
-            int(a.resource_id)
-            for a in run.artifacts.filter(artifact_type="deck").order_by("id")
-        ]
-        decks_qs = Deck.objects.filter(id__in=deck_ids) if deck_ids else Deck.objects.none()
+        decks_qs = (
+            Deck.objects.filter(id__in=deck_ids).order_by("order", "-created_at")
+            if deck_ids else Deck.objects.none()
+        )
         decks_data = DeckListSerializer(decks_qs, many=True, context={"request": request}).data
 
-        # Tag-group artifacts → used as "topics"
-        topics = [
-            {"id": a.resource_id, "tags": a.payload.get("tags", [])}
-            for a in run.artifacts.filter(artifact_type="tag_group").order_by("resource_id")
-        ]
-
+        latest_run = runs[-1]
         return Response({
             "run": {
-                "id": run.id,
-                "run_id": str(run.run_id),
-                "status": run.status,
-                "progress_percent": float(run.progress_percent or 0),
-                "status_message": run.status_message or "",
+                "id": latest_run.id,
+                "run_id": str(latest_run.run_id),
+                "status": latest_run.status,
+                "progress_percent": float(latest_run.progress_percent or 0),
+                "status_message": latest_run.status_message or "",
             },
             "batteries": batteries_data,
             "decks": decks_data,
             "topics": topics,
         })
+
+    @action(detail=True, methods=["get"], url_path="documents-with-sections")
+    def documents_with_sections(self, request, pk=None):
+        """Returns this KnowledgeSource's documents with their extracted sections.
+
+        Documents added via `add-document` are linked to the KnowledgeSource only
+        through KnowledgeSourceDocument (not Document.project), so the project-scoped
+        `/projects/{id}/documents-with-sections/` endpoint can never see them.
+        """
+        company, membership = self._resolve_company_membership()
+        ks = _resolve_ks(company.id, pk)
+
+        from django.db.models import Prefetch
+        from api.models import Document, Section
+        from api.serializers import DocumentWithSectionsSerializer
+        from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+
+        doc_ids = (
+            KnowledgeSourceDocument.objects
+            .filter(knowledge_source=ks)
+            .values_list("document_id", flat=True)
+        )
+        docs = (
+            Document.objects.filter(id__in=list(doc_ids))
+            .prefetch_related(Prefetch("sections", queryset=Section.objects.all().order_by("order", "id")))
+            .order_by("id")
+        )
+        ser = DocumentWithSectionsSerializer(docs, many=True, context={"request": request})
+        return Response({"documents": ser.data})
 
     @action(detail=True, methods=["post"], url_path="process")
     def process(self, request, pk=None):

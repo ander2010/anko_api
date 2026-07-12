@@ -7,6 +7,7 @@ Company filtering is enforced via get_queryset() — no data leaks across tenant
 
 from __future__ import annotations
 
+from django.db.models import Prefetch
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -15,6 +16,7 @@ from rest_framework.response import Response
 
 from api.enterprise.services.learning_service import EnterpriseLearningService
 from api.enterprise.services.security_service import validate_company_access
+from api.enterprise.services.rbac_service import require_permission, has_permission
 from api.enterprise_learning_models import (
     LearningModule,
     LearningModuleItem,
@@ -39,11 +41,6 @@ from api.enterprise.serializers.learning import (
 # ---------------------------------------------------------------------------
 # Mixin
 # ---------------------------------------------------------------------------
-
-CONTENT_ROLES = ("owner", "admin", "trainer", "manager")
-ASSIGN_ROLES = ("owner", "admin", "manager")
-READ_ROLES = ("owner", "admin", "manager", "trainer", "employee", "auditor")
-
 
 class EnterpriseViewSetMixin:
     """
@@ -78,6 +75,12 @@ class EnterpriseViewSetMixin:
                 f"This action requires one of: {', '.join(allowed_roles)}."
             )
         return membership
+
+    def _require_permission(self, resource_key, action="manage"):
+        """DB-driven replacement for _require_membership(*ROLE_TUPLE) — checks the
+        Permission rows attached to the caller's enterprise.<role> Role (editable
+        from the Admin Area) instead of a hardcoded role tuple."""
+        return require_permission(self.request.user, self._get_company_id(), resource_key, action)
 
     def _get_company(self, *allowed_roles):
         membership = self._require_membership(*allowed_roles)
@@ -118,24 +121,29 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             return (
                 LearningPath.objects.filter(company_id=company_id)
                 .select_related("company", "business_unit", "created_by")
-                .prefetch_related("modules")
+                .prefetch_related(
+                    Prefetch("modules", queryset=LearningModule.objects.select_related("knowledge_source"))
+                )
             )
         # detail actions — allow access to any company the user belongs to
         return (
             LearningPath.objects.filter(company_id__in=self._user_company_ids())
             .select_related("company", "business_unit", "created_by")
-            .prefetch_related("modules")
+            .prefetch_related(
+                Prefetch("modules", queryset=LearningModule.objects.select_related("knowledge_source"))
+            )
         )
 
     def perform_create(self, serializer):
-        company = self._get_company(*CONTENT_ROLES)
+        membership = self._require_permission("enterprise.ent-paths", "manage")
+        company = Company.objects.get(id=membership.company_id)
         module_ids = serializer.validated_data.pop("module_ids", [])
         path = serializer.save(company=company, created_by=self.request.user)
         if module_ids:
             self._link_modules(path, module_ids, company)
 
     def perform_update(self, serializer):
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-paths", "manage")
         module_ids = serializer.validated_data.pop("module_ids", [])
         path = serializer.save()
         if module_ids:
@@ -163,7 +171,7 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     def add_module(self, request, pk=None):
         """Link an existing proceso to this learning path."""
         path = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-paths", "manage")
         module_id = request.data.get("module_id")
         order = request.data.get("order")
         if not module_id:
@@ -183,7 +191,7 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     def remove_module(self, request, pk=None):
         """Unlink a proceso from this learning path (becomes standalone)."""
         path = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-paths", "manage")
         module_id = request.data.get("module_id")
         if not module_id:
             raise ValidationError({"module_id": "This field is required."})
@@ -197,14 +205,14 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def publish(self, request, pk=None):
         path = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-paths", "manage")
         updated = EnterpriseLearningService.publish_learning_path(path, request.user)
         return Response(LearningPathSerializer(updated).data)
 
     @action(detail=True, methods=["post"], url_path="assign-to-user")
     def assign_to_user(self, request, pk=None):
         path = self.get_object()
-        self._require_membership(*ASSIGN_ROLES)
+        self._require_permission("enterprise.ent-manage-assignments", "manage")
 
         user_id = request.data.get("user_id")
         due_date = request.data.get("due_date")
@@ -235,7 +243,7 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="assign-to-team")
     def assign_to_team(self, request, pk=None):
         path = self.get_object()
-        self._require_membership(*ASSIGN_ROLES)
+        self._require_permission("enterprise.ent-manage-assignments", "manage")
 
         team_id = request.data.get("team_id")
         due_date = request.data.get("due_date")
@@ -264,7 +272,7 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def analytics(self, request, pk=None):
         path = self.get_object()
-        self._require_membership(*ASSIGN_ROLES)
+        self._require_permission("enterprise.ent-manage-assignments", "manage")
 
         total_assignments = path.assignments.count()
         completed = path.assignments.filter(status="completed").count()
@@ -302,7 +310,7 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         company_ids = self._user_company_ids()
         qs = LearningModule.objects.filter(
             company_id__in=company_ids
-        ).prefetch_related("items").select_related("learning_path", "company")
+        ).prefetch_related("items").select_related("learning_path", "company", "knowledge_source")
 
         path_id = self.request.query_params.get("learning_path_id")
         if path_id:
@@ -412,7 +420,7 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="assign-to-user")
     def assign_to_user(self, request, pk=None):
         module = self.get_object()
-        self._require_membership(*ASSIGN_ROLES)
+        self._require_permission("enterprise.ent-manage-assignments", "manage")
         user_id = request.data.get("user_id")
         due_date = request.data.get("due_date")
         if not user_id:
@@ -441,7 +449,7 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="assign-to-team")
     def assign_to_team(self, request, pk=None):
         module = self.get_object()
-        self._require_membership(*ASSIGN_ROLES)
+        self._require_permission("enterprise.ent-manage-assignments", "manage")
         team_id = request.data.get("team_id")
         due_date = request.data.get("due_date")
         if not team_id:
@@ -497,11 +505,12 @@ class TrainingProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        company = self._get_company(*CONTENT_ROLES)
+        membership = self._require_permission("enterprise.ent-programs", "manage")
+        company = Company.objects.get(id=membership.company_id)
         serializer.save(company=company, created_by=self.request.user)
 
     def perform_update(self, serializer):
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-programs", "manage")
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -511,7 +520,7 @@ class TrainingProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def publish(self, request, pk=None):
         program = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-programs", "manage")
 
         learning_path_id = request.data.get("learning_path_id")
         notes = request.data.get("notes", "")
@@ -546,7 +555,7 @@ class TrainingProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def versions(self, request, pk=None):
         program = self.get_object()
-        self._require_membership(*READ_ROLES)
+        self._require_permission("enterprise.ent-programs", "view")
         versions = program.versions.all()
         return Response(TrainingProgramVersionSerializer(versions, many=True).data)
 
@@ -563,13 +572,19 @@ class LearningPathAssignmentViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSe
         company_id = self._get_company_id()
         if company_id:
             try:
-                validate_company_access(self.request.user, company_id)
+                membership = validate_company_access(self.request.user, company_id)
             except PermissionError:
                 return LearningPathAssignment.objects.none()
-            return (
+            qs = (
                 LearningPathAssignment.objects.filter(company_id=company_id)
                 .select_related("company", "learning_path", "user", "team", "assigned_by")
             )
+            # Only roles that can actually manage assignments (owner/admin/manager)
+            # see the whole company's list — everyone else (employee/trainer/
+            # auditor) only ever sees their own, same as "My Assignments" implies.
+            if has_permission(membership.role, "enterprise.ent-manage-assignments", "manage"):
+                return qs
+            return qs.filter(user=self.request.user)
         # Default: own assignments across all companies
         return (
             LearningPathAssignment.objects.filter(
@@ -580,7 +595,8 @@ class LearningPathAssignmentViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSe
         )
 
     def perform_create(self, serializer):
-        company = self._get_company(*ASSIGN_ROLES)
+        membership = self._require_permission("enterprise.ent-manage-assignments", "manage")
+        company = Company.objects.get(id=membership.company_id)
         serializer.save(company=company, assigned_by=self.request.user)
 
     # --- custom actions ---
@@ -598,7 +614,7 @@ class LearningPathAssignmentViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSe
     def overdue(self, request):
         from django.utils import timezone
         company_id = self._get_company_id()
-        self._require_membership(*ASSIGN_ROLES)
+        self._require_permission("enterprise.ent-manage-assignments", "manage")
         qs = LearningPathAssignment.objects.filter(
             company_id=company_id,
             due_date__lt=timezone.now(),

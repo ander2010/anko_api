@@ -102,6 +102,22 @@ class LearningModule(models.Model):
         on_delete=models.SET_NULL,
         related_name="modules",
     )
+    # The real, live KnowledgeSource this module represents. A KnowledgeSource can be
+    # referenced by any number of LearningModule rows (one per LearningPath it's added
+    # to, plus optionally a standalone one) — each is a separate "placement", but they
+    # all point at the same underlying process. Deleting the KnowledgeSource cascades
+    # to remove every placement of it (it disappears from every path); deleting a
+    # LearningPath does NOT touch the KnowledgeSource (see LearningPathViewSet.perform_destroy,
+    # which only orphans modules to standalone). Null on older modules created before this
+    # field existed — those can't be resolved back to a KnowledgeSource and are treated as
+    # unlinked/manual modules.
+    knowledge_source = models.ForeignKey(
+        "api.KnowledgeSource",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="learning_modules",
+    )
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     order = models.PositiveIntegerField(default=0)

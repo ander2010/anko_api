@@ -66,11 +66,13 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        company = self._get_company(*CONTENT_ROLES)
+        membership = self._require_permission("enterprise.ent-compliance-programs", "manage")
+        from api.enterprise_models import Company
+        company = Company.objects.get(id=membership.company_id)
         serializer.save(company=company, created_by=self.request.user)
 
     def perform_update(self, serializer):
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-compliance-programs", "manage")
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -150,7 +152,7 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def activate(self, request, pk=None):
         program = self.get_object()
-        self._require_membership(*CONTENT_ROLES)
+        self._require_permission("enterprise.ent-compliance-programs", "manage")
         program.status = "active"
         program.save(update_fields=["status", "updated_at"])
         return Response(ComplianceProgramSerializer(program).data)
@@ -312,7 +314,7 @@ class ComplianceAssignmentViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet)
         company_id = self._get_company_id()
         if not company_id:
             raise ValidationError({"company_id": "This field is required."})
-        self._require_membership("owner", "admin", "auditor")
+        self._require_permission("enterprise.ent-compliance-company", "view")
         from api.enterprise_models import Company
         company = Company.objects.get(id=company_id)
         data = ComplianceService.get_company_compliance(company)
@@ -324,7 +326,7 @@ class ComplianceAssignmentViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet)
         team_id = request.query_params.get("team_id")
         if not company_id or not team_id:
             raise ValidationError({"company_id": "Required.", "team_id": "Required."})
-        self._require_membership(*MANAGE_ROLES)
+        self._require_permission("enterprise.ent-compliance-team", "view")
         from api.enterprise_models import Company, Team
         company = Company.objects.get(id=company_id)
         try:

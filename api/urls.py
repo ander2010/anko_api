@@ -5,7 +5,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     AccessRequestViewSet, AdminViewSet, AuthViewSet, FrontendPasswordResetView, PublicBatteryViewSet, PublicDeckViewSet, RBACViewSet, SummaryJobViewSet, SupportRequestViewSet, UserViewSet, ProjectViewSet, DocumentViewSet,
     SectionViewSet, TopicViewSet, RuleViewSet, BatteryViewSet,
-    ResourceViewSet, PermissionViewSet, RoleViewSet,
+    ResourceViewSet, PermissionViewSet, RoleViewSet, GlobalCompanyMembershipViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
     BatteryShareViewSet, SavedBatteryViewSet, InviteViewSet,
     DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet, StatisticsViewSet, GoogleLoginView, FacebookLoginView,
@@ -32,6 +32,7 @@ router.register(r'batteries', BatteryViewSet, basename="batteries")
 router.register(r"resources", ResourceViewSet)
 router.register(r"permissions", PermissionViewSet)
 router.register(r"roles", RoleViewSet)
+router.register(r"company-memberships", GlobalCompanyMembershipViewSet, basename="company-memberships")
 
 router.register(r"plans", PlanViewSet)
 router.register(r"plan-limits", PlanLimitViewSet)

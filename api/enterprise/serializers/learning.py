@@ -71,6 +71,7 @@ class LearningModuleSerializer(serializers.ModelSerializer):
             "id",
             "company",
             "learning_path",
+            "knowledge_source",
             "name",
             "description",
             "order",
@@ -89,6 +90,7 @@ class LearningModuleSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "company": {"required": False},
             "learning_path": {"required": False, "allow_null": True},
+            "knowledge_source": {"required": False, "allow_null": True},
         }
 
     def get_item_count(self, obj):
@@ -104,6 +106,17 @@ class LearningModuleSerializer(serializers.ModelSerializer):
             )
         return attrs
 
+    def to_representation(self, instance):
+        # If this module wraps a live KnowledgeSource, its name/description always
+        # reflect the real process — not a copy frozen at the moment it was added.
+        data = super().to_representation(instance)
+        if instance.knowledge_source_id and instance.knowledge_source:
+            ks = instance.knowledge_source
+            data["name"] = ks.title
+            if ks.description:
+                data["description"] = ks.description
+        return data
+
 
 class LearningModuleLightSerializer(serializers.ModelSerializer):
     """Used in list views — no nested items to keep response light."""
@@ -116,6 +129,7 @@ class LearningModuleLightSerializer(serializers.ModelSerializer):
             "id",
             "company",
             "learning_path",
+            "knowledge_source",
             "name",
             "description",
             "order",
@@ -126,6 +140,15 @@ class LearningModuleLightSerializer(serializers.ModelSerializer):
             "minimum_passing_score",
             "item_count",
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.knowledge_source_id and instance.knowledge_source:
+            ks = instance.knowledge_source
+            data["name"] = ks.title
+            if ks.description:
+                data["description"] = ks.description
+        return data
 
     def get_item_count(self, obj):
         return obj.items.count()
@@ -371,6 +394,7 @@ class LearningPathAssignmentSerializer(serializers.ModelSerializer):
             "company",
             "learning_path",
             "learning_path_name",
+            "learning_module",
             "user",
             "user_username",
             "team",
