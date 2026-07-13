@@ -71,18 +71,30 @@ class EnterpriseLearningService:
         learning_path: LearningPath = None,
         learning_module=None,
         due_date=None,
-    ) -> LearningPathAssignment:
-        """Create a team-level assignment for a learning path or a proceso."""
-        assignment = LearningPathAssignment.objects.create(
-            company=company,
-            learning_path=learning_path,
-            learning_module=learning_module,
-            team=team,
-            assigned_by=assigned_by,
-            status="pending",
-            due_date=due_date,
-        )
+    ) -> list[LearningPathAssignment]:
+        """
+        Create one individual (user-level) assignment per team member.
+
+        A single shared team-level row (user=None, team=team) can't represent
+        each member's own progress/status independently — LearningModuleProgress
+        and completion tracking are keyed by (assignment, user), and "My
+        Assignments" only ever queries by user=request.user, so a team-only row
+        was never visible to anyone. metadata records which team this came
+        from for traceability, without violating the model's own "exactly one
+        of user or team" invariant.
+        """
+        assignments = []
         for membership in team.memberships.select_related("user"):
+            assignment = LearningPathAssignment.objects.create(
+                company=company,
+                learning_path=learning_path,
+                learning_module=learning_module,
+                user=membership.user,
+                assigned_by=assigned_by,
+                status="pending",
+                due_date=due_date,
+                metadata={"assigned_via_team_id": team.id, "assigned_via_team_name": team.name},
+            )
             LearningEvent.objects.create(
                 company=company,
                 user=membership.user,
@@ -94,7 +106,8 @@ class EnterpriseLearningService:
                     "learning_module_id": learning_module.id if learning_module else None,
                 },
             )
-        return assignment
+            assignments.append(assignment)
+        return assignments
 
     # ------------------------------------------------------------------
     # Progress tracking

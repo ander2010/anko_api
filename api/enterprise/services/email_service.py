@@ -89,7 +89,7 @@ def send_assignment_notification(assignment) -> None:
         if assignment.learning_path_id
         else assignment.learning_module.name
     )
-    link = f"{FRONTEND_URL}/assignments/{assignment.id}"
+    link = f"{FRONTEND_URL}/enterprise/learning/assignments/{assignment.id}"
     company = assignment.company
 
     def _notify(user):

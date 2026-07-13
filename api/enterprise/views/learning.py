@@ -255,7 +255,7 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         except Team.DoesNotExist:
             raise ValidationError({"team_id": "Team not found in this company."})
 
-        assignment = EnterpriseLearningService.assign_to_team(
+        assignments = EnterpriseLearningService.assign_to_team(
             learning_path=path,
             team=team,
             assigned_by=request.user,
@@ -263,9 +263,10 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             due_date=due_date,
         )
         from api.enterprise.services.email_service import send_assignment_notification
-        send_assignment_notification(assignment)
+        for assignment in assignments:
+            send_assignment_notification(assignment)
         return Response(
-            LearningPathAssignmentSerializer(assignment).data,
+            LearningPathAssignmentSerializer(assignments, many=True).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -458,7 +459,7 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             team = Team.objects.get(id=team_id, company=module.company)
         except Team.DoesNotExist:
             raise ValidationError({"team_id": "Team not found in this company."})
-        assignment = EnterpriseLearningService.assign_to_team(
+        assignments = EnterpriseLearningService.assign_to_team(
             learning_path=None,
             learning_module=module,
             team=team,
@@ -467,9 +468,10 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             due_date=due_date,
         )
         from api.enterprise.services.email_service import send_assignment_notification
-        send_assignment_notification(assignment)
+        for assignment in assignments:
+            send_assignment_notification(assignment)
         return Response(
-            LearningPathAssignmentSerializer(assignment).data,
+            LearningPathAssignmentSerializer(assignments, many=True).data,
             status=status.HTTP_201_CREATED,
         )
 
