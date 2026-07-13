@@ -52,8 +52,6 @@ def make_project(owner):
 
 def make_document(project, owner, text="This is test content about safety procedures."):
     from api.models import Document
-    import io
-    from django.core.files.base import ContentFile
     doc = Document(
         project=project,
         filename="safety.pdf",
@@ -64,7 +62,6 @@ def make_document(project, owner, text="This is test content about safety proced
         uploaded_by=owner,
         extracted_text=text,
     )
-    doc.file.save("safety.pdf", ContentFile(b"fake pdf content"), save=False)
     doc.save()
     return doc
 
@@ -301,7 +298,26 @@ class DocumentIntelligenceServiceTest(TestCase):
         DocumentIntelligenceService.process_knowledge_source(ks.pk)
         ks.refresh_from_db()
         self.assertEqual(ks.status, "failed")
-        self.assertIn("no extracted text", ks.error_message.lower())
+        self.assertIn("extracted text", ks.error_message.lower())
+
+    @patch(
+        "api.enterprise.services.document_intelligence_service.DocumentIntelligenceService._extract_with_ai",
+        return_value=_FAKE_EXTRACTION,
+    )
+    def test_process_can_use_hope_extraction_without_extracted_text(self, mock_ai):
+        from api.enterprise.services.document_intelligence_service import DocumentIntelligenceService
+
+        doc2 = make_document(self.project, self.owner, text="")
+        doc2.extracted_text = ""
+        doc2.save(update_fields=["extracted_text"])
+        ks = make_knowledge_source(self.company, doc2, self.owner)
+
+        DocumentIntelligenceService.process_knowledge_source(ks.pk)
+        ks.refresh_from_db()
+
+        self.assertEqual(ks.status, "processed")
+        self.assertEqual(ks.extracted_topics_count, 3)
+        self.assertEqual(ks.extracted_procedures_count, 2)
 
     @patch(
         "api.enterprise.services.document_intelligence_service.DocumentIntelligenceService._extract_with_ai",

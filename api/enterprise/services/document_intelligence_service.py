@@ -11,7 +11,6 @@ Handles AI-powered extraction from documents:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 from typing import Optional
@@ -21,8 +20,6 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-_OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-_MODEL = "gpt-4o-mini"
 _MAX_TEXT_CHARS = 12000
 
 
@@ -30,36 +27,24 @@ _MAX_TEXT_CHARS = 12000
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _call_openai(system: str, user: str, max_tokens: int = 2000) -> dict:
-    """
-    Calls OpenAI chat completions and returns parsed JSON dict.
-    Raises ValueError if API key is missing or response is not valid JSON.
-    """
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured.")
+def _internal_service_token() -> str:
+    return str(os.getenv("INTERNAL_SERVICE_TOKEN", "andelef")).strip() or "andelef"
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-    }
+
+def _hope_base_url() -> str:
+    return str(os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080")).rstrip("/")
+
+
+def _call_hope_json(path: str, payload: dict, *, timeout: int = 120) -> dict:
     resp = http_requests.post(
-        _OPENAI_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        f"{_hope_base_url()}{path}",
         json=payload,
-        timeout=90,
+        headers={"X-Internal-Token": _internal_service_token()},
+        timeout=timeout,
     )
     resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
-    return json.loads(content)
+    data = resp.json()
+    return data if isinstance(data, dict) else {}
 
 
 def _truncate_text(text: str) -> str:
@@ -120,23 +105,36 @@ class DocumentIntelligenceService:
             )
 
             if linked_docs:
+                document_ids = [d.document_id for d in linked_docs]
                 texts = [d.document.extracted_text or "" for d in linked_docs]
                 text = "\n\n---\n\n".join(t for t in texts if t.strip())
             elif ks.document_id:
+                document_ids = [ks.document_id]
                 text = ks.document.extracted_text or ""
             else:
+                document_ids = []
                 text = ""
 
-            if not text.strip():
+            if not document_ids and not text.strip():
                 raise ValueError(
-                    "No documents with extracted text found. Upload and process documents first."
+                    "No processed documents found. Upload and process documents first."
                 )
 
             extraction = DocumentIntelligenceService._extract_with_ai(
                 title=ks.title,
                 source_type=ks.source_type,
                 text=text,
+                document_ids=document_ids,
             )
+            if (
+                not text.strip()
+                and not extraction.get("topics")
+                and not extraction.get("procedures")
+                and not extraction.get("knowledge_nodes")
+                and not extraction.get("knowledge_relationships")
+                and str(extraction.get("summary") or "").startswith("Extraction failed:")
+            ):
+                raise ValueError("No documents with extracted text found. Upload and process documents first.")
 
             # --- Procedures ---
             procedures_data = extraction.get("procedures", [])
@@ -241,9 +239,14 @@ class DocumentIntelligenceService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _extract_with_ai(title: str, source_type: str, text: str) -> dict:
+    def _extract_with_ai(
+        title: str,
+        source_type: str,
+        text: str,
+        document_ids: list[int] | None = None,
+    ) -> dict:
         """
-        Calls OpenAI to extract structured knowledge from document text.
+        Calls Hope to extract structured knowledge from processed document content.
         Returns a dict with keys: summary, topics, procedures,
         knowledge_nodes, knowledge_relationships.
         """
@@ -281,9 +284,18 @@ class DocumentIntelligenceService:
         )
 
         try:
-            return _call_openai(system=system, user=user, max_tokens=3000)
+            return _call_hope_json(
+                "/internal/document-intelligence/extract",
+                {
+                    "title": title,
+                    "source_type": source_type,
+                    "document_ids": document_ids or [],
+                    "fallback_text": truncated,
+                },
+                timeout=120,
+            )
         except Exception as exc:
-            logger.warning("OpenAI extraction failed: %s — returning empty extraction", exc)
+            logger.warning("Hope extraction failed: %s — returning empty extraction", exc)
             return {
                 "summary": f"Extraction failed: {exc}",
                 "topics": [],
@@ -574,9 +586,17 @@ class DocumentIntelligenceService:
             "}"
         )
         try:
-            return _call_openai(system=system, user=user, max_tokens=1000)
+            return _call_hope_json(
+                "/internal/document-intelligence/analyze-diff",
+                {
+                    "knowledge_source_title": knowledge_source_title,
+                    "old_summary": old_summary,
+                    "new_summary": new_summary,
+                },
+                timeout=90,
+            )
         except Exception as exc:
-            logger.warning("AI diff analysis failed: %s — using defaults", exc)
+            logger.warning("Hope diff analysis failed: %s — using defaults", exc)
             return {
                 "key_changes": [],
                 "impact_level": "medium",
