@@ -181,6 +181,26 @@ class ComplianceService:
                 "score": str(score) if score is not None else None,
             },
         )
+
+        if is_compliant:
+            # Auto-issue any certificate templates whose requirements include
+            # this compliance program (best-effort — must not roll back the
+            # assignment completion itself).
+            try:
+                from api.enterprise.services.certification_service import CertificationService
+                CertificationService.auto_issue_on_compliance_completion(
+                    user=user,
+                    company=assignment.company,
+                    compliance_program=program,
+                    score=score,
+                    issued_by=None,
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "Auto-issue on compliance completion failed for assignment %s", assignment.id
+                )
+
         return assignment
 
     # ------------------------------------------------------------------
