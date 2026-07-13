@@ -864,6 +864,34 @@ class AutoGenerateWorkflowCallbackTests(TestCase):
 
         self.assertEqual(_step_finalize_callback_status(step), "completed")
 
+    @patch("api.views.time.sleep", return_value=None)
+    @patch("api.views._fetch_generated_flashcards_from_hope")
+    def test_sync_generated_flashcards_retries_empty_fetches(self, fetch_mock, _sleep_mock):
+        from api.views import DeckViewSet
+
+        fetch_mock.side_effect = [
+            [],
+            [],
+            [
+                {
+                    "card_id": "card-1",
+                    "front": "Front",
+                    "back": "Back",
+                    "tags": ["tag-1"],
+                }
+            ],
+        ]
+
+        result = DeckViewSet._sync_generated_flashcards(deck=self.deck, job_id="hope-job-1")
+
+        self.assertEqual(fetch_mock.call_count, 3)
+        self.assertEqual(result["card_count"], 1)
+        self.assertEqual(result["cards_synced"], 1)
+        saved_card = Flashcard.objects.get(deck=self.deck)
+        self.assertEqual(saved_card.job_id, "hope-job-1")
+        self.assertEqual(saved_card.front, "Front")
+        self.assertEqual(saved_card.back, "Back")
+
     def test_document_with_active_job_reuses_existing_processing(self):
         document = Document.objects.create(
             project=self.project,

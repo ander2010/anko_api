@@ -782,6 +782,14 @@ def _fetch_generated_flashcards_from_hope(*, job_id: str, user_id: str, timeout:
         return []
     return [item for item in cards if isinstance(item, dict)]
 
+
+def _flashcard_finalize_sync_attempts() -> int:
+    return max(1, int(os.getenv("FLASHCARD_FINALIZE_SYNC_ATTEMPTS", "3")))
+
+
+def _flashcard_finalize_sync_delay_seconds() -> float:
+    return max(0.0, float(os.getenv("FLASHCARD_FINALIZE_SYNC_DELAY_SECONDS", "1.0")))
+
 class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     queryset = Project.objects.all()  # ✅ necesario para router basename
     serializer_class = ProjectSerializer
@@ -5247,7 +5255,24 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         )
         imported_count = 0
         user_id = str(getattr(deck, "owner_id", "") or "")
-        fetched_cards = _fetch_generated_flashcards_from_hope(job_id=str(job_id), user_id=user_id)
+        fetched_cards: list[dict[str, Any]] = []
+        attempts = _flashcard_finalize_sync_attempts()
+        delay_seconds = _flashcard_finalize_sync_delay_seconds()
+        for attempt in range(1, attempts + 1):
+            fetched_cards = _fetch_generated_flashcards_from_hope(job_id=str(job_id), user_id=user_id)
+            if fetched_cards:
+                break
+            if attempt >= attempts:
+                break
+            logger.info(
+                "Flashcard sync fetch returned no cards yet | deck_id=%s job_id=%s attempt=%s/%s",
+                deck.id,
+                job_id,
+                attempt,
+                attempts,
+            )
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
         if fetched_cards:
             existing_cards = list(
                 Flashcard.objects.filter(
