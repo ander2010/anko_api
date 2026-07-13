@@ -212,6 +212,23 @@ class EnterpriseLearningService:
             metadata={"assignment_id": assignment.id},
         )
 
+        # Auto-issue any certificate templates whose requirements include this
+        # learning path (best-effort — a failure here must not roll back the
+        # assignment completion itself).
+        try:
+            from api.enterprise.services.certification_service import CertificationService
+            CertificationService.auto_issue_on_path_completion(
+                user=user,
+                company=assignment.company,
+                learning_path=assignment.learning_path,
+                issued_by=None,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Auto-issue on learning completion failed for assignment %s", assignment.id
+            )
+
     # ------------------------------------------------------------------
     # Progress calculation
     # ------------------------------------------------------------------
