@@ -198,13 +198,25 @@ class CertificationRequirementViewSet(EnterpriseViewSetMixin, viewsets.ModelView
             qs = qs.filter(template_id=template_id)
         return qs
 
+    def _backfill(self, requirement):
+        # Best-effort — a failure here must not roll back the requirement
+        # create/update itself (same pattern as the other auto-issue triggers).
+        try:
+            CertificationService.backfill_for_requirement(requirement)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Certificate backfill failed for requirement %s", requirement.id
+            )
+
     def perform_create(self, serializer):
         template = serializer.validated_data.get("template")
         try:
             validate_company_access(self.request.user, template.company_id)
         except PermissionError as exc:
             raise PermissionDenied(str(exc))
-        serializer.save()
+        requirement = serializer.save()
+        self._backfill(requirement)
 
     def perform_update(self, serializer):
         template = serializer.instance.template
@@ -212,7 +224,8 @@ class CertificationRequirementViewSet(EnterpriseViewSetMixin, viewsets.ModelView
             validate_company_access(self.request.user, template.company_id)
         except PermissionError as exc:
             raise PermissionDenied(str(exc))
-        serializer.save()
+        requirement = serializer.save()
+        self._backfill(requirement)
 
     def perform_destroy(self, instance):
         try:

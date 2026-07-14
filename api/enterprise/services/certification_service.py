@@ -238,6 +238,59 @@ class CertificationService:
             issued.append(cert)
         return issued
 
+    @staticmethod
+    def backfill_for_requirement(requirement: CertificationRequirement) -> List[Certification]:
+        """
+        Retroactively issue certificates when a requirement is added to a
+        template *after* users already completed the underlying content.
+
+        auto_issue_on_path_completion / auto_issue_on_compliance_completion
+        only ever run at the moment a learning path or compliance program is
+        completed — someone who finished earlier, before this requirement (or
+        the template itself) existed, is never re-checked. This re-runs the
+        same auto-issue logic for everyone who already completed the content
+        this requirement points to, reusing the existing eligibility/dedup
+        checks as-is (no new issuance rules).
+        """
+        template = requirement.template
+        if not template.is_active:
+            return []
+
+        issued: List[Certification] = []
+
+        if requirement.learning_path_id:
+            from api.enterprise_learning_models import LearningPathAssignment
+            completed_assignments = LearningPathAssignment.objects.filter(
+                company=template.company,
+                learning_path_id=requirement.learning_path_id,
+                status="completed",
+            ).select_related("user", "learning_path")
+            for assignment in completed_assignments:
+                issued += CertificationService.auto_issue_on_path_completion(
+                    user=assignment.user,
+                    company=template.company,
+                    learning_path=assignment.learning_path,
+                    issued_by=None,
+                )
+
+        if requirement.compliance_program_id:
+            from api.enterprise_compliance_models import ComplianceAssignment
+            compliant_assignments = ComplianceAssignment.objects.filter(
+                company=template.company,
+                program_id=requirement.compliance_program_id,
+                is_compliant=True,
+            ).select_related("user", "program")
+            for assignment in compliant_assignments:
+                issued += CertificationService.auto_issue_on_compliance_completion(
+                    user=assignment.user,
+                    company=template.company,
+                    compliance_program=assignment.program,
+                    score=assignment.score,
+                    issued_by=None,
+                )
+
+        return issued
+
     # ------------------------------------------------------------------
     # Verification
     # ------------------------------------------------------------------

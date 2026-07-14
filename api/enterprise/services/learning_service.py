@@ -366,6 +366,7 @@ class EnterpriseLearningService:
             "total_modules": total,
             "required_modules": required,
             "completed_modules": completed_total,
+            "completed_module_ids": sorted(completed_ids),
             "completed_required_modules": completed_required,
             "percent_total": round(percent_total, 2),
             "percent_required": round(percent_required, 2),

@@ -386,6 +386,8 @@ class LearningPathAssignmentSerializer(serializers.ModelSerializer):
     user_username = serializers.CharField(source="user.username", read_only=True)
     team_name = serializers.CharField(source="team.name", read_only=True)
     is_overdue = serializers.SerializerMethodField()
+    certificate_template_id = serializers.SerializerMethodField()
+    issued_certification_id = serializers.SerializerMethodField()
 
     class Meta:
         model = LearningPathAssignment
@@ -406,6 +408,8 @@ class LearningPathAssignmentSerializer(serializers.ModelSerializer):
             "started_at",
             "completed_at",
             "is_overdue",
+            "certificate_template_id",
+            "issued_certification_id",
             "metadata",
             "created_at",
             "updated_at",
@@ -419,6 +423,8 @@ class LearningPathAssignmentSerializer(serializers.ModelSerializer):
             "started_at",
             "completed_at",
             "is_overdue",
+            "certificate_template_id",
+            "issued_certification_id",
             "learning_path_name",
             "user_username",
             "team_name",
@@ -428,6 +434,44 @@ class LearningPathAssignmentSerializer(serializers.ModelSerializer):
 
     def get_is_overdue(self, obj):
         return obj.is_overdue()
+
+    def get_certificate_template_id(self, obj):
+        """
+        ID of the (first) active CertificateTemplate whose requirements
+        include this assignment's learning_path — None if this learning path
+        has no certificate configured. Only applies to learning_path-level
+        assignments (not single-module ones, which certificates don't target
+        today).
+        """
+        if not obj.learning_path_id:
+            return None
+        from api.enterprise_certification_models import CertificateTemplate
+        template = (
+            CertificateTemplate.objects.filter(
+                company_id=obj.company_id,
+                is_active=True,
+                requirements__learning_path_id=obj.learning_path_id,
+            )
+            .order_by("id")
+            .first()
+        )
+        return template.id if template else None
+
+    def get_issued_certification_id(self, obj):
+        """
+        ID of the active Certification already issued to this assignment's
+        user for this learning_path, if any — lets the frontend link
+        straight to it once earned.
+        """
+        if not obj.learning_path_id or not obj.user_id:
+            return None
+        from api.enterprise_certification_models import Certification
+        cert = Certification.objects.filter(
+            user_id=obj.user_id,
+            learning_path_id=obj.learning_path_id,
+            status="active",
+        ).order_by("-issued_at").first()
+        return cert.id if cert else None
 
     def validate(self, attrs):
         user = attrs.get("user")
