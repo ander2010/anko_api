@@ -351,8 +351,14 @@ class TeamViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             user_id=d["user_id"],
             role=d["role"],
         )
-        from api.enterprise.services.email_service import send_added_to_team
+        from api.enterprise.services.email_service import send_added_to_team, send_assignment_notification
+        from api.enterprise.services.learning_service import EnterpriseLearningService
         send_added_to_team(membership)
+        backfilled = EnterpriseLearningService.backfill_team_assignments(
+            team=team, user=membership.user, assigned_by=request.user
+        )
+        for assignment in backfilled:
+            send_assignment_notification(assignment)
         return Response(
             TeamMembershipSerializer(membership).data,
             status=status.HTTP_201_CREATED,

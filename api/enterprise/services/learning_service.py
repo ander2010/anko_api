@@ -82,9 +82,22 @@ class EnterpriseLearningService:
         was never visible to anyone. metadata records which team this came
         from for traceability, without violating the model's own "exactly one
         of user or team" invariant.
+
+        Members who already have a non-completed assignment for this same
+        content are skipped, so re-running "assign to team" doesn't duplicate
+        their in-progress work. A member whose prior assignment is already
+        "completed" gets a fresh one (e.g. recurring/annual training).
         """
         assignments = []
         for membership in team.memberships.select_related("user"):
+            has_active_assignment = LearningPathAssignment.objects.filter(
+                company=company,
+                learning_path=learning_path,
+                learning_module=learning_module,
+                user=membership.user,
+            ).exclude(status="completed").exists()
+            if has_active_assignment:
+                continue
             assignment = LearningPathAssignment.objects.create(
                 company=company,
                 learning_path=learning_path,
@@ -104,6 +117,69 @@ class EnterpriseLearningService:
                     "assignment_id": assignment.id,
                     "team_id": team.id,
                     "learning_module_id": learning_module.id if learning_module else None,
+                },
+            )
+            assignments.append(assignment)
+        return assignments
+
+    @staticmethod
+    @transaction.atomic
+    def backfill_team_assignments(team: Team, user, assigned_by=None) -> list[LearningPathAssignment]:
+        """
+        When a user joins a team, give them the same content the team was
+        already assigned before they joined (via assign_to_team), so they
+        don't miss out on it.
+
+        Only backfills assignments whose metadata marks them as team-sourced
+        (assigned_via_team_id == team.id) — assignments made directly to
+        individual users are never touched. Skips any content the user
+        already has a non-completed assignment for (same rule as
+        assign_to_team, to avoid duplicates).
+        """
+        source_assignments = (
+            LearningPathAssignment.objects.filter(
+                company=team.company, metadata__assigned_via_team_id=team.id
+            )
+            .exclude(user=user)
+            .order_by("-created_at")
+        )
+        seen_content = set()
+        assignments = []
+        for src in source_assignments:
+            content_key = (src.learning_path_id, src.learning_module_id)
+            if content_key in seen_content:
+                continue
+            seen_content.add(content_key)
+
+            has_active_assignment = LearningPathAssignment.objects.filter(
+                company=team.company,
+                learning_path_id=src.learning_path_id,
+                learning_module_id=src.learning_module_id,
+                user=user,
+            ).exclude(status="completed").exists()
+            if has_active_assignment:
+                continue
+
+            assignment = LearningPathAssignment.objects.create(
+                company=team.company,
+                learning_path_id=src.learning_path_id,
+                learning_module_id=src.learning_module_id,
+                user=user,
+                assigned_by=assigned_by or src.assigned_by,
+                status="pending",
+                due_date=src.due_date,
+                metadata={"assigned_via_team_id": team.id, "assigned_via_team_name": team.name},
+            )
+            LearningEvent.objects.create(
+                company=team.company,
+                user=user,
+                event_type="learning_path_assigned",
+                learning_path_id=src.learning_path_id,
+                metadata={
+                    "assignment_id": assignment.id,
+                    "team_id": team.id,
+                    "learning_module_id": src.learning_module_id,
+                    "backfilled": True,
                 },
             )
             assignments.append(assignment)
