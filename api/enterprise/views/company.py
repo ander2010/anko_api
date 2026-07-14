@@ -164,6 +164,29 @@ class CompanyViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=["post"], url_path="resend-welcome")
+    def resend_welcome(self, request, pk=None):
+        """Re-sends the 'added to company' welcome email to an existing member.
+
+        Reuses send_added_to_company as-is (same email add_user already sends
+        on first creation) — this just lets an admin trigger it again for a
+        member who already exists (add_user itself rejects already-active
+        members, so it can't be reused for a resend).
+        """
+        company = self._get_company_obj(pk)
+        if not request.user.is_staff:
+            self._check_admin_access(company)
+        membership_id = request.data.get("membership_id")
+        if not membership_id:
+            raise ValidationError({"membership_id": "This field is required."})
+        try:
+            membership = CompanyMembership.objects.get(id=membership_id, company=company)
+        except CompanyMembership.DoesNotExist:
+            raise ValidationError({"membership_id": "Membership not found."})
+        from api.enterprise.services.email_service import send_added_to_company
+        send_added_to_company(membership)
+        return Response({"sent": True})
+
     @action(detail=True, methods=["get"])
     def members(self, request, pk=None):
         company = self._get_company_obj(pk)

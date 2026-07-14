@@ -133,13 +133,14 @@ def send_added_to_company(membership) -> None:
     """
     user = membership.user
     company = membership.company
-    link = f"{FRONTEND_URL}/login"
+    login_link = f"{FRONTEND_URL}/auth/sign-in"
+    forgot_password_link = f"{FRONTEND_URL}/auth/forgot-password"
     body = (
         f"Hola {user.get_full_name() or user.username},\n\n"
         f"Has sido agregado a {company.name} en Ankard como {membership.get_role_display()}.\n\n"
-        f"Puedes acceder a tu cuenta aquí:\n{link}\n\n"
-        f"Si es la primera vez que recibes este correo, usa 'Olvidé mi contraseña' "
-        f"para establecer tu clave."
+        f"Puedes acceder a tu cuenta aquí:\n{login_link}\n\n"
+        f"Si es la primera vez que recibes este correo, usa este enlace para establecer tu clave:\n"
+        f"{forgot_password_link}"
     )
     _send(
         recipient_email=user.email,
