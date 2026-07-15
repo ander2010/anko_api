@@ -12,6 +12,8 @@ x-anko-env: &anko-environment
     REDIS_URL: ${REDIS_URL:-redis://hope-redis:6379/3}
     CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://hope-redis:6379/3}
     CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://hope-redis:6379/3}
+    HOPE_CELERY_BROKER_URL: ${HOPE_CELERY_BROKER_URL:-redis://hope-redis:6379/0}
+    HOPE_CELERY_DEFAULT_QUEUE: ${HOPE_CELERY_DEFAULT_QUEUE:-celery}
     PROCESS_REQUEST_BASE_URL: http://hope-api:8080
     TRANSLATE_BASE_URL: http://hope-api:8080
     INTERNAL_API_BASE_URL: http://anko-api:8000

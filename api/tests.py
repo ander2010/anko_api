@@ -40,6 +40,11 @@ from api.services.auto_generate_workflow import (
     _step_finalize_callback_status,
     _step_requires_finalize_callback,
 )
+from api.services.hope_broker import (
+    dispatch_battery_generation,
+    dispatch_flashcard_generation,
+    dispatch_process_document,
+)
 from api.services.http_retry import post_with_retry
 from api.throttles import (
     BurstAnonRateThrottle,
@@ -1060,3 +1065,142 @@ class HttpRetryTests(TestCase):
 
         self.assertIs(result, success_response)
         self.assertEqual(post_mock.call_count, 2)
+
+
+class HopeBrokerDispatchTests(TestCase):
+    @patch("api.services.hope_broker.Redis.from_url")
+    @patch("api.services.hope_broker._celery_app")
+    def test_dispatch_process_document_enqueues_hope_task_and_progress(self, celery_app_mock, redis_from_url_mock):
+        task_result = SimpleNamespace(id="job-doc-1")
+        celery_app_mock.return_value.send_task.return_value = task_result
+        redis_client = Mock()
+        redis_from_url_mock.return_value = redis_client
+
+        result = dispatch_process_document(
+            {
+                "job_id": "job-doc-1",
+                "doc_id": 42,
+                "file_path": "media/test.pdf",
+                "metadata": {"run_id": "run-1"},
+            }
+        )
+
+        celery_app_mock.return_value.send_task.assert_called_once_with(
+            "pipeline.prepare.dispatch_document",
+            args=[
+                {
+                    "job_id": "job-doc-1",
+                    "doc_id": 42,
+                    "file_path": "media/test.pdf",
+                    "metadata": {"run_id": "run-1"},
+                },
+                {"run_id": "run-1", "job_id": "job-doc-1", "document_id": 42},
+            ],
+            task_id="job-doc-1",
+            queue="celery",
+        )
+        redis_client.hset.assert_any_call(
+            "job:job-doc-1",
+            mapping={
+                "doc_id": "42",
+                "progress": "0",
+                "status": "QUEUED",
+                "current_step": "ingestion",
+                "process": "process_pdf",
+                "task_id": "job-doc-1",
+            },
+        )
+        self.assertEqual(result["job_id"], "job-doc-1")
+        self.assertEqual(result["document_id"], 42)
+
+    @patch("api.services.hope_broker.Redis.from_url")
+    @patch("api.services.hope_broker._celery_app")
+    def test_dispatch_battery_generation_uses_hope_queue_and_progress_doc_ids(self, celery_app_mock, redis_from_url_mock):
+        task_result = SimpleNamespace(id="job-battery-1")
+        celery_app_mock.return_value.send_task.return_value = task_result
+        redis_client = Mock()
+        redis_from_url_mock.return_value = redis_client
+
+        result = dispatch_battery_generation(
+            {
+                "job_id": "job-battery-1",
+                "battery_id": 7,
+                "title": "Biology Assessment",
+                "source_bundle": {"document_ids": ["10", "11"]},
+                "metadata": {"callback_url": "http://anko/api/callback"},
+            }
+        )
+
+        celery_app_mock.return_value.send_task.assert_called_once_with(
+            "pipeline.llm.generate_questions",
+            args=[
+                {
+                    "job_id": "job-battery-1",
+                    "battery_id": 7,
+                    "title": "Biology Assessment",
+                    "source_bundle": {"document_ids": ["10", "11"]},
+                    "metadata": {"callback_url": "http://anko/api/callback"},
+                },
+                {"callback_url": "http://anko/api/callback"},
+            ],
+            task_id="job-battery-1",
+            queue="celery",
+        )
+        redis_client.hset.assert_any_call(
+            "job:job-battery-1",
+            mapping={
+                "doc_id": "10,11",
+                "progress": "0",
+                "status": "QUEUED",
+                "current_step": "generate_question",
+                "process": "generate_question",
+                "task_id": "job-battery-1",
+            },
+        )
+        self.assertEqual(result["title"], "Biology Assessment")
+
+    @patch("api.services.hope_broker.Redis.from_url")
+    @patch("api.services.hope_broker._celery_app")
+    def test_dispatch_flashcard_generation_uses_existing_title(self, celery_app_mock, redis_from_url_mock):
+        task_result = SimpleNamespace(id="job-deck-1")
+        celery_app_mock.return_value.send_task.return_value = task_result
+        redis_client = Mock()
+        redis_from_url_mock.return_value = redis_client
+
+        result = dispatch_flashcard_generation(
+            {
+                "job_id": "job-deck-1",
+                "deck_id": 5,
+                "title": "Biology Flashcards",
+                "source_bundle": {"document_ids": ["10"]},
+                "metadata": {"callback_url": "http://anko/api/callback"},
+            }
+        )
+
+        celery_app_mock.return_value.send_task.assert_called_once_with(
+            "flashcards.generate",
+            args=[
+                "job-deck-1",
+                {
+                    "job_id": "job-deck-1",
+                    "deck_id": 5,
+                    "title": "Biology Flashcards",
+                    "source_bundle": {"document_ids": ["10"]},
+                    "metadata": {"callback_url": "http://anko/api/callback"},
+                },
+            ],
+            task_id="job-deck-1",
+            queue="celery",
+        )
+        redis_client.hset.assert_any_call(
+            "job:job-deck-1",
+            mapping={
+                "doc_id": "10",
+                "progress": "0",
+                "status": "QUEUED",
+                "current_step": "flashcard_generation",
+                "task_id": "job-deck-1",
+                "title": "Biology Flashcards",
+            },
+        )
+        self.assertEqual(result["deck_id"], 5)

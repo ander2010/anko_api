@@ -7,7 +7,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-import requests
 from django.db import transaction
 from django.utils import timezone
 
@@ -36,7 +35,12 @@ from ..models import (
 )
 from .workflow_progress import publish_run_event, recompute_run_progress, update_step_progress
 from .workflow_progress_consumer import enqueue_progress_consumer
-from .http_retry import post_with_retry
+from .hope_broker import (
+    HopeDispatchError,
+    dispatch_battery_generation,
+    dispatch_flashcard_generation,
+    dispatch_process_document,
+)
 
 logger = get_logger(__name__)
 
@@ -217,22 +221,6 @@ def _normalize_base_url(base_url: str) -> str:
 def _build_ws_url(base_url: str, job_id: str) -> str:
     ws_base = _normalize_base_url(base_url).replace("http://", "ws://", 1).replace("https://", "wss://", 1)
     return f"{ws_base}/ws/progress/{job_id}"
-
-
-def _dispatch_to_hope(path: str, payload: dict[str, Any], *, timeout: int = 120) -> dict[str, Any]:
-    base_url = _normalize_base_url(os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
-    response = post_with_retry(
-        f"{base_url}{path}",
-        payload=payload,
-        timeout=timeout,
-        label=f"hope_dispatch:{path}",
-        logger=logger,
-    )
-    try:
-        return response.json()
-    except Exception as exc:  # pragma: no cover - defensive
-        raise AutoGenerateWorkflowError(f"Hope returned non-JSON payload for {path}") from exc
-
 
 def _chunk_tags(tags: list[str], group_size: int) -> list[list[str]]:
     return [tags[idx: idx + group_size] for idx in range(0, len(tags), group_size)]
@@ -1022,8 +1010,8 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             "metadata": {"run_id": str(run.run_id)},
         }
         try:
-            response_payload = _dispatch_to_hope("/process-request", request_payload, timeout=60)
-        except requests.RequestException as exc:
+            response_payload = dispatch_process_document(request_payload)
+        except HopeDispatchError as exc:
             _mark_run_failed(
                 run=run,
                 step=step,
@@ -1250,7 +1238,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             "job_id": str(uuid.uuid4()),
             "user_id": str(run.initiated_by_id or ""),
             "deck_id": deck.id,
-            "title": None,
+            "title": deck.title,
             "quantity": flashcard_options["cards_per_group"],
             "difficulty": flashcard_options["difficulty"],
             "source_bundle": source_bundle,
@@ -1264,7 +1252,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             },
         }
         try:
-            flashcard_response = _dispatch_to_hope("/flashcards/create", flashcard_payload, timeout=60)
+            flashcard_response = dispatch_flashcard_generation(flashcard_payload)
             flashcard_job_id = str(flashcard_response.get("job_id") or flashcard_payload["job_id"])
             deck.external_job_id = flashcard_job_id
             deck.title = str(flashcard_response.get("title") or deck.title)
@@ -1282,7 +1270,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 },
             )
             enqueue_progress_consumer(run_id=run.id, job_id=flashcard_job_id)
-        except requests.RequestException as exc:
+        except HopeDispatchError as exc:
             dispatch_errors.append({"kind": "flashcards", "tag_group_id": tag_group_id, "error": str(exc)})
             update_step_progress(
                 step=flashcard_step,
@@ -1306,7 +1294,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
         battery_payload = {
             "job_id": str(uuid.uuid4()),
             "battery_id": battery.id,
-            "title": None,
+            "title": battery.name,
             "query_text": group_tags,
             "quantity_question": battery_options["questions_per_group"],
             "difficulty": battery_options["difficulty"],
@@ -1322,7 +1310,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             },
         }
         try:
-            battery_response = _dispatch_to_hope("/batteries/create", battery_payload, timeout=60)
+            battery_response = dispatch_battery_generation(battery_payload)
             battery_job_id = str(battery_response.get("job_id") or battery_payload["job_id"])
             battery.external_job_id = battery_job_id
             battery.name = str(battery_response.get("title") or battery.name)
@@ -1340,7 +1328,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 },
             )
             enqueue_progress_consumer(run_id=run.id, job_id=battery_job_id)
-        except requests.RequestException as exc:
+        except HopeDispatchError as exc:
             dispatch_errors.append({"kind": "battery", "tag_group_id": tag_group_id, "error": str(exc)})
             update_step_progress(
                 step=battery_step,
