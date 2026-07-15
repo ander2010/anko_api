@@ -58,11 +58,14 @@ from django.contrib.auth import authenticate, login
 from api.services.auto_generate_workflow import (
     AUTO_WORKFLOW_KEY,
     AutoGenerateWorkflowError,
+    cleanup_empty_generated_battery,
+    cleanup_empty_generated_deck,
     create_auto_generate_run,
     normalize_auto_generate_request,
     reconcile_late_auto_generate_output,
     sync_deck_source_links,
 )
+from api.services.http_retry import post_with_retry
 from api.services.translate import post_translate
 from api.services.workflow_progress import publish_run_event, recompute_run_progress, update_step_progress
 from api.services.workflow_progress_consumer import enqueue_progress_consumer
@@ -701,44 +704,7 @@ def _ask_via_http(base_url: str, payload: dict) -> Dict[str, Any]:
 
 
 def _post_with_logging(url: str, payload: dict, *, timeout: int, label: str = "external_post"):
-    start = time.perf_counter()
-    payload_keys = list(payload.keys()) if isinstance(payload, dict) else [type(payload).__name__]
-    try:
-        payload_size = len(json.dumps(payload).encode("utf-8"))
-    except Exception:
-        payload_size = None
-    try:
-        resp = requests.post(url, json=payload, timeout=timeout)
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        content_length = resp.headers.get("Content-Length")
-        try:
-            response_size = int(content_length) if content_length is not None else len(resp.content or b"")
-        except Exception:
-            response_size = None
-        logger.info(
-            "External HTTP %s url=%s status=%s ok=%s duration_ms=%s payload_keys=%s payload_bytes=%s response_bytes=%s",
-            label,
-            url,
-            resp.status_code,
-            resp.ok,
-            duration_ms,
-            payload_keys,
-            payload_size,
-            response_size,
-        )
-        return resp
-    except requests.RequestException as e:
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        logger.error(
-            "External HTTP %s failed url=%s duration_ms=%s payload_keys=%s payload_bytes=%s error=%s",
-            label,
-            url,
-            duration_ms,
-            payload_keys,
-            payload_size,
-            e,
-        )
-        raise
+    return post_with_retry(url, payload=payload, timeout=timeout, label=label, logger=logger)
 
 
 def _internal_service_headers() -> dict[str, str]:
@@ -3459,7 +3425,6 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                     error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
                     finished_at=failed_now,
                 )
-                BatteryViewSet._sync_battery_process_artifacts(run=process_run, battery=battery, source_bundle=source_bundle, result={})
                 publish_run_event(process_run, event="process_run.updated")
             if auto_workflow_step:
                 auto_run = auto_workflow_step.run
@@ -3480,6 +3445,9 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                     job_id=job_id,
                 )
                 publish_run_event(auto_run, event="process_run.updated")
+            deleted_empty_battery = cleanup_empty_generated_battery(battery=battery)
+            if process_run and not deleted_empty_battery:
+                BatteryViewSet._sync_battery_process_artifacts(run=process_run, battery=battery, source_bundle=source_bundle, result={})
             return Response(
                 {
                     "ok": False,
@@ -3487,6 +3455,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                     "job_id": job_id,
                     "status": battery.status,
                     "error": error_message or "Generation failed",
+                    "deleted_empty_battery": deleted_empty_battery,
                 },
                 status=status.HTTP_202_ACCEPTED,
             )
@@ -3506,6 +3475,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
         completed_now = timezone.now()
         run_completed = result.get("questions_created", 0) > 0
+        deleted_empty_battery = False
 
         if process_run:
             run_result_payload = {
@@ -3547,11 +3517,16 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 error_payload={} if run_completed else {"error": "No questions were created during finalization"},
                 finished_at=completed_now,
             )
-            BatteryViewSet._sync_battery_process_artifacts(run=process_run, battery=battery, source_bundle=source_bundle, result=result)
+            if not run_completed:
+                deleted_empty_battery = cleanup_empty_generated_battery(battery=battery)
+            if not deleted_empty_battery:
+                BatteryViewSet._sync_battery_process_artifacts(run=process_run, battery=battery, source_bundle=source_bundle, result=result)
             publish_run_event(
                 process_run,
                 event="process_run.completed" if run_completed else "process_run.updated",
             )
+        if not run_completed and not deleted_empty_battery:
+            deleted_empty_battery = cleanup_empty_generated_battery(battery=battery)
         if auto_workflow_step:
             auto_run = auto_workflow_step.run
             update_step_progress(
@@ -3574,13 +3549,14 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 status=None,
                 current_step_key=auto_workflow_step.step_key,
                 current_stage=auto_workflow_step.step_key,
-                status_message="Battery generated" if run_completed else "Battery finalization produced no questions",
-                job_id=job_id,
-            )
+                    status_message="Battery generated" if run_completed else "Battery finalization produced no questions",
+                    job_id=job_id,
+                )
             publish_run_event(auto_run, event="process_run.updated")
             # Backfill the battery artifact if the auto-generate run's watchdog
             # already finalized before this (possibly late) callback arrived.
-            reconcile_late_auto_generate_output(step=auto_workflow_step)
+            if not deleted_empty_battery:
+                reconcile_late_auto_generate_output(step=auto_workflow_step)
 
         notify_user = None
         if getattr(battery, "project_id", None) and getattr(battery.project, "owner", None):
@@ -3596,6 +3572,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 "battery_id": battery.id,
                 "job_id": job_id,
                 "status": battery.status,
+                "deleted_empty_battery": deleted_empty_battery,
                 "process_run": (
                     {
                         "id": process_run.id,
@@ -4169,6 +4146,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 finished_at=failed_now,
             )
             publish_run_event(process_run, event="process_run.updated")
+            cleanup_empty_generated_battery(battery=battery)
             return Response(
                 {"detail": "Failed calling microservice", "error": str(e)},
                 status=status.HTTP_502_BAD_GATEWAY,
@@ -6620,6 +6598,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 finished_at=failed_now,
             )
             publish_run_event(process_run, event="process_run.updated")
+            cleanup_empty_generated_deck(deck=deck)
             return Response(
                 {"detail": "Failed calling microservice", "error": str(e)},
                 status=status.HTTP_502_BAD_GATEWAY,
@@ -7426,7 +7405,6 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     error_payload={"error": error_message or "Generation failed", "status": status_value or "failed"},
                     finished_at=failed_now,
                 )
-                DeckViewSet._sync_deck_process_artifacts(run=process_run, deck=deck, source_bundle=source_bundle, result={})
                 publish_run_event(process_run, event="process_run.updated")
             if auto_workflow_step:
                 auto_run = auto_workflow_step.run
@@ -7447,12 +7425,16 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     job_id=job_id,
                 )
                 publish_run_event(auto_run, event="process_run.updated")
+            deleted_empty_deck = cleanup_empty_generated_deck(deck=deck)
+            if process_run and not deleted_empty_deck:
+                DeckViewSet._sync_deck_process_artifacts(run=process_run, deck=deck, source_bundle=source_bundle, result={})
             return Response(
                 {
                     "ok": False,
                     "deck_id": deck.id,
                     "job_id": job_id,
                     "error": error_message or "Generation failed",
+                    "deleted_empty_deck": deleted_empty_deck,
                 },
                 status=status.HTTP_202_ACCEPTED,
             )
@@ -7461,6 +7443,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         deck.save(update_fields=list(dict.fromkeys(update_fields)))
         completed_now = timezone.now()
         run_completed = sync_result["card_count"] > 0
+        deleted_empty_deck = False
         result_payload = {
             "deck_id": deck.id,
             "job_id": job_id,
@@ -7506,11 +7489,16 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 error_payload={} if run_completed else {"error": "No flashcards were synced during finalization"},
                 finished_at=completed_now,
             )
-            DeckViewSet._sync_deck_process_artifacts(run=process_run, deck=deck, source_bundle=source_bundle, result=result_payload)
+            if not run_completed:
+                deleted_empty_deck = cleanup_empty_generated_deck(deck=deck)
+            if not deleted_empty_deck:
+                DeckViewSet._sync_deck_process_artifacts(run=process_run, deck=deck, source_bundle=source_bundle, result=result_payload)
             publish_run_event(
                 process_run,
                 event="process_run.completed" if run_completed else "process_run.updated",
             )
+        if not run_completed and not deleted_empty_deck:
+            deleted_empty_deck = cleanup_empty_generated_deck(deck=deck)
         if auto_workflow_step:
             auto_run = auto_workflow_step.run
             update_step_progress(
@@ -7533,13 +7521,15 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             publish_run_event(auto_run, event="process_run.updated")
             # Backfill the deck artifact if the auto-generate run's watchdog
             # already finalized before this (possibly late) callback arrived.
-            reconcile_late_auto_generate_output(step=auto_workflow_step)
+            if not deleted_empty_deck:
+                reconcile_late_auto_generate_output(step=auto_workflow_step)
 
         return Response(
             {
                 "ok": True,
                 "deck_id": deck.id,
                 "job_id": job_id,
+                "deleted_empty_deck": deleted_empty_deck,
                 "process_run": (
                     {
                         "id": process_run.id,

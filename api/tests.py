@@ -1,5 +1,6 @@
 import io
 import os
+import requests
 import shutil
 import tempfile
 from types import SimpleNamespace
@@ -16,10 +17,14 @@ from rest_framework.test import APITestCase
 
 from api.models import (
     Battery,
+    BatteryQuestion,
     Deck,
     DeckShare,
     Document,
     Flashcard,
+    ProcessArtifact,
+    ProcessRun,
+    ProcessStepRun,
     Project,
     Resource,
     SavedDeck,
@@ -27,10 +32,15 @@ from api.models import (
 )
 from api.services.auto_generate_workflow import (
     AUTO_STAGE_KEYS,
+    cleanup_empty_generated_battery,
+    cleanup_empty_generated_deck,
+    _finalize_completed_battery_step,
+    _finalize_completed_flashcard_step,
     _document_has_inflight_processing,
     _step_finalize_callback_status,
     _step_requires_finalize_callback,
 )
+from api.services.http_retry import post_with_retry
 from api.throttles import (
     BurstAnonRateThrottle,
     BurstUserRateThrottle,
@@ -918,3 +928,135 @@ class AutoGenerateWorkflowCallbackTests(TestCase):
         )
 
         self.assertFalse(_document_has_inflight_processing(document))
+
+    def test_cleanup_empty_generated_battery_deletes_placeholder_and_artifacts(self):
+        run = ProcessRun.objects.create(workflow_key="test-workflow")
+        artifact = ProcessArtifact.objects.create(
+            run=run,
+            artifact_key=f"battery:{self.battery.id}",
+            artifact_type="battery",
+            resource_type="battery",
+            resource_id=str(self.battery.id),
+        )
+
+        deleted = cleanup_empty_generated_battery(battery=self.battery)
+
+        self.assertTrue(deleted)
+        self.assertFalse(Battery.objects.filter(id=self.battery.id).exists())
+        self.assertFalse(ProcessArtifact.objects.filter(id=artifact.id).exists())
+
+    def test_cleanup_empty_generated_deck_deletes_placeholder_and_artifacts(self):
+        run = ProcessRun.objects.create(workflow_key="test-workflow")
+        artifact = ProcessArtifact.objects.create(
+            run=run,
+            artifact_key=f"deck:{self.deck.id}",
+            artifact_type="deck",
+            resource_type="deck",
+            resource_id=str(self.deck.id),
+        )
+
+        deleted = cleanup_empty_generated_deck(deck=self.deck)
+
+        self.assertTrue(deleted)
+        self.assertFalse(Deck.objects.filter(id=self.deck.id).exists())
+        self.assertFalse(ProcessArtifact.objects.filter(id=artifact.id).exists())
+
+    @patch("api.views.BatteryViewSet.save_questions_from_qa_pairs")
+    def test_finalize_completed_battery_step_deletes_empty_battery(self, save_questions_mock):
+        save_questions_mock.return_value = {
+            "battery_id": self.battery.id,
+            "job_id": "battery-job-1",
+            "qa_pairs_found": 0,
+            "questions_created": 0,
+            "options_created": 0,
+        }
+        run = ProcessRun.objects.create(
+            workflow_key="collection_auto_generate",
+            input_payload={"battery_options": {"question_format": "true_false"}},
+        )
+        step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=AUTO_STAGE_KEYS["generate_battery"],
+            external_job_id="battery-job-1",
+            result_payload={"battery_id": self.battery.id},
+        )
+
+        completed = _finalize_completed_battery_step(run_id=run.id, step=step)
+
+        self.assertFalse(completed)
+        self.assertFalse(Battery.objects.filter(id=self.battery.id).exists())
+
+    @patch("api.views.DeckViewSet._sync_generated_flashcards")
+    def test_finalize_completed_flashcard_step_deletes_empty_deck(self, sync_flashcards_mock):
+        sync_flashcards_mock.return_value = {"cards_synced": 0, "card_count": 0}
+        run = ProcessRun.objects.create(workflow_key="collection_auto_generate")
+        step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=AUTO_STAGE_KEYS["generate_flashcards"],
+            external_job_id="deck-job-1",
+            result_payload={"deck_id": self.deck.id},
+        )
+
+        completed = _finalize_completed_flashcard_step(run_id=run.id, step=step)
+
+        self.assertFalse(completed)
+        self.assertFalse(Deck.objects.filter(id=self.deck.id).exists())
+
+
+class HttpRetryTests(TestCase):
+    @patch("api.services.http_retry.random.uniform", return_value=0.0)
+    @patch("api.services.http_retry.time.sleep", return_value=None)
+    @patch("api.services.http_retry.requests.post")
+    def test_post_with_retry_retries_request_exception(self, post_mock, _sleep_mock, _uniform_mock):
+        response = Mock()
+        response.ok = True
+        response.status_code = 200
+        response.headers = {}
+        response.content = b"{}"
+        post_mock.side_effect = [
+            requests.ConnectionError("connection dropped"),
+            response,
+        ]
+
+        result = post_with_retry(
+            "http://hope.test/endpoint",
+            payload={"job_id": "job-1"},
+            timeout=30,
+            label="test_retry_exception",
+            logger=Mock(),
+            max_attempts=2,
+        )
+
+        self.assertIs(result, response)
+        self.assertEqual(post_mock.call_count, 2)
+
+    @patch("api.services.http_retry.random.uniform", return_value=0.0)
+    @patch("api.services.http_retry.time.sleep", return_value=None)
+    @patch("api.services.http_retry.requests.post")
+    def test_post_with_retry_retries_retryable_status(self, post_mock, _sleep_mock, _uniform_mock):
+        retry_response = Mock()
+        retry_response.ok = False
+        retry_response.status_code = 503
+        retry_response.headers = {}
+        retry_response.content = b"busy"
+        retry_response.raise_for_status.side_effect = requests.HTTPError("503 busy")
+
+        success_response = Mock()
+        success_response.ok = True
+        success_response.status_code = 200
+        success_response.headers = {}
+        success_response.content = b"{}"
+
+        post_mock.side_effect = [retry_response, success_response]
+
+        result = post_with_retry(
+            "http://hope.test/endpoint",
+            payload={"job_id": "job-2"},
+            timeout=30,
+            label="test_retry_status",
+            logger=Mock(),
+            max_attempts=2,
+        )
+
+        self.assertIs(result, success_response)
+        self.assertEqual(post_mock.call_count, 2)

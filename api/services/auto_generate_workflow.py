@@ -14,6 +14,7 @@ from django.utils import timezone
 from api.utils.logging import get_logger
 from ..models import (
     Battery,
+    BatteryQuestion,
     BatterySourceDocument,
     BatterySourceSection,
     BatterySourceTagGroup,
@@ -35,6 +36,7 @@ from ..models import (
 )
 from .workflow_progress import publish_run_event, recompute_run_progress, update_step_progress
 from .workflow_progress_consumer import enqueue_progress_consumer
+from .http_retry import post_with_retry
 
 logger = get_logger(__name__)
 
@@ -99,6 +101,36 @@ def _normalize_difficulty(value: Any, *, battery: bool = False) -> str:
     if battery:
         return {"easy": "Easy", "medium": "Medium", "hard": "Hard"}.get(normalized, "Medium")
     return normalized if normalized in {"easy", "medium", "hard"} else "medium"
+
+
+def cleanup_empty_generated_deck(*, deck: Deck | None = None, deck_id: int | None = None) -> bool:
+    if deck is None and deck_id is not None:
+        deck = Deck.objects.filter(id=deck_id).first()
+    if deck is None:
+        return False
+    if Flashcard.objects.filter(deck_id=deck.id).exists():
+        return False
+
+    cleanup_id = deck.id
+    ProcessArtifact.objects.filter(resource_type="deck", resource_id=str(cleanup_id)).delete()
+    deck.delete()
+    logger.info("Deleted empty generated deck placeholder %s", cleanup_id)
+    return True
+
+
+def cleanup_empty_generated_battery(*, battery: Battery | None = None, battery_id: int | None = None) -> bool:
+    if battery is None and battery_id is not None:
+        battery = Battery.objects.filter(id=battery_id).first()
+    if battery is None:
+        return False
+    if BatteryQuestion.objects.filter(battery_id=battery.id).exists():
+        return False
+
+    cleanup_id = battery.id
+    ProcessArtifact.objects.filter(resource_type="battery", resource_id=str(cleanup_id)).delete()
+    battery.delete()
+    logger.info("Deleted empty generated battery placeholder %s", cleanup_id)
+    return True
 
 
 def _normalize_auto_generate_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -189,8 +221,13 @@ def _build_ws_url(base_url: str, job_id: str) -> str:
 
 def _dispatch_to_hope(path: str, payload: dict[str, Any], *, timeout: int = 120) -> dict[str, Any]:
     base_url = _normalize_base_url(os.getenv("PROCESS_REQUEST_BASE_URL", "http://localhost:8080"))
-    response = requests.post(f"{base_url}{path}", json=payload, timeout=timeout)
-    response.raise_for_status()
+    response = post_with_retry(
+        f"{base_url}{path}",
+        payload=payload,
+        timeout=timeout,
+        label=f"hope_dispatch:{path}",
+        logger=logger,
+    )
     try:
         return response.json()
     except Exception as exc:  # pragma: no cover - defensive
@@ -713,6 +750,7 @@ def _finalize_completed_flashcard_step(*, run_id: int, step: ProcessStepRun) -> 
         deck.save(update_fields=["config"])
 
     if sync_result.get("card_count", 0) <= 0:
+        cleanup_empty_generated_deck(deck=deck)
         return False
 
     update_step_progress(
@@ -768,6 +806,7 @@ def _finalize_completed_battery_step(*, run_id: int, step: ProcessStepRun) -> bo
     battery.save(update_fields=update_fields)
 
     if result.get("questions_created", 0) <= 0:
+        cleanup_empty_generated_battery(battery=battery)
         return False
 
     update_step_progress(
@@ -1252,6 +1291,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 error_payload={"error": str(exc)},
                 finished_at=timezone.now(),
             )
+            cleanup_empty_generated_deck(deck=deck)
 
         battery = Battery.objects.create(
             project_id=int(project_id) if project_id else None,
@@ -1309,6 +1349,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
                 error_payload={"error": str(exc)},
                 finished_at=timezone.now(),
             )
+            cleanup_empty_generated_battery(battery=battery)
 
     run = _refresh_run(run_id)
     finalize_step = _step_by_key(run, AUTO_STAGE_KEYS["finalize"])
