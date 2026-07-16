@@ -29,6 +29,10 @@ def _hope_default_queue() -> str:
     return os.getenv("HOPE_CELERY_DEFAULT_QUEUE", "celery")
 
 
+def _hope_semantic_queue() -> str:
+    return os.getenv("HOPE_CELERY_SEMANTIC_QUEUE", "semantic")
+
+
 def _progress_redis_url() -> str:
     return os.getenv("WORKFLOW_PROGRESS_REDIS_URL") or os.getenv("PROGRESS_REDIS_URL") or "redis://hope-redis:6379/2"
 
@@ -80,6 +84,12 @@ def _publish_queued_progress(
             pass
 
 
+def _queue_for_task(task_name: str) -> str:
+    if task_name in {HOPE_GENERATE_BATTERY_TASK, HOPE_GENERATE_FLASHCARDS_TASK}:
+        return _hope_semantic_queue()
+    return _hope_default_queue()
+
+
 def _send_task(*, task_name: str, args: list[Any], job_id: str):
     try:
         app = _celery_app()
@@ -88,7 +98,7 @@ def _send_task(*, task_name: str, args: list[Any], job_id: str):
                 task_name,
                 args=args,
                 task_id=job_id,
-                queue=_hope_default_queue(),
+                queue=_queue_for_task(task_name),
                 connection=connection,
             )
     except Exception as exc:

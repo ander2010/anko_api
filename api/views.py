@@ -3345,7 +3345,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    @action(detail=True, methods=["post"], permission_classes=[AllowAny], url_path="finalize-from-service")
+    @action(detail=True, methods=["post"], permission_classes=[AllowAny], throttle_classes=[], url_path="finalize-from-service")
     @transaction.atomic
     def finalize_from_service(self, request, pk=None):
         if not _validate_internal_service_token(request):
@@ -7327,7 +7327,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
     #         .order_by("-created_at")
     #     )
 
-    @action(detail=True, methods=["post"], permission_classes=[AllowAny], url_path="finalize-from-service")
+    @action(detail=True, methods=["post"], permission_classes=[AllowAny], throttle_classes=[], url_path="finalize-from-service")
     @transaction.atomic
     def finalize_from_service(self, request, pk=None):
         if not _validate_internal_service_token(request):

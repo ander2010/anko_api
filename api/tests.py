@@ -1171,6 +1171,73 @@ class AutoGenerateWorkflowCallbackTests(TestCase):
         self.assertFalse(completed)
         self.assertFalse(Deck.objects.filter(id=self.deck.id).exists())
 
+    @override_settings(
+        CACHES={
+            "default": {
+                "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+                "LOCATION": "auto-generate-finalize-throttle-tests",
+            }
+        }
+    )
+    @patch("api.views._validate_internal_service_token", return_value=True)
+    @patch("api.views.BatteryViewSet.save_questions_from_qa_pairs")
+    @patch("api.views.DeckViewSet._sync_generated_flashcards")
+    def test_internal_finalize_callbacks_are_not_throttled(
+        self,
+        sync_flashcards_mock,
+        save_questions_mock,
+        _validate_token_mock,
+    ):
+        throttle_rates = {
+            "anon_burst": "1/min",
+            "anon_sustained": "1/hour",
+            "user_burst": "1/min",
+            "user_sustained": "1/hour",
+        }
+        sync_flashcards_mock.return_value = {"cards_synced": 1, "card_count": 1}
+        save_questions_mock.return_value = {
+            "battery_id": self.battery.id,
+            "job_id": "battery-job-1",
+            "qa_pairs_found": 1,
+            "questions_created": 1,
+            "options_created": 2,
+        }
+        self.deck.external_job_id = "deck-job-1"
+        self.deck.save(update_fields=["external_job_id"])
+        self.battery.external_job_id = "battery-job-1"
+        self.battery.save(update_fields=["external_job_id"])
+
+        with patch.object(BurstUserRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(SustainedUserRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(BurstAnonRateThrottle, "THROTTLE_RATES", throttle_rates), \
+             patch.object(SustainedAnonRateThrottle, "THROTTLE_RATES", throttle_rates):
+            cache.clear()
+            deck_first = self.client.post(
+                f"/api/decks/{self.deck.id}/finalize-from-service/",
+                {"job_id": "deck-job-1", "status": "completed"},
+                format="json",
+            )
+            deck_second = self.client.post(
+                f"/api/decks/{self.deck.id}/finalize-from-service/",
+                {"job_id": "deck-job-1", "status": "completed"},
+                format="json",
+            )
+            battery_first = self.client.post(
+                f"/api/batteries/{self.battery.id}/finalize-from-service/",
+                {"job_id": "battery-job-1", "status": "completed", "question_format": "multiple_choice"},
+                format="json",
+            )
+            battery_second = self.client.post(
+                f"/api/batteries/{self.battery.id}/finalize-from-service/",
+                {"job_id": "battery-job-1", "status": "completed", "question_format": "multiple_choice"},
+                format="json",
+            )
+
+        self.assertEqual(deck_first.status_code, status.HTTP_200_OK)
+        self.assertEqual(deck_second.status_code, status.HTTP_200_OK)
+        self.assertEqual(battery_first.status_code, status.HTTP_200_OK)
+        self.assertEqual(battery_second.status_code, status.HTTP_200_OK)
+
 
 class HttpRetryTests(TestCase):
     @patch("api.services.http_retry.random.uniform", return_value=0.0)
@@ -1234,8 +1301,9 @@ class HttpRetryTests(TestCase):
 class HopeBrokerDispatchTests(TestCase):
     @patch("api.services.hope_broker._hope_broker_url", return_value="redis://hope-redis:6379/0")
     @patch("api.services.hope_broker._hope_default_queue", return_value="hope-q")
+    @patch("api.services.hope_broker._hope_semantic_queue", return_value="semantic-q")
     @patch("api.services.hope_broker._celery_app")
-    def test_send_task_opens_connection_to_hope_broker(self, celery_app_mock, _queue_mock, _broker_mock):
+    def test_send_task_opens_connection_to_hope_broker(self, celery_app_mock, _semantic_queue_mock, _queue_mock, _broker_mock):
         connection = Mock()
         context_manager = Mock()
         context_manager.__enter__ = Mock(return_value=connection)
@@ -1255,6 +1323,34 @@ class HopeBrokerDispatchTests(TestCase):
             connection=connection,
         )
         self.assertEqual(result.id, "hope-job-1")
+
+    @patch("api.services.hope_broker._hope_broker_url", return_value="redis://hope-redis:6379/0")
+    @patch("api.services.hope_broker._hope_default_queue", return_value="hope-q")
+    @patch("api.services.hope_broker._hope_semantic_queue", return_value="semantic-q")
+    @patch("api.services.hope_broker._celery_app")
+    def test_send_task_uses_semantic_queue_for_generation(self, celery_app_mock, _semantic_queue_mock, _queue_mock, _broker_mock):
+        connection = Mock()
+        context_manager = Mock()
+        context_manager.__enter__ = Mock(return_value=connection)
+        context_manager.__exit__ = Mock(return_value=False)
+
+        celery_app_mock.return_value.connection_for_write.return_value = context_manager
+        celery_app_mock.return_value.send_task.return_value = SimpleNamespace(id="hope-job-2")
+
+        result = hope_broker._send_task(
+            task_name="pipeline.llm.generate_questions",
+            args=[{"job_id": "hope-job-2"}, {}],
+            job_id="hope-job-2",
+        )
+
+        celery_app_mock.return_value.send_task.assert_called_once_with(
+            "pipeline.llm.generate_questions",
+            args=[{"job_id": "hope-job-2"}, {}],
+            task_id="hope-job-2",
+            queue="semantic-q",
+            connection=connection,
+        )
+        self.assertEqual(result.id, "hope-job-2")
 
     @patch("api.services.hope_broker.Redis.from_url")
     @patch("api.services.hope_broker._celery_app")
@@ -1333,7 +1429,7 @@ class HopeBrokerDispatchTests(TestCase):
                 {"callback_url": "http://anko/api/callback"},
             ],
             task_id="job-battery-1",
-            queue="celery",
+            queue="semantic",
             connection=ANY,
         )
         redis_client.hset.assert_any_call(
@@ -1380,7 +1476,7 @@ class HopeBrokerDispatchTests(TestCase):
                 },
             ],
             task_id="job-deck-1",
-            queue="celery",
+            queue="semantic",
             connection=ANY,
         )
         redis_client.hset.assert_any_call(
