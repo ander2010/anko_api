@@ -38,7 +38,16 @@ def _celery_app() -> Any:
     if _hope_celery_app is None:
         from celery import Celery
 
-        _hope_celery_app = Celery("hope_dispatch", broker=_hope_broker_url())
+        broker_url = _hope_broker_url()
+        _hope_celery_app = Celery("hope_dispatch")
+        # Celery will otherwise inherit CELERY_BROKER_URL from the Anko process
+        # environment, which points at Anko's own broker DB instead of Hope's.
+        _hope_celery_app.conf.update(
+            broker_url=broker_url,
+            broker_read_url=broker_url,
+            broker_write_url=broker_url,
+            task_default_queue=_hope_default_queue(),
+        )
     return _hope_celery_app
 
 
@@ -73,7 +82,15 @@ def _publish_queued_progress(
 
 def _send_task(*, task_name: str, args: list[Any], job_id: str):
     try:
-        return _celery_app().send_task(task_name, args=args, task_id=job_id, queue=_hope_default_queue())
+        app = _celery_app()
+        with app.connection_for_write(url=_hope_broker_url()) as connection:
+            return app.send_task(
+                task_name,
+                args=args,
+                task_id=job_id,
+                queue=_hope_default_queue(),
+                connection=connection,
+            )
     except Exception as exc:
         raise HopeDispatchError(f"Failed to dispatch Hope task {task_name}: {exc}") from exc
 

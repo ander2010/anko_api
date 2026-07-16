@@ -34,7 +34,7 @@ from ..models import (
     TagGroupItem,
 )
 from .workflow_progress import publish_run_event, recompute_run_progress, update_step_progress
-from .workflow_progress_consumer import enqueue_progress_consumer
+from .workflow_progress_consumer import HopeProgressSnapshot, _apply_progress_snapshot, _build_redis_client, enqueue_progress_consumer
 from .hope_broker import (
     HopeDispatchError,
     dispatch_battery_generation,
@@ -602,6 +602,13 @@ def _wait_for_steps(
             if step.status in AUTO_TERMINAL_STEP_STATUSES:
                 continue
 
+            if step_key == AUTO_STAGE_KEYS["process_document"] and _sync_terminal_document_progress_from_hope(
+                run_id=run.id,
+                step=step,
+            ):
+                state_changed = True
+                continue
+
             activity_at = (
                 step.last_heartbeat_at
                 or step.last_progress_at
@@ -611,6 +618,14 @@ def _wait_for_steps(
             )
             age_seconds = (now - activity_at).total_seconds() if activity_at else None
             if age_seconds is None or age_seconds < stale_step_seconds:
+                continue
+
+            if step_key == AUTO_STAGE_KEYS["process_document"] and _recover_stale_document_processing_step(
+                run=run,
+                step=step,
+                now=now,
+            ):
+                state_changed = True
                 continue
 
             update_step_progress(
@@ -855,6 +870,203 @@ def _document_processing_job_id(document: Document) -> str:
 
 def _document_has_inflight_processing(document: Document) -> bool:
     return document.status in {"pending", "processing"} and bool(_document_processing_job_id(document))
+
+
+def _document_retry_limit() -> int:
+    try:
+        limit = int(os.getenv("AUTO_GENERATE_DOCUMENT_RETRY_LIMIT", "1"))
+    except (TypeError, ValueError):
+        limit = 1
+    return max(0, limit)
+
+
+def _resolve_step_document(step: ProcessStepRun) -> Document | None:
+    raw_document_id = (
+        (step.input_payload or {}).get("document_id")
+        or (step.result_payload or {}).get("document_id")
+        or step.item_key
+    )
+    try:
+        document_id = int(raw_document_id)
+    except (TypeError, ValueError):
+        return None
+    return Document.objects.filter(id=document_id).first()
+
+
+def _sync_terminal_document_progress_from_hope(*, run_id: int, step: ProcessStepRun) -> bool:
+    job_id = str(step.external_job_id or "").strip()
+    if not job_id:
+        return False
+
+    client = None
+    try:
+        client = _build_redis_client()
+        payload = client.hgetall(f"job:{job_id}") or {}
+    except Exception:
+        logger.debug(
+            "auto-generate Hope progress fallback failed run_id=%s step_id=%s job_id=%s",
+            run_id,
+            step.id,
+            job_id,
+            exc_info=True,
+        )
+        return False
+    finally:
+        try:
+            if client is not None:
+                client.close()
+        except Exception:
+            pass
+
+    if str(payload.get("status") or "").upper() not in {"COMPLETED", "FAILED", "ERROR"}:
+        return False
+
+    return _apply_progress_snapshot(
+        run_id,
+        HopeProgressSnapshot(job_id=job_id, payload=payload, source="poll-fallback"),
+    )
+
+
+def _redispatch_document_processing_step(*, run: ProcessRun, step: ProcessStepRun, document: Document, now) -> bool:
+    retry_limit = _document_retry_limit()
+    if int(step.attempt_count or 0) >= retry_limit:
+        return False
+
+    previous_job_id = str(step.external_job_id or "").strip()
+    new_job_id = str(uuid.uuid4())
+    request_payload = {
+        "job_id": new_job_id,
+        "doc_id": document.id,
+        "file_path": document.file.name,
+        "process": "process_pdf",
+        "options": {},
+        "metadata": {"run_id": str(run.run_id), "retry_of_job_id": previous_job_id},
+    }
+    try:
+        response_payload = dispatch_process_document(request_payload)
+    except HopeDispatchError:
+        logger.warning(
+            "auto-generate document redispatch failed run_id=%s step_id=%s document_id=%s previous_job_id=%s",
+            run.id,
+            step.id,
+            document.id,
+            previous_job_id,
+            exc_info=True,
+        )
+        return False
+
+    ws_job_id = str(response_payload.get("job_id") or new_job_id)
+    runtime_metrics = dict(step.runtime_metrics or {})
+    retry_job_ids = list(runtime_metrics.get("retry_job_ids") or [])
+    if previous_job_id:
+        retry_job_ids.append(previous_job_id)
+    redispatch_count = int(step.attempt_count or 0) + 1
+    runtime_metrics.update(
+        {
+            "retry_job_ids": retry_job_ids,
+            "redispatch_count": redispatch_count,
+            "redispatched_at": now.isoformat(),
+        }
+    )
+    result_payload = dict(step.result_payload or {})
+    result_payload.update(response_payload)
+    result_payload["document_id"] = document.id
+    result_payload["job_id"] = ws_job_id
+    result_payload["recovered_from_stale"] = True
+    result_payload["redispatched"] = True
+    update_step_progress(
+        step=step,
+        status=ProcessStepRun.Status.QUEUED,
+        progress_percent=0,
+        status_message="Re-queued document processing after stale heartbeat",
+        worker_step="ingestion",
+        external_job_id=ws_job_id,
+        runtime_metrics=runtime_metrics,
+        result_payload=result_payload,
+        error_payload={},
+        started_at=step.started_at or now,
+        last_heartbeat_at=now,
+    )
+    if step.attempt_count != redispatch_count:
+        step.attempt_count = redispatch_count
+        step.save(update_fields=["attempt_count", "updated_at"])
+
+    document.status = "processing"
+    document.job_id = ws_job_id
+    document.processing_error = None
+    document.save(update_fields=["status", "job_id", "processing_error"])
+    enqueue_progress_consumer(run_id=run.id, job_id=ws_job_id)
+    logger.info(
+        "auto-generate document redispatched run_id=%s step_id=%s document_id=%s previous_job_id=%s new_job_id=%s",
+        run.id,
+        step.id,
+        document.id,
+        previous_job_id,
+        ws_job_id,
+    )
+    return True
+
+
+def _recover_stale_document_processing_step(*, run: ProcessRun, step: ProcessStepRun, now) -> bool:
+    document = _resolve_step_document(step)
+    if document is None:
+        return False
+
+    current_job_id = _document_processing_job_id(document)
+    result_payload = dict(step.result_payload or {})
+    result_payload["document_id"] = document.id
+
+    if _document_ready(document):
+        if current_job_id:
+            result_payload["job_id"] = current_job_id
+        result_payload["status"] = "ready"
+        result_payload["recovered_from_stale"] = True
+        update_step_progress(
+            step=step,
+            status=ProcessStepRun.Status.COMPLETED,
+            progress_percent=100,
+            status_message="Document processing recovered from persisted state",
+            worker_step=step.worker_step or "done",
+            external_job_id=current_job_id or step.external_job_id,
+            result_payload=result_payload,
+            error_payload={},
+            finished_at=now,
+            last_heartbeat_at=now,
+        )
+        logger.info(
+            "auto-generate stale document step recovered from ready document run_id=%s step_id=%s document_id=%s",
+            run.id,
+            step.id,
+            document.id,
+        )
+        return True
+
+    if _document_has_inflight_processing(document) and current_job_id and current_job_id != str(step.external_job_id or "").strip():
+        result_payload["job_id"] = current_job_id
+        result_payload["recovered_from_stale"] = True
+        result_payload["reused_existing_job"] = True
+        update_step_progress(
+            step=step,
+            status=ProcessStepRun.Status.QUEUED,
+            progress_percent=step.progress_percent,
+            status_message="Attached to replacement document processing job",
+            worker_step="ingestion",
+            external_job_id=current_job_id,
+            result_payload=result_payload,
+            error_payload={},
+            last_heartbeat_at=now,
+        )
+        enqueue_progress_consumer(run_id=run.id, job_id=current_job_id)
+        logger.info(
+            "auto-generate stale document step attached to existing job run_id=%s step_id=%s document_id=%s new_job_id=%s",
+            run.id,
+            step.id,
+            document.id,
+            current_job_id,
+        )
+        return True
+
+    return _redispatch_document_processing_step(run=run, step=step, document=document, now=now)
 
 
 def _finalize_run_summary(*, run: ProcessRun, dispatch_errors: list[dict[str, Any]] | None = None) -> str:

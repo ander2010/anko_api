@@ -4,7 +4,7 @@ import requests
 import shutil
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from PIL import Image
 from botocore.exceptions import ClientError
@@ -12,6 +12,7 @@ from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -28,18 +29,22 @@ from api.models import (
     Project,
     Resource,
     SavedDeck,
+    Section,
     User,
 )
 from api.services.auto_generate_workflow import (
     AUTO_STAGE_KEYS,
     cleanup_empty_generated_battery,
     cleanup_empty_generated_deck,
+    _document_has_inflight_processing,
     _finalize_completed_battery_step,
     _finalize_completed_flashcard_step,
-    _document_has_inflight_processing,
+    _recover_stale_document_processing_step,
+    _sync_terminal_document_progress_from_hope,
     _step_finalize_callback_status,
     _step_requires_finalize_callback,
 )
+from api.services import hope_broker
 from api.services.hope_broker import (
     dispatch_battery_generation,
     dispatch_flashcard_generation,
@@ -934,6 +939,165 @@ class AutoGenerateWorkflowCallbackTests(TestCase):
 
         self.assertFalse(_document_has_inflight_processing(document))
 
+    @patch("api.services.auto_generate_workflow._apply_progress_snapshot")
+    @patch("api.services.auto_generate_workflow._build_redis_client")
+    def test_sync_terminal_document_progress_from_hope_reads_persisted_completion(self, redis_client_mock, apply_snapshot_mock):
+        run = ProcessRun.objects.create(workflow_key="collection_auto_generate")
+        step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=AUTO_STAGE_KEYS["process_document"],
+            item_key="42",
+            status=ProcessStepRun.Status.QUEUED,
+            external_job_id="hope-job-42",
+        )
+        redis_client = Mock()
+        redis_client.hgetall.return_value = {
+            "status": "COMPLETED",
+            "progress": "100",
+            "current_step": "done",
+            "doc_id": "42",
+        }
+        redis_client_mock.return_value = redis_client
+        apply_snapshot_mock.return_value = True
+
+        completed = _sync_terminal_document_progress_from_hope(run_id=run.id, step=step)
+
+        self.assertTrue(completed)
+        redis_client.hgetall.assert_called_once_with("job:hope-job-42")
+        apply_snapshot_mock.assert_called_once()
+
+    @patch("api.services.auto_generate_workflow._build_redis_client")
+    def test_sync_terminal_document_progress_from_hope_ignores_non_terminal_status(self, redis_client_mock):
+        run = ProcessRun.objects.create(workflow_key="collection_auto_generate")
+        step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=AUTO_STAGE_KEYS["process_document"],
+            item_key="42",
+            status=ProcessStepRun.Status.QUEUED,
+            external_job_id="hope-job-42",
+        )
+        redis_client = Mock()
+        redis_client.hgetall.return_value = {
+            "status": "RUNNING",
+            "progress": "40",
+            "current_step": "embedding",
+            "doc_id": "42",
+        }
+        redis_client_mock.return_value = redis_client
+
+        completed = _sync_terminal_document_progress_from_hope(run_id=run.id, step=step)
+
+        self.assertFalse(completed)
+
+    def test_recover_stale_document_step_marks_ready_document_completed(self):
+        document = Document.objects.create(
+            project=self.project,
+            filename="ready.pdf",
+            file="documents/test/ready.pdf",
+            type="PDF",
+            size=14,
+            hash="hash-ready",
+            status="ready",
+            job_id="hope-job-ready",
+            uploaded_by=self.user,
+        )
+        Section.objects.create(document=document, title="Overview", content="content", order=1)
+        run = ProcessRun.objects.create(workflow_key="collection_auto_generate")
+        step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=AUTO_STAGE_KEYS["process_document"],
+            item_key=str(document.id),
+            status=ProcessStepRun.Status.RUNNING,
+            external_job_id="stale-job",
+            input_payload={"document_id": document.id, "file_path": document.file.name},
+        )
+
+        recovered = _recover_stale_document_processing_step(run=run, step=step, now=timezone.now())
+
+        self.assertTrue(recovered)
+        step.refresh_from_db()
+        self.assertEqual(step.status, ProcessStepRun.Status.COMPLETED)
+        self.assertEqual(str(step.progress_percent), "100.00")
+        self.assertEqual(step.external_job_id, "hope-job-ready")
+        self.assertTrue(step.result_payload.get("recovered_from_stale"))
+
+    @patch("api.services.auto_generate_workflow.enqueue_progress_consumer")
+    @patch("api.services.auto_generate_workflow.dispatch_process_document")
+    def test_recover_stale_document_step_attaches_to_replacement_job(self, dispatch_mock, enqueue_mock):
+        document = Document.objects.create(
+            project=self.project,
+            filename="replacement.pdf",
+            file="documents/test/replacement.pdf",
+            type="PDF",
+            size=20,
+            hash="hash-replacement",
+            status="processing",
+            job_id="replacement-job",
+            uploaded_by=self.user,
+        )
+        run = ProcessRun.objects.create(workflow_key="collection_auto_generate")
+        step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=AUTO_STAGE_KEYS["process_document"],
+            item_key=str(document.id),
+            status=ProcessStepRun.Status.RUNNING,
+            external_job_id="stale-job",
+            input_payload={"document_id": document.id, "file_path": document.file.name},
+        )
+
+        recovered = _recover_stale_document_processing_step(run=run, step=step, now=timezone.now())
+
+        self.assertTrue(recovered)
+        dispatch_mock.assert_not_called()
+        enqueue_mock.assert_called_once_with(run_id=run.id, job_id="replacement-job")
+        step.refresh_from_db()
+        self.assertEqual(step.status, ProcessStepRun.Status.QUEUED)
+        self.assertEqual(step.external_job_id, "replacement-job")
+        self.assertTrue(step.result_payload.get("reused_existing_job"))
+
+    @patch("api.services.auto_generate_workflow.enqueue_progress_consumer")
+    @patch("api.services.auto_generate_workflow.dispatch_process_document")
+    def test_recover_stale_document_step_redispatches_when_worker_goes_silent(self, dispatch_mock, enqueue_mock):
+        document = Document.objects.create(
+            project=self.project,
+            filename="redispatch.pdf",
+            file="documents/test/redispatch.pdf",
+            type="PDF",
+            size=19,
+            hash="hash-redispatch",
+            status="pending",
+            uploaded_by=self.user,
+        )
+        dispatch_mock.return_value = {
+            "job_id": "replacement-job",
+            "task_id": "replacement-job",
+            "document_id": document.id,
+            "status": "queued",
+        }
+        run = ProcessRun.objects.create(workflow_key="collection_auto_generate")
+        step = ProcessStepRun.objects.create(
+            run=run,
+            step_key=AUTO_STAGE_KEYS["process_document"],
+            item_key=str(document.id),
+            status=ProcessStepRun.Status.RUNNING,
+            external_job_id="stale-job",
+            input_payload={"document_id": document.id, "file_path": document.file.name},
+        )
+
+        recovered = _recover_stale_document_processing_step(run=run, step=step, now=timezone.now())
+
+        self.assertTrue(recovered)
+        dispatch_mock.assert_called_once()
+        enqueue_mock.assert_called_once_with(run_id=run.id, job_id="replacement-job")
+        step.refresh_from_db()
+        document.refresh_from_db()
+        self.assertEqual(step.status, ProcessStepRun.Status.QUEUED)
+        self.assertEqual(step.external_job_id, "replacement-job")
+        self.assertEqual(step.attempt_count, 1)
+        self.assertTrue(step.result_payload.get("redispatched"))
+        self.assertEqual(document.status, "processing")
+        self.assertEqual(document.job_id, "replacement-job")
+
     def test_cleanup_empty_generated_battery_deletes_placeholder_and_artifacts(self):
         run = ProcessRun.objects.create(workflow_key="test-workflow")
         artifact = ProcessArtifact.objects.create(
@@ -1068,6 +1232,30 @@ class HttpRetryTests(TestCase):
 
 
 class HopeBrokerDispatchTests(TestCase):
+    @patch("api.services.hope_broker._hope_broker_url", return_value="redis://hope-redis:6379/0")
+    @patch("api.services.hope_broker._hope_default_queue", return_value="hope-q")
+    @patch("api.services.hope_broker._celery_app")
+    def test_send_task_opens_connection_to_hope_broker(self, celery_app_mock, _queue_mock, _broker_mock):
+        connection = Mock()
+        context_manager = Mock()
+        context_manager.__enter__ = Mock(return_value=connection)
+        context_manager.__exit__ = Mock(return_value=False)
+
+        celery_app_mock.return_value.connection_for_write.return_value = context_manager
+        celery_app_mock.return_value.send_task.return_value = SimpleNamespace(id="hope-job-1")
+
+        result = hope_broker._send_task(task_name="pipeline.prepare.dispatch_document", args=[{"job_id": "hope-job-1"}, {}], job_id="hope-job-1")
+
+        celery_app_mock.return_value.connection_for_write.assert_called_once_with(url="redis://hope-redis:6379/0")
+        celery_app_mock.return_value.send_task.assert_called_once_with(
+            "pipeline.prepare.dispatch_document",
+            args=[{"job_id": "hope-job-1"}, {}],
+            task_id="hope-job-1",
+            queue="hope-q",
+            connection=connection,
+        )
+        self.assertEqual(result.id, "hope-job-1")
+
     @patch("api.services.hope_broker.Redis.from_url")
     @patch("api.services.hope_broker._celery_app")
     def test_dispatch_process_document_enqueues_hope_task_and_progress(self, celery_app_mock, redis_from_url_mock):
@@ -1098,6 +1286,7 @@ class HopeBrokerDispatchTests(TestCase):
             ],
             task_id="job-doc-1",
             queue="celery",
+            connection=ANY,
         )
         redis_client.hset.assert_any_call(
             "job:job-doc-1",
@@ -1145,6 +1334,7 @@ class HopeBrokerDispatchTests(TestCase):
             ],
             task_id="job-battery-1",
             queue="celery",
+            connection=ANY,
         )
         redis_client.hset.assert_any_call(
             "job:job-battery-1",
@@ -1191,6 +1381,7 @@ class HopeBrokerDispatchTests(TestCase):
             ],
             task_id="job-deck-1",
             queue="celery",
+            connection=ANY,
         )
         redis_client.hset.assert_any_call(
             "job:job-deck-1",
