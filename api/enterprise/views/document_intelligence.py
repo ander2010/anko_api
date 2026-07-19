@@ -118,6 +118,9 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             difficulty=d.get("difficulty", "medium"),
             minimum_passing_score=d.get("minimum_passing_score", 70),
             estimated_duration_minutes=d.get("estimated_duration_minutes"),
+            cards_per_group=d.get("cards_per_group", 20),
+            questions_per_group=d.get("questions_per_group", 15),
+            question_format=d.get("question_format", "multiple_choice"),
             status="pending",
             created_by=request.user,
         )

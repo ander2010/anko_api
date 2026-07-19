@@ -38,6 +38,18 @@ class KnowledgeSourceCreateSerializer(serializers.Serializer):
     estimated_duration_minutes = serializers.IntegerField(
         required=False, allow_null=True, min_value=1
     )
+    # Auto-generation preferences — used as defaults when auto-generate runs
+    cards_per_group = serializers.IntegerField(
+        required=False, default=20, min_value=1
+    )
+    questions_per_group = serializers.IntegerField(
+        required=False, default=15, min_value=1
+    )
+    question_format = serializers.ChoiceField(
+        choices=["true_false", "multiple_choice", "variety"],
+        default="multiple_choice",
+        required=False,
+    )
 
 
 class KnowledgeSourceSerializer(serializers.Serializer):
@@ -54,6 +66,9 @@ class KnowledgeSourceSerializer(serializers.Serializer):
     difficulty = serializers.CharField()
     minimum_passing_score = serializers.IntegerField(allow_null=True)
     estimated_duration_minutes = serializers.IntegerField(allow_null=True)
+    cards_per_group = serializers.IntegerField()
+    questions_per_group = serializers.IntegerField()
+    question_format = serializers.CharField()
     extracted_topics_count = serializers.IntegerField()
     extracted_procedures_count = serializers.IntegerField()
     generated_training_id = serializers.IntegerField(allow_null=True)

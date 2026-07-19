@@ -67,6 +67,19 @@ class KnowledgeSource(TenantMixin):
     minimum_passing_score = models.PositiveIntegerField(default=70, null=True, blank=True)
     estimated_duration_minutes = models.PositiveIntegerField(null=True, blank=True)
 
+    # Auto-generation preferences — used as the defaults when POST
+    # /process-runs/auto-generate/ runs for this proceso's documents.
+    QUESTION_FORMAT_CHOICES = [
+        ("true_false", "True/False"),
+        ("multiple_choice", "Multiple Choice"),
+        ("variety", "Variety"),
+    ]
+    cards_per_group = models.PositiveIntegerField(default=20)
+    questions_per_group = models.PositiveIntegerField(default=15)
+    question_format = models.CharField(
+        max_length=20, choices=QUESTION_FORMAT_CHOICES, default="multiple_choice"
+    )
+
     business_unit = models.ForeignKey(
         BusinessUnit,
         null=True,
