@@ -106,6 +106,8 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         assignment = ComplianceService.assign_to_user(
             program, target, request.user, program.company, due_date
         )
+        from api.enterprise.services.email_service import send_compliance_assignment_notification
+        send_compliance_assignment_notification(assignment)
         return Response(
             ComplianceAssignmentSerializer(assignment).data,
             status=status.HTTP_201_CREATED,
@@ -137,6 +139,8 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         assignment = ComplianceService.assign_to_team(
             program, team, request.user, program.company, due_date
         )
+        from api.enterprise.services.email_service import send_compliance_assignment_notification
+        send_compliance_assignment_notification(assignment)
         return Response(
             ComplianceAssignmentSerializer(assignment).data,
             status=status.HTTP_201_CREATED,

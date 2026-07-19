@@ -87,6 +87,10 @@ class EnterpriseViewSetMixin:
         return Company.objects.get(id=membership.company_id)
 
     def _user_company_ids(self):
+        # Platform admins (is_staff) operate across every active company, not
+        # just the ones where they hold a real membership.
+        if getattr(self.request.user, "is_staff", False):
+            return Company.objects.filter(is_active=True).values_list("id", flat=True)
         return CompanyMembership.objects.filter(
             user=self.request.user, status="active"
         ).values_list("company_id", flat=True)

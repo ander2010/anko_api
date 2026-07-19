@@ -104,7 +104,13 @@ class CompanyListSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return None
         membership = obj.memberships.filter(user=request.user, status="active").first()
-        return membership.role if membership else None
+        if membership:
+            return membership.role
+        # Platform admins can operate as any company without a real membership —
+        # report them as owner so frontend role-gated UI matches backend access.
+        if request.user.is_staff:
+            return "owner"
+        return None
 
 
 # ---------------------------------------------------------------------------

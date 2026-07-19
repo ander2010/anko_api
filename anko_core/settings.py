@@ -61,8 +61,12 @@ _configured_allowed_hosts = [
     for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if host.strip()
 ]
-# Allow internal Docker service names so Hope can call Django callbacks directly.
-ALLOWED_HOSTS = list(dict.fromkeys(_configured_allowed_hosts + ["anko-api", "hope-api"]))
+# Allow internal Docker service names so Hope can call Django callbacks directly,
+# and always keep localhost/127.0.0.1 so internal health checks still work even
+# when DJANGO_ALLOWED_HOSTS is overridden to production-only domains.
+ALLOWED_HOSTS = list(dict.fromkeys(
+    _configured_allowed_hosts + ["anko-api", "hope-api", "localhost", "127.0.0.1"]
+))
 
 
 # Application definition

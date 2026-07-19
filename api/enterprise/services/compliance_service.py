@@ -25,6 +25,7 @@ from api.enterprise_compliance_models import (
     ComplianceRequirement,
     ComplianceReview,
 )
+from api.enterprise_learning_models import LearningPathAssignment
 from api.enterprise_models import Company, LearningEvent, Team
 
 
@@ -73,6 +74,11 @@ class ComplianceService:
                 "program_code": program.code,
             },
         )
+
+        ComplianceService._ensure_requirement_assignments(
+            program=program, user=user, assigned_by=assigned_by,
+            company=company, due_date=due_date,
+        )
         return assignment
 
     @staticmethod
@@ -108,7 +114,37 @@ class ComplianceService:
                     "team_id": team.id,
                 },
             )
+            ComplianceService._ensure_requirement_assignments(
+                program=program, user=membership.user, assigned_by=assigned_by,
+                company=company, due_date=due_date,
+            )
         return assignment
+
+    @staticmethod
+    def _ensure_requirement_assignments(program, user, assigned_by, company, due_date) -> None:
+        """
+        So a user assigned to a Compliance Program can complete it through the
+        same Learning Path experience used everywhere else: make sure they
+        have a LearningPathAssignment for each of the program's required
+        Learning Paths. Reuses an existing one (any status) instead of
+        creating a duplicate.
+        """
+        from api.enterprise.services.learning_service import EnterpriseLearningService
+
+        learning_paths = {
+            req.learning_path_id: req.learning_path
+            for req in program.requirements.filter(learning_path__isnull=False).select_related("learning_path")
+        }
+        for learning_path in learning_paths.values():
+            already_has = LearningPathAssignment.objects.filter(
+                company=company, learning_path=learning_path, user=user,
+            ).exists()
+            if already_has:
+                continue
+            EnterpriseLearningService.assign_to_user(
+                user=user, assigned_by=assigned_by, company=company,
+                learning_path=learning_path, due_date=due_date,
+            )
 
     # ------------------------------------------------------------------
     # Completing / reviewing
@@ -202,6 +238,51 @@ class ComplianceService:
                 )
 
         return assignment
+
+    @staticmethod
+    def auto_complete_on_path_completion(user, company: Company, learning_path) -> None:
+        """
+        Called (best-effort) whenever a user finishes a Learning Path.
+
+        If that path was a Requirement of a Compliance Program the user has
+        a pending/in-progress assignment for, and all of that program's other
+        required Learning Paths are also already completed, the Compliance
+        Assignment is completed automatically — the same way manually
+        completing it via `complete_assignment` works.
+        """
+        requirements = ComplianceRequirement.objects.filter(
+            learning_path=learning_path, program__company=company,
+        ).select_related("program")
+
+        for req in requirements:
+            assignment = ComplianceAssignment.objects.filter(
+                company=company, program=req.program, user=user,
+            ).exclude(status="completed").first()
+            if not assignment:
+                continue
+
+            required_path_ids = set(
+                req.program.requirements.filter(learning_path__isnull=False)
+                .values_list("learning_path_id", flat=True)
+            )
+            if not required_path_ids:
+                continue
+
+            completed_path_ids = set(
+                LearningPathAssignment.objects.filter(
+                    company=company, user=user,
+                    learning_path_id__in=required_path_ids, status="completed",
+                ).values_list("learning_path_id", flat=True)
+            )
+
+            if required_path_ids.issubset(completed_path_ids):
+                ComplianceService.complete_assignment(
+                    assignment,
+                    user=user,
+                    score=None,
+                    reviewer=None,
+                    notes="Auto-completed: all required learning paths finished.",
+                )
 
     # ------------------------------------------------------------------
     # Renewals

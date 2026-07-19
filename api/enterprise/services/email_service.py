@@ -121,6 +121,45 @@ def send_assignment_notification(assignment) -> None:
                 _notify(tm.user)
 
 
+def send_compliance_assignment_notification(assignment) -> None:
+    """
+    Notifica a un usuario (o a todos los miembros de un equipo) que se le
+    asignó un Compliance Program. El link va directo al programa.
+    """
+    program = assignment.program
+    link = f"{FRONTEND_URL}/enterprise/compliance/programs/{program.id}"
+    company = assignment.company
+
+    def _notify(user):
+        body = (
+            f"Hola {user.get_full_name() or user.username},\n\n"
+            f"Se te ha asignado el programa de cumplimiento: {program.name} ({program.code})\n\n"
+            f"Puedes acceder directamente aquí:\n{link}\n\n"
+            f"Este es un recordatorio. Ya puedes ver la asignación en tu cuenta."
+        )
+        _send(
+            recipient_email=user.email,
+            recipient_user=user,
+            company=company,
+            email_type="compliance_assignment_notification",
+            subject=f"Nuevo compliance asignado: {program.name}",
+            body=body,
+            metadata={
+                "assignment_id": assignment.id,
+                "program_id": program.id,
+                "program_name": program.name,
+                "link": link,
+            },
+        )
+
+    if assignment.user_id:
+        _notify(assignment.user)
+    elif assignment.team_id:
+        for tm in assignment.team.memberships.select_related("user"):
+            if tm.user.email:
+                _notify(tm.user)
+
+
 # ---------------------------------------------------------------------------
 # Informational — added to company
 # ---------------------------------------------------------------------------

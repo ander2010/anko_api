@@ -14,6 +14,7 @@ class EmailLog(models.Model):
     EMAIL_TYPE_CHOICES = [
         # Assignment emails — carry a direct link to the assignment
         ("assignment_notification", "Assignment Notification"),
+        ("compliance_assignment_notification", "Compliance Assignment Notification"),
         # Informational — user added somewhere
         ("added_to_company", "Added to Company"),
         ("added_to_team", "Added to Team"),

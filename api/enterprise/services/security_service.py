@@ -30,7 +30,21 @@ def _get_active_membership(user, company_id) -> "CompanyMembership | None":
             status="active",
         )
     except (CompanyMembership.DoesNotExist, ValueError, TypeError):
+        if getattr(user, "is_staff", False):
+            return _staff_virtual_membership(user, company_id)
         return None
+
+
+def _staff_virtual_membership(user, company_id) -> "CompanyMembership | None":
+    """Platform admins (is_staff) can operate as any active company without a
+    real CompanyMembership row — returns an unsaved, owner-level membership
+    so the existing role-based checks throughout the enterprise app treat
+    them like the company's owner. Never persisted to the database."""
+    try:
+        company = Company.objects.get(id=company_id, is_active=True)
+    except (Company.DoesNotExist, ValueError, TypeError):
+        return None
+    return CompanyMembership(company=company, user=user, role="owner", status="active")
 
 
 # ---------------------------------------------------------------------------

@@ -318,6 +318,22 @@ class EnterpriseLearningService:
                 "Auto-issue on learning completion failed for assignment %s", assignment.id
             )
 
+        # Auto-complete any Compliance Assignment whose required learning
+        # paths are now all finished (best-effort — a failure here must not
+        # roll back the assignment completion itself).
+        try:
+            from api.enterprise.services.compliance_service import ComplianceService
+            ComplianceService.auto_complete_on_path_completion(
+                user=user,
+                company=assignment.company,
+                learning_path=assignment.learning_path,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "Compliance auto-complete failed for assignment %s", assignment.id
+            )
+
     # ------------------------------------------------------------------
     # Progress calculation
     # ------------------------------------------------------------------
