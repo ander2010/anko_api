@@ -7652,6 +7652,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
+            or (deck.project_id is None and user.company_memberships.exists())
         )
         if not has_access:
             return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
@@ -8088,6 +8089,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or deck.shares.filter(shared_with=user).exists()
+            or (deck.project_id is None and user.company_memberships.exists())
         )
         if not has_access:
             raise PermissionDenied("You do not have access to this deck.")
