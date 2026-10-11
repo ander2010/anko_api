@@ -15,3 +15,8 @@ class BurstUserRateThrottle(UserRateThrottle):
 
 class SustainedUserRateThrottle(UserRateThrottle):
     scope = "user_sustained"
+
+
+class LeadAnonRateThrottle(AnonRateThrottle):
+    """Caps anonymous lead submissions (public landing forms) per IP."""
+    scope = "anon_lead"

@@ -264,7 +264,7 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'DEFAULT_PAGINATION_CLASS': 'api.pagination.StandardResultsSetPagination',
     'PAGE_SIZE': 10,
     'DEFAULT_RENDERER_CLASSES': [
         'api.renderers.TranslatingJSONRenderer',
@@ -281,6 +281,7 @@ REST_FRAMEWORK = {
         'anon_sustained': os.getenv("DRF_THROTTLE_ANON_SUSTAINED", "200/hour"),
         'user_burst': os.getenv("DRF_THROTTLE_USER_BURST", "120/min"),
         'user_sustained': os.getenv("DRF_THROTTLE_USER_SUSTAINED", "2000/hour"),
+        'anon_lead': os.getenv("DRF_THROTTLE_ANON_LEAD", "5/hour"),
     },
     'NUM_PROXIES': int(os.getenv("DRF_NUM_PROXIES", "0")),
 }

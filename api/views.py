@@ -101,6 +101,8 @@ from .serializers import (
     TagSerializer, QaPairSerializer
 )
 from rest_framework.pagination import PageNumberPagination
+from api.pagination import StandardResultsSetPagination
+from api.throttles import LeadAnonRateThrottle
 from .models import SummaryDocument
 from django.shortcuts import get_object_or_404
 from django.core.mail import send_mail
@@ -169,10 +171,6 @@ def _is_rbac_admin_user(user) -> bool:
     except Exception:
         return False
 
-class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 10
-    page_size_query_param = "page_size"   # 👈 acepta ?page_size=1
-    max_page_size = 200
 
 
 class AuthViewSet(viewsets.GenericViewSet):
@@ -8567,20 +8565,35 @@ class FacebookLoginView(SocialLoginView):
 
 
 class SupportRequestViewSet(viewsets.ModelViewSet):
+    """
+    POST: open to anyone (logged-in users + anonymous leads from the landing page).
+    Everything else (list / edit / delete): platform admins only.
+    """
     serializer_class = SupportRequestSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def get_throttles(self):
+        throttles = super().get_throttles()
+        if self.action == "create" and not self.request.user.is_authenticated:
+            throttles.append(LeadAnonRateThrottle())
+        return throttles
 
     def get_queryset(self):
-        # El usuario normal solo ve sus tickets
-        qs = SupportRequest.objects.all().order_by("-created_at")
-        # user = self.request.user
-        # if user.is_staff:
-        #     return qs
-        return qs
+        return SupportRequest.objects.all().order_by("-created_at")
 
     def perform_create(self, serializer):
         user = self.request.user
-        serializer.save(user=user, email=user.email)
+        if user.is_authenticated:
+            serializer.save(user=user, email=user.email)
+            return
+        if not serializer.validated_data.get("email"):
+            raise serializers.ValidationError({"email": ["This field is required."]})
+        serializer.save(user=None)
 
 @method_decorator(csrf_exempt, name='dispatch')
 class FrontendPasswordResetView(PasswordResetView):

@@ -1147,11 +1147,12 @@ class SupportRequestSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "user",
-            "email",
             "status",
             "created_at",
             "resolved_at",
         ]
+        # Authenticated users get their account email; anonymous leads must send one.
+        extra_kwargs = {"email": {"required": False}}
 
     def validate_message(self, value: str):
         if len(value.strip()) < 10:

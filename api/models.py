@@ -954,10 +954,13 @@ class SupportRequest(models.Model):
         (STATUS_DONE, "Done"),
     ]
 
+    # null = anonymous lead from the public landing page (demo / pilot requests)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="support_requests",
+        null=True,
+        blank=True,
     )
 
     name = models.CharField(max_length=120, blank=True)
