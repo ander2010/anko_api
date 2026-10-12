@@ -82,23 +82,23 @@ from .serializers import (
 from urllib.parse import quote, urlencode
 from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
-from .models import Tag
+# from .models import Tag  # UNUSED-CLEANUP (2026-10-11)
 from api.mixins import EncryptSelectedActionsMixin
 
 from .models import (
     Resource, Permission, Role,
     Plan, PlanLimit, Subscription,
-    BatteryShare, SavedBattery, Invite,
-    Deck, Flashcard, DeckShare, SavedDeck,
-    Tag, QaPair
+    BatteryShare, Invite,  # SavedBattery: UNUSED-CLEANUP (2026-10-11)
+    Deck, Flashcard, DeckShare,  # SavedDeck: UNUSED-CLEANUP (2026-10-11)
+    QaPair,  # Tag: UNUSED-CLEANUP (2026-10-11)
 )
 
 from .serializers import (
     ResourceSerializer, PermissionSerializer, RoleSerializer,
     PlanSerializer, PlanLimitSerializer, SubscriptionSerializer,
-    BatteryShareSerializer, SavedBatterySerializer, InviteSerializer,
-    DeckSerializer, DeckListSerializer, FlashcardSerializer, RichFlashcardCreateSerializer, DeckShareSerializer, SavedDeckSerializer,
-    TagSerializer, QaPairSerializer
+    BatteryShareSerializer, InviteSerializer,  # SavedBatterySerializer: UNUSED-CLEANUP (2026-10-11)
+    DeckSerializer, DeckListSerializer, FlashcardSerializer, RichFlashcardCreateSerializer, DeckShareSerializer,  # SavedDeckSerializer: UNUSED-CLEANUP (2026-10-11)
+    QaPairSerializer,  # TagSerializer: UNUSED-CLEANUP (2026-10-11)
 )
 from rest_framework.pagination import PageNumberPagination
 from api.pagination import StandardResultsSetPagination
@@ -4848,16 +4848,18 @@ class BatteryShareViewSet(viewsets.ModelViewSet):
         logger.info("battery_share created by_user=%s battery_id=%s shared_with=%s", self.request.user.id, battery.id, share.shared_with_id)
 
 
-class SavedBatteryViewSet(viewsets.ModelViewSet):
-    queryset = SavedBattery.objects.select_related("user", "battery", "battery__project").all()
-    serializer_class = SavedBatterySerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return super().get_queryset().filter(user=self.request.user)
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+# UNUSED-CLEANUP (2026-10-11): endpoint /api/saved-batteries/ nunca llamado por el frontend
+# class SavedBatteryViewSet(viewsets.ModelViewSet):
+#     queryset = SavedBattery.objects.select_related("user", "battery", "battery__project").all()
+#     serializer_class = SavedBatterySerializer
+#     permission_classes = [IsAuthenticated]
+#
+#     def get_queryset(self):
+#         return super().get_queryset().filter(user=self.request.user)
+#
+#     def perform_create(self, serializer):
+#         serializer.save(user=self.request.user)
+# END UNUSED-CLEANUP
 
 
 class InviteViewSet(viewsets.ModelViewSet):
@@ -8163,35 +8165,39 @@ class DeckShareViewSet(viewsets.ModelViewSet):
         )
 
 
-class SavedDeckViewSet(viewsets.ModelViewSet):
-    queryset = SavedDeck.objects.select_related("user", "deck").all()
-    serializer_class = SavedDeckSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        if _is_rbac_admin_user(self.request.user):
-            return super().get_queryset().order_by("-id")
-        return super().get_queryset().filter(user=self.request.user).order_by("-id")
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+# UNUSED-CLEANUP (2026-10-11): endpoint /api/saved-decks/ nunca llamado por el frontend
+# class SavedDeckViewSet(viewsets.ModelViewSet):
+#     queryset = SavedDeck.objects.select_related("user", "deck").all()
+#     serializer_class = SavedDeckSerializer
+#     permission_classes = [IsAuthenticated]
+#
+#     def get_queryset(self):
+#         if _is_rbac_admin_user(self.request.user):
+#             return super().get_queryset().order_by("-id")
+#         return super().get_queryset().filter(user=self.request.user).order_by("-id")
+#
+#     def perform_create(self, serializer):
+#         serializer.save(user=self.request.user)
+# END UNUSED-CLEANUP
 
 
 # ==========================================================
 # Optional: exponer Tag / QaPair (managed=False)
 # ==========================================================
 
-class TagViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Tag.objects.all()
-    serializer_class = TagSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        document_id = self.request.query_params.get("document_id")
-        if document_id:
-            qs = qs.filter(document_id=str(document_id))
-        return qs.order_by("created_at")
+# UNUSED-CLEANUP (2026-10-11): nunca registrado en urls.py; tabla 'tags' no existe
+# class TagViewSet(viewsets.ReadOnlyModelViewSet):
+#     queryset = Tag.objects.all()
+#     serializer_class = TagSerializer
+#     permission_classes = [IsAuthenticated]
+#
+#     def get_queryset(self):
+#         qs = super().get_queryset()
+#         document_id = self.request.query_params.get("document_id")
+#         if document_id:
+#             qs = qs.filter(document_id=str(document_id))
+#         return qs.order_by("created_at")
+# END UNUSED-CLEANUP
 
 
 class QaPairViewSet(viewsets.ReadOnlyModelViewSet):
@@ -9307,10 +9313,10 @@ class AdminViewSet(viewsets.GenericViewSet):
 
     Recursos disponibles:
       battery-shares   → BatteryShare   (baterías compartidas)
-      saved-batteries  → SavedBattery   (baterías guardadas)
+      saved-batteries  → SavedBattery   (baterías guardadas)  [UNUSED-CLEANUP: comentado]
       flashcards       → Flashcard      (flashcards generales)
       deck-shares      → DeckShare      (decks compartidos)
-      saved-decks      → SavedDeck      (decks guardados)
+      saved-decks      → SavedDeck      (decks guardados)  [UNUSED-CLEANUP: comentado]
       decks            → Deck           (decks generales)
       projects         → Project        (proyectos generales)
 
@@ -9382,47 +9388,49 @@ class AdminViewSet(viewsets.GenericViewSet):
     # BATERÍAS GUARDADAS  (SavedBattery)
     # ----------------------------------------------------------
 
-    @action(detail=False, methods=["get"], url_path="saved-batteries")
-    def admin_list_saved_batteries(self, request):
-        """GET /api/admin/saved-batteries/ — lista todas las baterías guardadas."""
-        err = self._require_admin(request)
-        if err:
-            return err
-        qs = (
-            SavedBattery.objects
-            .select_related("user", "battery", "battery__project")
-            .all()
-            .order_by("-id")
-        )
-        page = self.paginate_queryset(qs)
-        if page is not None:
-            return self.get_paginated_response(
-                SavedBatterySerializer(page, many=True, context={"request": request}).data
-            )
-        return Response(SavedBatterySerializer(qs, many=True, context={"request": request}).data)
-
-    @action(detail=False, methods=["get", "patch", "delete"],
-            url_path=r"saved-batteries/(?P<item_pk>\d+)")
-    def admin_detail_saved_battery(self, request, item_pk=None):
-        """
-        GET    /api/admin/saved-batteries/{id}/ — detalle
-        PATCH  /api/admin/saved-batteries/{id}/ — actualizar
-        DELETE /api/admin/saved-batteries/{id}/ — eliminar
-        """
-        err = self._require_admin(request)
-        if err:
-            return err
-        obj = get_object_or_404(SavedBattery, pk=item_pk)
-        if request.method == "GET":
-            return Response(SavedBatterySerializer(obj, context={"request": request}).data)
-        if request.method == "PATCH":
-            ser = SavedBatterySerializer(obj, data=request.data, partial=True,
-                                          context={"request": request})
-            ser.is_valid(raise_exception=True)
-            ser.save()
-            return Response(ser.data)
-        obj.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+    # UNUSED-CLEANUP (2026-10-11): acciones admin de SavedBattery
+    # @action(detail=False, methods=["get"], url_path="saved-batteries")
+    # def admin_list_saved_batteries(self, request):
+    #     """GET /api/admin/saved-batteries/ — lista todas las baterías guardadas."""
+    #     err = self._require_admin(request)
+    #     if err:
+    #         return err
+    #     qs = (
+    #         SavedBattery.objects
+    #         .select_related("user", "battery", "battery__project")
+    #         .all()
+    #         .order_by("-id")
+    #     )
+    #     page = self.paginate_queryset(qs)
+    #     if page is not None:
+    #         return self.get_paginated_response(
+    #             SavedBatterySerializer(page, many=True, context={"request": request}).data
+    #         )
+    #     return Response(SavedBatterySerializer(qs, many=True, context={"request": request}).data)
+    #
+    # @action(detail=False, methods=["get", "patch", "delete"],
+    #         url_path=r"saved-batteries/(?P<item_pk>\d+)")
+    # def admin_detail_saved_battery(self, request, item_pk=None):
+    #     """
+    #     GET    /api/admin/saved-batteries/{id}/ — detalle
+    #     PATCH  /api/admin/saved-batteries/{id}/ — actualizar
+    #     DELETE /api/admin/saved-batteries/{id}/ — eliminar
+    #     """
+    #     err = self._require_admin(request)
+    #     if err:
+    #         return err
+    #     obj = get_object_or_404(SavedBattery, pk=item_pk)
+    #     if request.method == "GET":
+    #         return Response(SavedBatterySerializer(obj, context={"request": request}).data)
+    #     if request.method == "PATCH":
+    #         ser = SavedBatterySerializer(obj, data=request.data, partial=True,
+    #                                       context={"request": request})
+    #         ser.is_valid(raise_exception=True)
+    #         ser.save()
+    #         return Response(ser.data)
+    #     obj.delete()
+    #     return Response(status=status.HTTP_204_NO_CONTENT)
+    # END UNUSED-CLEANUP
 
     # ----------------------------------------------------------
     # FLASHCARDS GENERALES  (Flashcard)
@@ -9518,47 +9526,49 @@ class AdminViewSet(viewsets.GenericViewSet):
     # DECKS GUARDADOS  (SavedDeck)
     # ----------------------------------------------------------
 
-    @action(detail=False, methods=["get"], url_path="saved-decks")
-    def admin_list_saved_decks(self, request):
-        """GET /api/admin/saved-decks/ — lista todos los decks guardados."""
-        err = self._require_admin(request)
-        if err:
-            return err
-        qs = (
-            SavedDeck.objects
-            .select_related("user", "deck")
-            .all()
-            .order_by("-id")
-        )
-        page = self.paginate_queryset(qs)
-        if page is not None:
-            return self.get_paginated_response(
-                SavedDeckSerializer(page, many=True, context={"request": request}).data
-            )
-        return Response(SavedDeckSerializer(qs, many=True, context={"request": request}).data)
-
-    @action(detail=False, methods=["get", "patch", "delete"],
-            url_path=r"saved-decks/(?P<item_pk>\d+)")
-    def admin_detail_saved_deck(self, request, item_pk=None):
-        """
-        GET    /api/admin/saved-decks/{id}/ — detalle
-        PATCH  /api/admin/saved-decks/{id}/ — actualizar
-        DELETE /api/admin/saved-decks/{id}/ — eliminar
-        """
-        err = self._require_admin(request)
-        if err:
-            return err
-        obj = get_object_or_404(SavedDeck, pk=item_pk)
-        if request.method == "GET":
-            return Response(SavedDeckSerializer(obj, context={"request": request}).data)
-        if request.method == "PATCH":
-            ser = SavedDeckSerializer(obj, data=request.data, partial=True,
-                                       context={"request": request})
-            ser.is_valid(raise_exception=True)
-            ser.save()
-            return Response(ser.data)
-        obj.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+    # UNUSED-CLEANUP (2026-10-11): acciones admin de SavedDeck
+    # @action(detail=False, methods=["get"], url_path="saved-decks")
+    # def admin_list_saved_decks(self, request):
+    #     """GET /api/admin/saved-decks/ — lista todos los decks guardados."""
+    #     err = self._require_admin(request)
+    #     if err:
+    #         return err
+    #     qs = (
+    #         SavedDeck.objects
+    #         .select_related("user", "deck")
+    #         .all()
+    #         .order_by("-id")
+    #     )
+    #     page = self.paginate_queryset(qs)
+    #     if page is not None:
+    #         return self.get_paginated_response(
+    #             SavedDeckSerializer(page, many=True, context={"request": request}).data
+    #         )
+    #     return Response(SavedDeckSerializer(qs, many=True, context={"request": request}).data)
+    #
+    # @action(detail=False, methods=["get", "patch", "delete"],
+    #         url_path=r"saved-decks/(?P<item_pk>\d+)")
+    # def admin_detail_saved_deck(self, request, item_pk=None):
+    #     """
+    #     GET    /api/admin/saved-decks/{id}/ — detalle
+    #     PATCH  /api/admin/saved-decks/{id}/ — actualizar
+    #     DELETE /api/admin/saved-decks/{id}/ — eliminar
+    #     """
+    #     err = self._require_admin(request)
+    #     if err:
+    #         return err
+    #     obj = get_object_or_404(SavedDeck, pk=item_pk)
+    #     if request.method == "GET":
+    #         return Response(SavedDeckSerializer(obj, context={"request": request}).data)
+    #     if request.method == "PATCH":
+    #         ser = SavedDeckSerializer(obj, data=request.data, partial=True,
+    #                                    context={"request": request})
+    #         ser.is_valid(raise_exception=True)
+    #         ser.save()
+    #         return Response(ser.data)
+    #     obj.delete()
+    #     return Response(status=status.HTTP_204_NO_CONTENT)
+    # END UNUSED-CLEANUP
 
     # ----------------------------------------------------------
     # DECKS GENERALES  (Deck)

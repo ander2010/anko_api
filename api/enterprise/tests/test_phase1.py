@@ -18,9 +18,9 @@ from api.enterprise_models import (
     CompanyMembership,
     Team,
     TeamMembership,
-    EnterpriseProfile,
+    # EnterpriseProfile,  # UNUSED-CLEANUP (2026-10-11)
     LearningEvent,
-    KnowledgeHealthSnapshot,
+    # KnowledgeHealthSnapshot,  # UNUSED-CLEANUP (2026-10-11)
 )
 from api.enterprise.services.security_service import (
     validate_company_access,
@@ -219,25 +219,27 @@ class TeamMembershipTest(TestCase):
 # EnterpriseProfile tests
 # ---------------------------------------------------------------------------
 
-class EnterpriseProfileTest(TestCase):
-    def setUp(self):
-        self.user = make_user("profile_user")
-        self.owner = make_user("profile_owner")
-        self.company = make_company(self.owner)
-
-    def test_create_profile(self):
-        p = EnterpriseProfile.objects.create(
-            user=self.user,
-            default_company=self.company,
-            job_title="Aircraft Technician",
-            employee_code="EMP001",
-        )
-        self.assertEqual(p.job_title, "Aircraft Technician")
-
-    def test_one_to_one_enforced(self):
-        EnterpriseProfile.objects.create(user=self.user)
-        with self.assertRaises(Exception):
-            EnterpriseProfile.objects.create(user=self.user)
+# UNUSED-CLEANUP (2026-10-11): modelo EnterpriseProfile comentado
+# class EnterpriseProfileTest(TestCase):
+#     def setUp(self):
+#         self.user = make_user("profile_user")
+#         self.owner = make_user("profile_owner")
+#         self.company = make_company(self.owner)
+#
+#     def test_create_profile(self):
+#         p = EnterpriseProfile.objects.create(
+#             user=self.user,
+#             default_company=self.company,
+#             job_title="Aircraft Technician",
+#             employee_code="EMP001",
+#         )
+#         self.assertEqual(p.job_title, "Aircraft Technician")
+#
+#     def test_one_to_one_enforced(self):
+#         EnterpriseProfile.objects.create(user=self.user)
+#         with self.assertRaises(Exception):
+#             EnterpriseProfile.objects.create(user=self.user)
+# END UNUSED-CLEANUP
 
 
 # ---------------------------------------------------------------------------
@@ -273,41 +275,43 @@ class LearningEventTest(TestCase):
 # KnowledgeHealthSnapshot tests
 # ---------------------------------------------------------------------------
 
-class KnowledgeHealthSnapshotTest(TestCase):
-    def setUp(self):
-        self.owner = make_user("snap_owner")
-        self.company = make_company(self.owner)
-
-    def test_create_snapshot(self):
-        snap = KnowledgeHealthSnapshot.objects.create(
-            company=self.company,
-            snapshot_date=datetime.date.today(),
-            global_retention_score=87.5,
-            global_risk_score=12.0,
-            active_employees=100,
-            employees_at_risk=5,
-        )
-        self.assertEqual(snap.active_employees, 100)
-
-    def test_unique_per_day(self):
-        today = datetime.date.today()
-        KnowledgeHealthSnapshot.objects.create(
-            company=self.company, snapshot_date=today
-        )
-        with self.assertRaises(Exception):
-            KnowledgeHealthSnapshot.objects.create(
-                company=self.company, snapshot_date=today
-            )
-
-    def test_different_companies_same_day(self):
-        owner2 = make_user("snap_owner2")
-        company2 = make_company(owner2, "Snap Corp 2", "snap-corp-2")
-        today = datetime.date.today()
-        KnowledgeHealthSnapshot.objects.create(company=self.company, snapshot_date=today)
-        snap2 = KnowledgeHealthSnapshot.objects.create(
-            company=company2, snapshot_date=today
-        )
-        self.assertEqual(snap2.company, company2)
+# UNUSED-CLEANUP (2026-10-11): modelo KnowledgeHealthSnapshot comentado
+# class KnowledgeHealthSnapshotTest(TestCase):
+#     def setUp(self):
+#         self.owner = make_user("snap_owner")
+#         self.company = make_company(self.owner)
+#
+#     def test_create_snapshot(self):
+#         snap = KnowledgeHealthSnapshot.objects.create(
+#             company=self.company,
+#             snapshot_date=datetime.date.today(),
+#             global_retention_score=87.5,
+#             global_risk_score=12.0,
+#             active_employees=100,
+#             employees_at_risk=5,
+#         )
+#         self.assertEqual(snap.active_employees, 100)
+#
+#     def test_unique_per_day(self):
+#         today = datetime.date.today()
+#         KnowledgeHealthSnapshot.objects.create(
+#             company=self.company, snapshot_date=today
+#         )
+#         with self.assertRaises(Exception):
+#             KnowledgeHealthSnapshot.objects.create(
+#                 company=self.company, snapshot_date=today
+#             )
+#
+#     def test_different_companies_same_day(self):
+#         owner2 = make_user("snap_owner2")
+#         company2 = make_company(owner2, "Snap Corp 2", "snap-corp-2")
+#         today = datetime.date.today()
+#         KnowledgeHealthSnapshot.objects.create(company=self.company, snapshot_date=today)
+#         snap2 = KnowledgeHealthSnapshot.objects.create(
+#             company=company2, snapshot_date=today
+#         )
+#         self.assertEqual(snap2.company, company2)
+# END UNUSED-CLEANUP
 
 
 # ---------------------------------------------------------------------------

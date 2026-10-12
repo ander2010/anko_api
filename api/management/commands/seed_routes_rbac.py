@@ -30,13 +30,13 @@ DASHBOARD_KEYS = [
     "dashboard.admin.plan-limits",
     "dashboard.admin.subscriptions",
     "dashboard.admin.battery-shares",
-    "dashboard.admin.saved-batteries",
+    # "dashboard.admin.saved-batteries",  # UNUSED-CLEANUP (2026-10-11)
     "dashboard.admin.invites",
     "dashboard.admin.batteries",
     "dashboard.admin.decks",
     "dashboard.admin.flashcards",
     "dashboard.admin.deck-shares",
-    "dashboard.admin.saved-decks",
+    # "dashboard.admin.saved-decks",  # UNUSED-CLEANUP (2026-10-11)
 
     "dashboard.billing",
     "dashboard.faqs",
@@ -262,13 +262,13 @@ ADMIN_ROUTE_MODEL_BINDINGS = {
     "dashboard.admin.plan-limits": "PlanLimit",
     "dashboard.admin.subscriptions": "Subscription",
     "dashboard.admin.battery-shares": "BatteryShare",
-    "dashboard.admin.saved-batteries": "SavedBattery",
+    # "dashboard.admin.saved-batteries": "SavedBattery",  # UNUSED-CLEANUP (2026-10-11)
     "dashboard.admin.invites": "Invite",
     "dashboard.admin.batteries": "Battery",
     "dashboard.admin.decks": "Deck",
     "dashboard.admin.flashcards": "Flashcard",
     "dashboard.admin.deck-shares": "DeckShare",
-    "dashboard.admin.saved-decks": "SavedDeck",
+    # "dashboard.admin.saved-decks": "SavedDeck",  # UNUSED-CLEANUP (2026-10-11)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

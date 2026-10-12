@@ -7,8 +7,9 @@ from .views import (
     SectionViewSet, TopicViewSet, RuleViewSet, BatteryViewSet,
     ResourceViewSet, PermissionViewSet, RoleViewSet, GlobalCompanyMembershipViewSet,
     PlanViewSet, PlanLimitViewSet, SubscriptionViewSet,
-    BatteryShareViewSet, SavedBatteryViewSet, InviteViewSet,
-    DeckViewSet, FlashcardViewSet, DeckShareViewSet, SavedDeckViewSet, StatisticsViewSet, GoogleLoginView, FacebookLoginView,
+    BatteryShareViewSet, InviteViewSet,  # SavedBatteryViewSet: UNUSED-CLEANUP (2026-10-11)
+    DeckViewSet, FlashcardViewSet, DeckShareViewSet, StatisticsViewSet,  # SavedDeckViewSet: UNUSED-CLEANUP
+    GoogleLoginView, FacebookLoginView,
     NotificationViewSet, UserNotificationViewSet,
     ProcessRunViewSet, CollectionViewSet, TagGroupViewSet,
 )
@@ -39,13 +40,13 @@ router.register(r"plan-limits", PlanLimitViewSet)
 router.register(r"subscriptions", SubscriptionViewSet)
 
 router.register(r"battery-shares", BatteryShareViewSet)
-router.register(r"saved-batteries", SavedBatteryViewSet)
+# router.register(r"saved-batteries", SavedBatteryViewSet)  # UNUSED-CLEANUP (2026-10-11)
 router.register(r"invites", InviteViewSet)
 
 router.register(r"decks", DeckViewSet)
 router.register(r"flashcards", FlashcardViewSet)
 router.register(r"deck-shares", DeckShareViewSet)
-router.register(r"saved-decks", SavedDeckViewSet)
+# router.register(r"saved-decks", SavedDeckViewSet)  # UNUSED-CLEANUP (2026-10-11)
 router.register(r"rbac", RBACViewSet, basename="rbac")
 router.register(r"public/batteries", PublicBatteryViewSet, basename="public-batteries")
 router.register(r"public/decks", PublicDeckViewSet, basename="public-decks")

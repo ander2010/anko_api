@@ -498,33 +498,35 @@ class Rule(models.Model):
         ordering = [ "-id"]
 
 
-class GenerationProfile(models.Model):
-    # Canonical reusable generation policy.
-    # Store assessment/flashcard settings in `config` instead of hardcoding Rule semantics.
-    PROFILE_TYPE_CHOICES = [
-        ("assessment", "Assessment"),
-        ("flashcards", "Flashcards"),
-        ("generic", "Generic"),
-    ]
-
-    collection = models.ForeignKey(
-        Collection,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="generation_profiles",
-    )
-    name = models.CharField(max_length=255)
-    profile_type = models.CharField(max_length=50, choices=PROFILE_TYPE_CHOICES, default="assessment")
-    config = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-created_at", "-id"]
-
-    def __str__(self):
-        return self.name
+# UNUSED-CLEANUP (2026-10-11): 0 filas; ningún código lo lee ni escribe
+# class GenerationProfile(models.Model):
+#     # Canonical reusable generation policy.
+#     # Store assessment/flashcard settings in `config` instead of hardcoding Rule semantics.
+#     PROFILE_TYPE_CHOICES = [
+#         ("assessment", "Assessment"),
+#         ("flashcards", "Flashcards"),
+#         ("generic", "Generic"),
+#     ]
+#
+#     collection = models.ForeignKey(
+#         Collection,
+#         null=True,
+#         blank=True,
+#         on_delete=models.SET_NULL,
+#         related_name="generation_profiles",
+#     )
+#     name = models.CharField(max_length=255)
+#     profile_type = models.CharField(max_length=50, choices=PROFILE_TYPE_CHOICES, default="assessment")
+#     config = models.JSONField(default=dict, blank=True)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
+#
+#     class Meta:
+#         ordering = ["-created_at", "-id"]
+#
+#     def __str__(self):
+#         return self.name
+# END UNUSED-CLEANUP
 
 
 class Battery(models.Model):
@@ -559,13 +561,15 @@ class Battery(models.Model):
         related_name="batteries",
     )
     rule = models.ForeignKey(Rule, null=True, blank=True, on_delete=models.SET_NULL)
-    generation_profile = models.ForeignKey(
-        GenerationProfile,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="batteries",
-    )
+    # UNUSED-CLEANUP (2026-10-11): FK a GenerationProfile (comentado)
+    # generation_profile = models.ForeignKey(
+    #     GenerationProfile,
+    #     null=True,
+    #     blank=True,
+    #     on_delete=models.SET_NULL,
+    #     related_name="batteries",
+    # )
+    # END UNUSED-CLEANUP
     name = models.CharField(max_length=255)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -699,13 +703,15 @@ class BatteryShare(models.Model):
         unique_together = ("battery", "shared_with")
 
 
-class SavedBattery(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="saved_batteries")
-    battery = models.ForeignKey(Battery, on_delete=models.CASCADE, related_name="saved_by")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ("user", "battery")
+# UNUSED-CLEANUP (2026-10-11): sin UI para crearlo; solo lo listaba una página admin oculta
+# class SavedBattery(models.Model):
+#     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="saved_batteries")
+#     battery = models.ForeignKey(Battery, on_delete=models.CASCADE, related_name="saved_by")
+#     created_at = models.DateTimeField(auto_now_add=True)
+#
+#     class Meta:
+#         unique_together = ("user", "battery")
+# END UNUSED-CLEANUP
 
 
 class Invite(models.Model):
@@ -933,13 +939,15 @@ class DeckShare(models.Model):
         unique_together = ("deck", "shared_with")
 
 
-class SavedDeck(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="saved_decks")
-    deck = models.ForeignKey(Deck, on_delete=models.CASCADE, related_name="saved_by")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ("user", "deck")
+# UNUSED-CLEANUP (2026-10-11): sin UI para crearlo; solo lo listaba una página admin oculta
+# class SavedDeck(models.Model):
+#     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="saved_decks")
+#     deck = models.ForeignKey(Deck, on_delete=models.CASCADE, related_name="saved_by")
+#     created_at = models.DateTimeField(auto_now_add=True)
+#
+#     class Meta:
+#         unique_together = ("user", "deck")
+# END UNUSED-CLEANUP
 
 
 
@@ -1061,16 +1069,18 @@ class QaPair(models.Model):
 
 
 # we going to deleted 
-class Tag(models.Model):
-    document_id = models.TextField(db_index=True)
-    tag = models.TextField()
-
-    created_at = models.DateTimeField(null=True, blank=True)
-    updated_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = "tags"   # 👈 nombre real de tu tabla
-        managed = False        # 👈 NO crea migraciones / NO intenta crear tabla
+# UNUSED-CLEANUP (2026-10-11): managed=False y la tabla 'tags' no existe en la BD
+# class Tag(models.Model):
+#     document_id = models.TextField(db_index=True)
+#     tag = models.TextField()
+#
+#     created_at = models.DateTimeField(null=True, blank=True)
+#     updated_at = models.DateTimeField(null=True, blank=True)
+#
+#     class Meta:
+#         db_table = "tags"   # 👈 nombre real de tu tabla
+#         managed = False        # 👈 NO crea migraciones / NO intenta crear tabla
+# END UNUSED-CLEANUP
 class Notification(models.Model):
     LEVEL = [
         ("info", "Info"),
@@ -1678,9 +1688,9 @@ from api.enterprise_models import (  # noqa: E402, F401
     CompanyMembership,
     Team,
     TeamMembership,
-    EnterpriseProfile,
+    # EnterpriseProfile,  # UNUSED-CLEANUP (2026-10-11)
     LearningEvent,
-    KnowledgeHealthSnapshot,
+    # KnowledgeHealthSnapshot,  # UNUSED-CLEANUP (2026-10-11)
 )
 
 # ==========================================================================

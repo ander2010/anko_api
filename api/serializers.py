@@ -10,9 +10,9 @@ from dj_rest_auth.forms import AllAuthPasswordResetForm
 from .models import (
     Resource, Permission, Role,
     Plan, PlanLimit, Subscription,
-    BatteryShare, SavedBattery, Invite,
-    Deck, Flashcard, DeckShare, SavedDeck,
-    Tag, QaPair
+    BatteryShare, Invite,  # SavedBattery: UNUSED-CLEANUP (2026-10-11)
+    Deck, Flashcard, DeckShare,  # SavedDeck: UNUSED-CLEANUP (2026-10-11)
+    QaPair,  # Tag: UNUSED-CLEANUP (2026-10-11)
 )
 
 import json
@@ -715,17 +715,19 @@ class BatteryShareSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at", "batteryId", "sharedWithId", "sharedWithUsername"]
 
 
-class SavedBatterySerializer(serializers.ModelSerializer):
-    batteryId = serializers.IntegerField(source="battery_id", read_only=True)
-
-    # opcional para UI
-    batteryName = serializers.CharField(source="battery.name", read_only=True)
-    batteryOwnerId = serializers.IntegerField(source="battery.project.owner_id", read_only=True)
-
-    class Meta:
-        model = SavedBattery
-        fields = ["id", "battery", "batteryId", "batteryName", "batteryOwnerId", "created_at"]
-        read_only_fields = ["created_at", "batteryId", "batteryName", "batteryOwnerId"]
+# UNUSED-CLEANUP (2026-10-11): modelo SavedBattery comentado
+# class SavedBatterySerializer(serializers.ModelSerializer):
+#     batteryId = serializers.IntegerField(source="battery_id", read_only=True)
+#
+#     # opcional para UI
+#     batteryName = serializers.CharField(source="battery.name", read_only=True)
+#     batteryOwnerId = serializers.IntegerField(source="battery.project.owner_id", read_only=True)
+#
+#     class Meta:
+#         model = SavedBattery
+#         fields = ["id", "battery", "batteryId", "batteryName", "batteryOwnerId", "created_at"]
+#         read_only_fields = ["created_at", "batteryId", "batteryName", "batteryOwnerId"]
+# END UNUSED-CLEANUP
 
 
 class InviteSerializer(serializers.ModelSerializer):
@@ -1097,24 +1099,28 @@ class DeckShareSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at", "deckId", "sharedWithId", "sharedWithUsername"]
 
 
-class SavedDeckSerializer(serializers.ModelSerializer):
-    deckId = serializers.IntegerField(source="deck_id", read_only=True)
-    deckTitle = serializers.CharField(source="deck.title", read_only=True)
-
-    class Meta:
-        model = SavedDeck
-        fields = ["id", "deck", "deckId", "deckTitle", "created_at"]
-        read_only_fields = ["created_at", "deckId", "deckTitle"]
+# UNUSED-CLEANUP (2026-10-11): modelo SavedDeck comentado
+# class SavedDeckSerializer(serializers.ModelSerializer):
+#     deckId = serializers.IntegerField(source="deck_id", read_only=True)
+#     deckTitle = serializers.CharField(source="deck.title", read_only=True)
+#
+#     class Meta:
+#         model = SavedDeck
+#         fields = ["id", "deck", "deckId", "deckTitle", "created_at"]
+#         read_only_fields = ["created_at", "deckId", "deckTitle"]
+# END UNUSED-CLEANUP
 
 
 # =========================
 # managed=False tables (si las quieresfv exponer)
 # =========================
 
-class TagSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Tag
-        fields = "__all__"
+# UNUSED-CLEANUP (2026-10-11): modelo Tag comentado
+# class TagSerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = Tag
+#         fields = "__all__"
+# END UNUSED-CLEANUP
 
 
 class QaPairSerializer(serializers.ModelSerializer):

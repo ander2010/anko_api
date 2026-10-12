@@ -280,51 +280,53 @@ class TeamMembership(models.Model):
 # EnterpriseProfile
 # ==========================================================================
 
-class EnterpriseProfile(models.Model):
-    EMPLOYMENT_STATUS_CHOICES = [
-        ("active", "Active"),
-        ("on_leave", "On Leave"),
-        ("terminated", "Terminated"),
-        ("suspended", "Suspended"),
-    ]
-
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="enterprise_profile",
-    )
-    default_company = models.ForeignKey(
-        Company,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="default_profile_users",
-    )
-    job_title = models.CharField(max_length=200, blank=True)
-    department = models.CharField(max_length=200, blank=True)
-    employee_code = models.CharField(max_length=100, blank=True)
-    hire_date = models.DateField(null=True, blank=True)
-    manager = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="direct_reports",
-    )
-    employment_status = models.CharField(
-        max_length=30, choices=EMPLOYMENT_STATUS_CHOICES, blank=True
-    )
-    onboarding_completed_at = models.DateTimeField(null=True, blank=True)
-    activated_at = models.DateTimeField(null=True, blank=True)
-    metadata = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "enterprise_profiles"
-
-    def __str__(self):
-        return f"EnterpriseProfile: {self.user}"
+# UNUSED-CLEANUP (2026-10-11): 0 filas; solo estaba registrado en el admin de Django
+# class EnterpriseProfile(models.Model):
+#     EMPLOYMENT_STATUS_CHOICES = [
+#         ("active", "Active"),
+#         ("on_leave", "On Leave"),
+#         ("terminated", "Terminated"),
+#         ("suspended", "Suspended"),
+#     ]
+#
+#     user = models.OneToOneField(
+#         settings.AUTH_USER_MODEL,
+#         on_delete=models.CASCADE,
+#         related_name="enterprise_profile",
+#     )
+#     default_company = models.ForeignKey(
+#         Company,
+#         null=True,
+#         blank=True,
+#         on_delete=models.SET_NULL,
+#         related_name="default_profile_users",
+#     )
+#     job_title = models.CharField(max_length=200, blank=True)
+#     department = models.CharField(max_length=200, blank=True)
+#     employee_code = models.CharField(max_length=100, blank=True)
+#     hire_date = models.DateField(null=True, blank=True)
+#     manager = models.ForeignKey(
+#         settings.AUTH_USER_MODEL,
+#         null=True,
+#         blank=True,
+#         on_delete=models.SET_NULL,
+#         related_name="direct_reports",
+#     )
+#     employment_status = models.CharField(
+#         max_length=30, choices=EMPLOYMENT_STATUS_CHOICES, blank=True
+#     )
+#     onboarding_completed_at = models.DateTimeField(null=True, blank=True)
+#     activated_at = models.DateTimeField(null=True, blank=True)
+#     metadata = models.JSONField(default=dict, blank=True)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#     updated_at = models.DateTimeField(auto_now=True)
+#
+#     class Meta:
+#         db_table = "enterprise_profiles"
+#
+#     def __str__(self):
+#         return f"EnterpriseProfile: {self.user}"
+# END UNUSED-CLEANUP
 
 
 # ==========================================================================
@@ -428,48 +430,50 @@ class LearningEvent(models.Model):
 # KnowledgeHealthSnapshot
 # ==========================================================================
 
-class KnowledgeHealthSnapshot(models.Model):
-    company = models.ForeignKey(
-        Company,
-        on_delete=models.CASCADE,
-        related_name="health_snapshots",
-    )
-    snapshot_date = models.DateField(db_index=True)
-
-    global_retention_score = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    global_risk_score = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    compliance_score = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-    onboarding_completion_score = models.DecimalField(
-        max_digits=6, decimal_places=2, null=True, blank=True
-    )
-
-    employees_at_risk = models.PositiveIntegerField(default=0)
-    employees_in_onboarding = models.PositiveIntegerField(default=0)
-    active_employees = models.PositiveIntegerField(default=0)
-
-    metadata = models.JSONField(default=dict, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = "enterprise_knowledge_health_snapshots"
-        constraints = [
-            models.UniqueConstraint(
-                fields=["company", "snapshot_date"],
-                name="uniq_health_snapshot_company_date",
-            ),
-        ]
-        indexes = [
-            models.Index(fields=["company", "snapshot_date"]),
-        ]
-
-    def __str__(self):
-        return f"{self.company} — snapshot {self.snapshot_date}"
+# UNUSED-CLEANUP (2026-10-11): 0 filas; solo estaba registrado en el admin de Django
+# class KnowledgeHealthSnapshot(models.Model):
+#     company = models.ForeignKey(
+#         Company,
+#         on_delete=models.CASCADE,
+#         related_name="health_snapshots",
+#     )
+#     snapshot_date = models.DateField(db_index=True)
+#
+#     global_retention_score = models.DecimalField(
+#         max_digits=6, decimal_places=2, null=True, blank=True
+#     )
+#     global_risk_score = models.DecimalField(
+#         max_digits=6, decimal_places=2, null=True, blank=True
+#     )
+#     compliance_score = models.DecimalField(
+#         max_digits=6, decimal_places=2, null=True, blank=True
+#     )
+#     onboarding_completion_score = models.DecimalField(
+#         max_digits=6, decimal_places=2, null=True, blank=True
+#     )
+#
+#     employees_at_risk = models.PositiveIntegerField(default=0)
+#     employees_in_onboarding = models.PositiveIntegerField(default=0)
+#     active_employees = models.PositiveIntegerField(default=0)
+#
+#     metadata = models.JSONField(default=dict, blank=True)
+#     created_at = models.DateTimeField(auto_now_add=True)
+#
+#     class Meta:
+#         db_table = "enterprise_knowledge_health_snapshots"
+#         constraints = [
+#             models.UniqueConstraint(
+#                 fields=["company", "snapshot_date"],
+#                 name="uniq_health_snapshot_company_date",
+#             ),
+#         ]
+#         indexes = [
+#             models.Index(fields=["company", "snapshot_date"]),
+#         ]
+#
+#     def __str__(self):
+#         return f"{self.company} — snapshot {self.snapshot_date}"
+# END UNUSED-CLEANUP
 
 
 # ---------------------------------------------------------------------------

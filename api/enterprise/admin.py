@@ -5,9 +5,9 @@ from api.enterprise_models import (
     CompanyMembership,
     Team,
     TeamMembership,
-    EnterpriseProfile,
+    # EnterpriseProfile,  # UNUSED-CLEANUP (2026-10-11)
     LearningEvent,
-    KnowledgeHealthSnapshot,
+    # KnowledgeHealthSnapshot,  # UNUSED-CLEANUP (2026-10-11)
 )
 from api.enterprise_learning_models import (
     LearningPath,
@@ -88,13 +88,15 @@ class TeamMembershipAdmin(admin.ModelAdmin):
     raw_id_fields = ["user", "team"]
 
 
-@admin.register(EnterpriseProfile)
-class EnterpriseProfileAdmin(admin.ModelAdmin):
-    list_display = ["user", "default_company", "job_title", "department", "employee_code", "employment_status"]
-    list_filter = ["employment_status", "default_company"]
-    search_fields = ["user__username", "user__email", "employee_code", "job_title"]
-    readonly_fields = ["created_at", "updated_at"]
-    raw_id_fields = ["user", "default_company", "manager"]
+# UNUSED-CLEANUP (2026-10-11): modelo EnterpriseProfile comentado
+# @admin.register(EnterpriseProfile)
+# class EnterpriseProfileAdmin(admin.ModelAdmin):
+#     list_display = ["user", "default_company", "job_title", "department", "employee_code", "employment_status"]
+#     list_filter = ["employment_status", "default_company"]
+#     search_fields = ["user__username", "user__email", "employee_code", "job_title"]
+#     readonly_fields = ["created_at", "updated_at"]
+#     raw_id_fields = ["user", "default_company", "manager"]
+# END UNUSED-CLEANUP
 
 
 @admin.register(LearningEvent)
@@ -113,20 +115,22 @@ class LearningEventAdmin(admin.ModelAdmin):
         return False
 
 
-@admin.register(KnowledgeHealthSnapshot)
-class KnowledgeHealthSnapshotAdmin(admin.ModelAdmin):
-    list_display = [
-        "company",
-        "snapshot_date",
-        "global_retention_score",
-        "global_risk_score",
-        "compliance_score",
-        "active_employees",
-        "employees_at_risk",
-    ]
-    list_filter = ["company"]
-    readonly_fields = ["created_at"]
-    date_hierarchy = "snapshot_date"
+# UNUSED-CLEANUP (2026-10-11): modelo KnowledgeHealthSnapshot comentado
+# @admin.register(KnowledgeHealthSnapshot)
+# class KnowledgeHealthSnapshotAdmin(admin.ModelAdmin):
+#     list_display = [
+#         "company",
+#         "snapshot_date",
+#         "global_retention_score",
+#         "global_risk_score",
+#         "compliance_score",
+#         "active_employees",
+#         "employees_at_risk",
+#     ]
+#     list_filter = ["company"]
+#     readonly_fields = ["created_at"]
+#     date_hierarchy = "snapshot_date"
+# END UNUSED-CLEANUP
 
 
 # ---------------------------------------------------------------------------

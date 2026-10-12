@@ -28,7 +28,7 @@ from api.models import (
     ProcessStepRun,
     Project,
     Resource,
-    SavedDeck,
+    # SavedDeck,  # UNUSED-CLEANUP (2026-10-11)
     Section,
     User,
 )
@@ -129,8 +129,9 @@ class RbacAdminPanelTests(APITestCase):
             access="view",
         )
 
-        cls.saved_a = SavedDeck.objects.create(user=cls.user_a, deck=cls.deck_a)
-        cls.saved_b = SavedDeck.objects.create(user=cls.user_b, deck=cls.deck_b)
+        # UNUSED-CLEANUP (2026-10-11): SavedDeck comentado
+        # cls.saved_a = SavedDeck.objects.create(user=cls.user_a, deck=cls.deck_a)
+        # cls.saved_b = SavedDeck.objects.create(user=cls.user_b, deck=cls.deck_b)
 
         cls.card_a = Flashcard.objects.create(deck=cls.deck_a, front="A1", back="A1B")
         cls.card_b = Flashcard.objects.create(deck=cls.deck_b, front="B1", back="B1B")
@@ -162,7 +163,7 @@ class RbacAdminPanelTests(APITestCase):
             "dashboard.admin.decks",
             "dashboard.admin.flashcards",
             "dashboard.admin.deck-shares",
-            "dashboard.admin.saved-decks",
+            # "dashboard.admin.saved-decks",  # UNUSED-CLEANUP (2026-10-11)
         ]
         for key in required:
             self.assertTrue(Resource.objects.filter(key=key).exists(), key)
@@ -446,13 +447,13 @@ class RbacAdminPanelTests(APITestCase):
             "plan-limits",
             "subscriptions",
             "battery-shares",
-            "saved-batteries",
+            # "saved-batteries",  # UNUSED-CLEANUP (2026-10-11)
             "invites",
             "batteries",
             "decks",
             "flashcards",
             "deck-shares",
-            "saved-decks",
+            # "saved-decks",  # UNUSED-CLEANUP (2026-10-11)
         }
         registered = {prefix for prefix, _, _ in router.registry}
         missing = expected_prefixes - registered
@@ -822,23 +823,27 @@ class RbacAdminPanelTests(APITestCase):
         self.assertIn(self.share_b_to_a.id, ids)
         self.assertIn(self.share_c_to_admin.id, ids)
 
-    def test_saved_decks_non_admin_is_scoped(self):
-        self.client.force_authenticate(user=self.user_a)
-        response = self.client.get("/api/saved-decks/")
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+    # UNUSED-CLEANUP (2026-10-11): endpoint saved-decks comentado
+    # def test_saved_decks_non_admin_is_scoped(self):
+    #     self.client.force_authenticate(user=self.user_a)
+    #     response = self.client.get("/api/saved-decks/")
+    #     self.assertEqual(response.status_code, status.HTTP_200_OK)
+    #
+    #     ids = set(self._extract_ids(response))
+    #     self.assertIn(self.saved_a.id, ids)
+    #     self.assertNotIn(self.saved_b.id, ids)
+    # END UNUSED-CLEANUP
 
-        ids = set(self._extract_ids(response))
-        self.assertIn(self.saved_a.id, ids)
-        self.assertNotIn(self.saved_b.id, ids)
-
-    def test_saved_decks_admin_is_global(self):
-        self.client.force_authenticate(user=self.admin)
-        response = self.client.get("/api/saved-decks/")
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-
-        ids = set(self._extract_ids(response))
-        self.assertIn(self.saved_a.id, ids)
-        self.assertIn(self.saved_b.id, ids)
+    # UNUSED-CLEANUP (2026-10-11): endpoint saved-decks comentado
+    # def test_saved_decks_admin_is_global(self):
+    #     self.client.force_authenticate(user=self.admin)
+    #     response = self.client.get("/api/saved-decks/")
+    #     self.assertEqual(response.status_code, status.HTTP_200_OK)
+    #
+    #     ids = set(self._extract_ids(response))
+    #     self.assertIn(self.saved_a.id, ids)
+    #     self.assertIn(self.saved_b.id, ids)
+    # END UNUSED-CLEANUP
 
 
 class AutoGenerateWorkflowCallbackTests(TestCase):
