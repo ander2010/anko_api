@@ -643,6 +643,10 @@ def _build_internal_callback_url(request, path: str) -> str:
     internal_base_url = os.getenv("INTERNAL_API_BASE_URL", "").strip()
     if internal_base_url:
         return f"{_normalize_base_url(internal_base_url)}{path}"
+    request_host = (request.get_host() or "").split(":", 1)[0].lower()
+    localhost_internal_base_url = os.getenv("LOCALHOST_INTERNAL_API_BASE_URL", "").strip()
+    if localhost_internal_base_url and request_host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return f"{_normalize_base_url(localhost_internal_base_url)}{path}"
     return request.build_absolute_uri(path)
 
 

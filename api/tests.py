@@ -14,7 +14,7 @@ from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIRequestFactory
 
 from api.models import (
     Battery,
@@ -36,6 +36,7 @@ from api.services.auto_generate_workflow import (
     AUTO_STAGE_KEYS,
     cleanup_empty_generated_battery,
     cleanup_empty_generated_deck,
+    _build_internal_callback_base,
     _document_has_inflight_processing,
     _finalize_completed_battery_step,
     _finalize_completed_flashcard_step,
@@ -888,6 +889,30 @@ class AutoGenerateWorkflowCallbackTests(TestCase):
         self.battery.save(update_fields=["config"])
 
         self.assertEqual(_step_finalize_callback_status(step), "completed")
+
+    def test_build_internal_callback_url_prefers_env_base(self):
+        from api.views import _build_internal_callback_url
+
+        request = APIRequestFactory().get("/api/decks/1/", HTTP_HOST="localhost:8000")
+
+        with patch.dict(os.environ, {"INTERNAL_API_BASE_URL": "http://anko-api:8000"}):
+            callback_url = _build_internal_callback_url(request, "/api/decks/123/finalize-from-service/")
+
+        self.assertEqual(callback_url, "http://anko-api:8000/api/decks/123/finalize-from-service/")
+
+    def test_build_internal_callback_url_uses_localhost_env_base(self):
+        from api.views import _build_internal_callback_url
+
+        request = APIRequestFactory().get("/api/decks/1/", HTTP_HOST="localhost:8000")
+
+        with patch.dict(os.environ, {"INTERNAL_API_BASE_URL": "", "LOCALHOST_INTERNAL_API_BASE_URL": "http://anko-api:8000"}):
+            callback_url = _build_internal_callback_url(request, "/api/decks/123/finalize-from-service/")
+
+        self.assertEqual(callback_url, "http://anko-api:8000/api/decks/123/finalize-from-service/")
+
+    def test_internal_callback_base_uses_localhost_env_var(self):
+        with patch.dict(os.environ, {"INTERNAL_API_BASE_URL": "", "LOCALHOST_INTERNAL_API_BASE_URL": "http://anko-api:8000"}):
+            self.assertEqual(_build_internal_callback_base(), "http://anko-api:8000")
 
     @patch("api.views.time.sleep", return_value=None)
     @patch("api.views._fetch_generated_flashcards_from_hope")

@@ -207,7 +207,7 @@ def _infer_scope(*, documents: list[Document], workspace_id: Any = None) -> tupl
 
 
 def _build_internal_callback_base() -> str:
-    return os.getenv("INTERNAL_API_BASE_URL", "http://localhost:8000").rstrip("/")
+    return (os.getenv("INTERNAL_API_BASE_URL", "").strip() or os.getenv("LOCALHOST_INTERNAL_API_BASE_URL", "").strip()).rstrip("/")
 
 
 def _internal_service_token() -> str:
