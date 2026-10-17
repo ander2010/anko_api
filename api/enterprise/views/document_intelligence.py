@@ -80,13 +80,15 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             "document", "created_by"
         ).order_by("-created_at")
 
-        # Optional filters
-        status = request.query_params.get("status")
-        if status:
-            qs = qs.filter(status=status)
-        source_type = request.query_params.get("source_type")
-        if source_type:
-            qs = qs.filter(source_type=source_type)
+        # Optional filters (combinable). Values must be valid enum keys.
+        for param in ("status", "source_type", "process_type", "difficulty"):
+            value = request.query_params.get(param)
+            if not value:
+                continue
+            valid = {key for key, _ in KnowledgeSource._meta.get_field(param).choices}
+            if value not in valid:
+                raise ValidationError({param: f"Invalid value '{value}'. Allowed: {', '.join(sorted(valid))}."})
+            qs = qs.filter(**{param: value})
 
         return Response(KnowledgeSourceSerializer(qs, many=True).data)
 
