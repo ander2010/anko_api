@@ -16,8 +16,10 @@ import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import List, Optional
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
+
+from api.enterprise.services.assignment_rules import COMPLIANCE_ACTIVE_STATUSES, AssignmentConflict
 
 from api.enterprise_compliance_models import (
     ComplianceAssignment,
@@ -52,18 +54,24 @@ class ComplianceService:
         company: Company,
         due_date: Optional[datetime.date] = None,
     ) -> ComplianceAssignment:
-        """Assign a compliance program to an individual user."""
+        """Assign a compliance program to an individual user (409 if one is already active)."""
         if due_date is None:
             due_date = datetime.date.today() + datetime.timedelta(days=30)
 
-        assignment = ComplianceAssignment.objects.create(
-            company=company,
-            program=program,
-            user=user,
-            assigned_by=assigned_by,
-            status="pending",
-            due_date=due_date,
-        )
+        if ComplianceService.has_active_assignment(program=program, user=user):
+            raise AssignmentConflict("This program is already assigned to this user.")
+        try:
+            with transaction.atomic():
+                assignment = ComplianceAssignment.objects.create(
+                    company=company,
+                    program=program,
+                    user=user,
+                    assigned_by=assigned_by,
+                    status="pending",
+                    due_date=due_date,
+                )
+        except IntegrityError:
+            raise AssignmentConflict("This program is already assigned to this user.")
 
         LearningEvent.objects.create(
             company=company,
@@ -90,18 +98,24 @@ class ComplianceService:
         company: Company,
         due_date: Optional[datetime.date] = None,
     ) -> ComplianceAssignment:
-        """Assign a compliance program to an entire team."""
+        """Assign a compliance program to an entire team (409 if the team already has it active)."""
         if due_date is None:
             due_date = datetime.date.today() + datetime.timedelta(days=30)
 
-        assignment = ComplianceAssignment.objects.create(
-            company=company,
-            program=program,
-            team=team,
-            assigned_by=assigned_by,
-            status="pending",
-            due_date=due_date,
-        )
+        if ComplianceService.has_active_assignment(program=program, team=team):
+            raise AssignmentConflict("This program is already assigned to this team.")
+        try:
+            with transaction.atomic():
+                assignment = ComplianceAssignment.objects.create(
+                    company=company,
+                    program=program,
+                    team=team,
+                    assigned_by=assigned_by,
+                    status="pending",
+                    due_date=due_date,
+                )
+        except IntegrityError:
+            raise AssignmentConflict("This program is already assigned to this team.")
 
         for membership in team.memberships.select_related("user"):
             LearningEvent.objects.create(
@@ -119,6 +133,14 @@ class ComplianceService:
                 company=company, due_date=due_date,
             )
         return assignment
+
+    @staticmethod
+    def has_active_assignment(*, program, user=None, team=None) -> bool:
+        """Active = pending/in_progress. User rows and team-level rows are checked separately."""
+        qs = ComplianceAssignment.objects.filter(program=program, status__in=COMPLIANCE_ACTIVE_STATUSES)
+        if user is not None:
+            return qs.filter(user=user).exists()
+        return qs.filter(team=team, user__isnull=True).exists()
 
     @staticmethod
     def _ensure_requirement_assignments(program, user, assigned_by, company, due_date) -> None:
@@ -302,6 +324,10 @@ class ComplianceService:
         program = assignment.program
         if due_date is None:
             due_date = datetime.date.today() + datetime.timedelta(days=30)
+
+        # A renewal must not create a second active assignment for the same target.
+        if ComplianceService.has_active_assignment(program=program, user=assignment.user, team=None if assignment.user_id else assignment.team):
+            raise AssignmentConflict("An active assignment for this program already exists.")
 
         renewal = ComplianceAssignment.objects.create(
             company=assignment.company,

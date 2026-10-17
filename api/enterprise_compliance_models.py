@@ -158,6 +158,9 @@ class ComplianceRequirement(models.Model):
 # ComplianceAssignment
 # ==========================================================================
 
+COMPLIANCE_ACTIVE = models.Q(status__in=("pending", "in_progress"))
+
+
 class ComplianceAssignment(models.Model):
     STATUS_CHOICES = [
         ("pending", "Pending"),
@@ -166,6 +169,7 @@ class ComplianceAssignment(models.Model):
         ("expired", "Expired"),
         ("non_compliant", "Non-Compliant"),
         ("waived", "Waived"),
+        ("superseded", "Superseded"),
     ]
 
     company = models.ForeignKey(
@@ -227,8 +231,31 @@ class ComplianceAssignment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Set when this row was a duplicate consolidated into another active assignment
+    # (see api/enterprise/services/assignment_dedup.py). Reversible.
+    superseded_by = models.ForeignKey(
+        "self",
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="superseded_duplicates",
+    )
+    status_before_superseded = models.CharField(max_length=20, blank=True, default="")
+
     class Meta:
         db_table = "enterprise_compliance_assignments"
+        # At most one active (pending/in_progress) assignment per program and assignee.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "program"],
+                condition=COMPLIANCE_ACTIVE & models.Q(user__isnull=False),
+                name="uniq_active_user_compliance_program",
+            ),
+            models.UniqueConstraint(
+                fields=["team", "program"],
+                condition=COMPLIANCE_ACTIVE & models.Q(user__isnull=True, team__isnull=False),
+                name="uniq_active_team_compliance_program",
+            ),
+        ]
         indexes = [
             models.Index(fields=["company", "status"]),
             models.Index(fields=["company", "program"]),
