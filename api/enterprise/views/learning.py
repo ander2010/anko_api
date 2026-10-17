@@ -42,6 +42,72 @@ from api.enterprise.serializers.learning import (
 # Mixin
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Assignment helpers shared by learning paths and modules (procesos)
+# ---------------------------------------------------------------------------
+
+def _assign_content_to_user(request, *, company, learning_path=None, learning_module=None):
+    """Validate input, create the assignment atomically, email after commit. 409 on duplicates."""
+    from django.contrib.auth import get_user_model
+    from django.db import transaction
+    from api.enterprise.services.assignment_rules import AssignToUserRequestSerializer, run_after_commit
+    from api.enterprise.services.email_service import send_assignment_notification
+
+    data = AssignToUserRequestSerializer(data=request.data)
+    data.is_valid(raise_exception=True)
+    try:
+        target_user = get_user_model().objects.get(id=data.validated_data["user_id"])
+    except get_user_model().DoesNotExist:
+        raise ValidationError({"user_id": "User not found."})
+
+    with transaction.atomic():
+        assignment = EnterpriseLearningService.assign_to_user(
+            learning_path=learning_path,
+            learning_module=learning_module,
+            user=target_user,
+            assigned_by=request.user,
+            company=company,
+            due_date=data.validated_data.get("due_date"),
+        )
+        run_after_commit("assignment_notification", send_assignment_notification, assignment)
+    assignment.refresh_from_db()
+    return Response(LearningPathAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
+
+
+def _assign_content_to_team(request, *, company, learning_path=None, learning_module=None):
+    """Assign to every team member; 409 when all of them already have it active."""
+    from django.db import transaction
+    from api.enterprise.services.assignment_rules import (
+        AssignmentConflict, AssignToTeamRequestSerializer, run_after_commit,
+    )
+    from api.enterprise.services.email_service import send_assignment_notification
+
+    data = AssignToTeamRequestSerializer(data=request.data)
+    data.is_valid(raise_exception=True)
+    try:
+        team = Team.objects.get(id=data.validated_data["team_id"], company=company)
+    except Team.DoesNotExist:
+        raise ValidationError({"team_id": "Team not found in this company."})
+
+    with transaction.atomic():
+        assignments = EnterpriseLearningService.assign_to_team(
+            learning_path=learning_path,
+            learning_module=learning_module,
+            team=team,
+            assigned_by=request.user,
+            company=company,
+            due_date=data.validated_data.get("due_date"),
+        )
+        if not assignments and team.memberships.exists():
+            raise AssignmentConflict("Every member of this team already has this content assigned.")
+        for assignment in assignments:
+            run_after_commit("assignment_notification", send_assignment_notification, assignment)
+    for assignment in assignments:
+        assignment.refresh_from_db()
+    return Response(LearningPathAssignmentSerializer(assignments, many=True).data, status=status.HTTP_201_CREATED)
+
+
 class EnterpriseViewSetMixin:
     """
     Shared helpers for enterprise ViewSets.
@@ -217,62 +283,13 @@ class LearningPathViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     def assign_to_user(self, request, pk=None):
         path = self.get_object()
         self._require_permission("enterprise.ent-manage-assignments", "manage")
-
-        user_id = request.data.get("user_id")
-        due_date = request.data.get("due_date")
-        if not user_id:
-            raise ValidationError({"user_id": "This field is required."})
-
-        from django.contrib.auth import get_user_model
-        User = get_user_model()
-        try:
-            target_user = User.objects.get(id=user_id)
-        except User.DoesNotExist:
-            raise ValidationError({"user_id": "User not found."})
-
-        assignment = EnterpriseLearningService.assign_to_user(
-            learning_path=path,
-            user=target_user,
-            assigned_by=request.user,
-            company=path.company,
-            due_date=due_date,
-        )
-        from api.enterprise.services.email_service import send_assignment_notification
-        send_assignment_notification(assignment)
-        return Response(
-            LearningPathAssignmentSerializer(assignment).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return _assign_content_to_user(request, company=path.company, learning_path=path)
 
     @action(detail=True, methods=["post"], url_path="assign-to-team")
     def assign_to_team(self, request, pk=None):
         path = self.get_object()
         self._require_permission("enterprise.ent-manage-assignments", "manage")
-
-        team_id = request.data.get("team_id")
-        due_date = request.data.get("due_date")
-        if not team_id:
-            raise ValidationError({"team_id": "This field is required."})
-
-        try:
-            team = Team.objects.get(id=team_id, company=path.company)
-        except Team.DoesNotExist:
-            raise ValidationError({"team_id": "Team not found in this company."})
-
-        assignments = EnterpriseLearningService.assign_to_team(
-            learning_path=path,
-            team=team,
-            assigned_by=request.user,
-            company=path.company,
-            due_date=due_date,
-        )
-        from api.enterprise.services.email_service import send_assignment_notification
-        for assignment in assignments:
-            send_assignment_notification(assignment)
-        return Response(
-            LearningPathAssignmentSerializer(assignments, many=True).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return _assign_content_to_team(request, company=path.company, learning_path=path)
 
     @action(detail=True, methods=["get"])
     def analytics(self, request, pk=None):
@@ -426,58 +443,13 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     def assign_to_user(self, request, pk=None):
         module = self.get_object()
         self._require_permission("enterprise.ent-manage-assignments", "manage")
-        user_id = request.data.get("user_id")
-        due_date = request.data.get("due_date")
-        if not user_id:
-            raise ValidationError({"user_id": "This field is required."})
-        from django.contrib.auth import get_user_model
-        User = get_user_model()
-        try:
-            target_user = User.objects.get(id=user_id)
-        except User.DoesNotExist:
-            raise ValidationError({"user_id": "User not found."})
-        assignment = EnterpriseLearningService.assign_to_user(
-            learning_path=None,
-            learning_module=module,
-            user=target_user,
-            assigned_by=request.user,
-            company=module.company,
-            due_date=due_date,
-        )
-        from api.enterprise.services.email_service import send_assignment_notification
-        send_assignment_notification(assignment)
-        return Response(
-            LearningPathAssignmentSerializer(assignment).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return _assign_content_to_user(request, company=module.company, learning_module=module)
 
     @action(detail=True, methods=["post"], url_path="assign-to-team")
     def assign_to_team(self, request, pk=None):
         module = self.get_object()
         self._require_permission("enterprise.ent-manage-assignments", "manage")
-        team_id = request.data.get("team_id")
-        due_date = request.data.get("due_date")
-        if not team_id:
-            raise ValidationError({"team_id": "This field is required."})
-        try:
-            team = Team.objects.get(id=team_id, company=module.company)
-        except Team.DoesNotExist:
-            raise ValidationError({"team_id": "Team not found in this company."})
-        assignments = EnterpriseLearningService.assign_to_team(
-            learning_path=None,
-            learning_module=module,
-            team=team,
-            assigned_by=request.user,
-            company=module.company,
-            due_date=due_date,
-        )
-        from api.enterprise.services.email_service import send_assignment_notification
-        for assignment in assignments:
-            send_assignment_notification(assignment)
-        return Response(
-            LearningPathAssignmentSerializer(assignments, many=True).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return _assign_content_to_team(request, company=module.company, learning_module=module)
 
 
 # ---------------------------------------------------------------------------

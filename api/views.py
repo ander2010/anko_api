@@ -80,7 +80,7 @@ from .serializers import (
     CollectionSerializer, TagGroupSerializer,
 )
 from urllib.parse import quote, urlencode
-from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
+from .services.flashcards_ws import VALID_RATINGS, ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
 # from .models import Tag  # UNUSED-CLEANUP (2026-10-11)
 from api.mixins import EncryptSelectedActionsMixin
@@ -103,6 +103,13 @@ from .serializers import (
 from rest_framework.pagination import PageNumberPagination
 from api.pagination import StandardResultsSetPagination
 from api.throttles import LeadAnonRateThrottle
+from api.services.file_validation import (
+    FileValidationError,
+    oversize_error,
+    rejection_response,
+    validate_uploaded_file,
+)
+from api.upload_handlers import oversize_uploads
 from .models import SummaryDocument
 from django.shortcuts import get_object_or_404
 from django.core.mail import send_mail
@@ -1297,21 +1304,25 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         logger.info("User %s uploading %s files to project %s", request.user.id, len(files), project.id)
+
+        # Validate every file (name, size, real content) before anything is stored.
+        too_large = oversize_uploads(request)
+        if too_large:
+            return rejection_response(request, oversize_error(), filename=too_large[0], source="project_upload")
+        validated_files = {}
+        for f in files:
+            try:
+                validated_files[id(f)] = validate_uploaded_file(f)
+            except FileValidationError as err:
+                return rejection_response(request, err, filename=getattr(f, "name", ""), size=getattr(f, "size", None), source="project_upload")
+
         PlanGuard.assert_upload_allowed(user=request.user, files=files)
         created_docs = []
         processing = []  # doc + ws_url + respuesta del microservicio
 
         with transaction.atomic():
             for f in files:
-                inferred_type = infer_document_type(
-                    filename=getattr(f, "name", "document"),
-                    supplied_type=getattr(f, "content_type", ""),
-                )
-                if not inferred_type:
-                    return Response(
-                        {"detail": supported_document_types_message()},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                inferred_type = validated_files[id(f)].document_type
 
                 # ✅ HASH REAL DEL CONTENIDO
                 hasher = hashlib.sha256()
@@ -1340,7 +1351,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
 
                 if not doc:
-                    document_name = getattr(f, "name", "document")
+                    document_name = validated_files[id(f)].original_name
                     doc = Document(
                     project=project,
                     file=f,
@@ -1870,17 +1881,39 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 {"detail": "Missing required fields (project_id, filename, file_key, hash)"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not file_type:
-            return Response(
-                {"detail": supported_document_types_message()},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # The real type is decided by validate_document() once the stored bytes are read.
 
         project = get_object_or_404(Project, id=project_id)
         # Check access
         if project.owner != request.user and not project.members.filter(id=request.user.id).exists():
             logger.info("doc_register no_access user_id=%s project_id=%s", request.user.id, project_id)
             return Response({"detail": "No access to project"}, status=status.HTTP_403_FORBIDDEN)
+
+        # The object must live in this project's upload folder (caller's or owner's):
+        # blocks registering another user's file under this project.
+        file_key = str(file_key).lstrip("/")
+        allowed_prefixes = {
+            f"documents/{request.user.id}/{project.id}/",
+            f"documents/{project.owner_id}/{project.id}/",
+        }
+        if ".." in file_key.split("/") or not any(file_key.startswith(p) for p in allowed_prefixes):
+            logger.warning("doc_register invalid_key user_id=%s project_id=%s", request.user.id, project_id)
+            return Response({"detail": "Invalid file key for this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        # The browser uploaded straight to S3, so the stored object is in quarantine until
+        # its real content is validated here. Rejected objects are deleted.
+        try:
+            validated = _validate_stored_object(file_key, filename)
+        except FileNotFoundError:
+            return Response({"detail": "Uploaded file not found."}, status=status.HTTP_400_BAD_REQUEST)
+        except FileValidationError as err:
+            _delete_stored_object(file_key)
+            return rejection_response(request, err, filename=filename, source="document_register")
+        filename = validated.original_name
+        file_type = validated.document_type
+        file_size = validated.size
+        file_hash = validated.sha256  # never trust the client-sent hash
+
         fake_file = type("F", (), {"size": int(file_size or 0)})()
         with transaction.atomic():
             User.objects.select_for_update().get(pk=request.user.pk)
@@ -2328,6 +2361,36 @@ class RuleViewSet(viewsets.ModelViewSet):
         if project_id:
             qs = qs.filter(project_id=project_id)
         return qs
+def _feedback_seq_key(user_id, job_id) -> str:
+    """Cache key of the last flashcard feedback seq acknowledged for a Learn session."""
+    return f"flashcard-feedback-seq:{user_id}:{job_id}"
+
+
+def _validate_stored_object(key: str, filename: str):
+    """Stream-validate an object already in default storage. Raises FileNotFoundError / FileValidationError."""
+    from django.core.files.storage import default_storage
+    from api.services.file_validation import validate_stream
+
+    try:
+        if not default_storage.exists(key):
+            raise FileNotFoundError(key)
+        fh = default_storage.open(key, "rb")
+    except (OSError, ClientError):
+        raise FileNotFoundError(key)
+    with fh:
+        return validate_stream(filename, fh)
+
+
+def _delete_stored_object(key: str) -> None:
+    """Best-effort removal of a rejected upload from storage."""
+    from django.core.files.storage import default_storage
+
+    try:
+        default_storage.delete(key)
+    except Exception:
+        logger.exception("Failed to delete rejected upload key=%s", key)
+
+
 def normalize_storage_key(key: str) -> str:
     key = (key or "").lstrip("/")
 
@@ -7775,6 +7838,9 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             last_seq = int(last_seq)
         except Exception:
             last_seq = 0
+        if last_seq == 0:  # a new Learn session starts: forget the previous session's seq
+            from django.core.cache import cache
+            cache.delete(_feedback_seq_key(user.id, job_id))
 
         msg = async_to_sync(ws_get_next_card)(
             job_id=str(job_id),
@@ -7797,6 +7863,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                     "message_type": "card",
                     "job_id": str(job_id),
                     "seq": msg.get("seq"),
+                    "kind": msg.get("kind"),  # "new" | "learning" | "review"
                     "card": card_payload,
                 },
                 status=status.HTTP_200_OK,
@@ -7873,6 +7940,20 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             rating = int(rating)
         except ValueError:
             return Response({"detail": "seq, card_id, rating must be integers"}, status=400)
+        if rating not in VALID_RATINGS:
+            return Response(
+                {"detail": "rating must be 0 (hard), 1 (good) or 2 (easy)"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # seq must increase within a Learn session: ignore duplicates / out-of-order feedback.
+        from django.core.cache import cache
+        seq_key = _feedback_seq_key(user.id, job_id)
+        last_seq = cache.get(seq_key)
+        if last_seq is not None and seq <= last_seq:
+            return Response(
+                {"message_type": "stale", "detail": "This card was already rated.", "last_seq": last_seq},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         time_to_answer_ms = request.data.get("time_to_answer_ms", 500)
         try:
@@ -7894,8 +7975,12 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         )
 
         mt = msg.get("message_type")
-        if mt == "ok":
+        if mt == "ack":
+            cache.set(seq_key, seq, 6 * 60 * 60)
             return Response({"message_type": "ok", "detail": msg}, status=status.HTTP_200_OK)
+        if mt == "error" and str(msg.get("detail", "")).endswith("mismatch"):
+            # The service no longer has this card in flight (already rated / session moved on).
+            return Response({"message_type": "stale", "detail": msg.get("detail")}, status=status.HTTP_409_CONFLICT)
 
         return Response({"message_type": mt, "detail": msg}, status=status.HTTP_502_BAD_GATEWAY)
     

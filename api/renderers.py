@@ -38,14 +38,32 @@ _SKIP_RE = re.compile(
 )
 
 
+# Machine identifiers (snake_case keys such as "in_progress", "study_material",
+# "aggregate_unique_tags") are never natural language.
+_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
+
+# Keys whose values are stable enum/identifier keys: the frontend translates the
+# *label*; the value itself must reach the client untouched (F-03).
+_ENUM_KEYS = {
+    "status", "type", "kind", "role", "action", "code", "key", "slug", "mode", "level",
+    "difficulty", "process_type", "source_type", "question_format", "employee_stage",
+    "event_type", "message_type", "error_code", "operation", "resource_type", "artifact_type",
+    "step", "step_key", "step_name", "step_type", "stage", "phase", "language", "lang", "locale",
+    "access", "visibility", "tier", "billing_period", "currency", "priority", "severity",
+    "frequency", "category", "format", "content_type", "file_type", "document_type", "email_type",
+}
+_ENUM_KEY_SUFFIXES = ("_status", "_type", "_key", "_code", "_slug", "_format", "_mode", "_role", "_kind", "_level")
+
+
 def _should_translate(s: str) -> bool:
-    return not _SKIP_RE.match(s)
+    return not (_SKIP_RE.match(s) or _IDENTIFIER_RE.match(s))
 
 
 def _is_skipped_key(key) -> bool:
     if key is None:
         return False
-    return str(key).strip().lower() in _SKIP_KEYS
+    k = str(key).strip().lower()
+    return k in _SKIP_KEYS or k in _ENUM_KEYS or k.endswith(_ENUM_KEY_SUFFIXES)
 
 
 def _collect_strings(data, strings, refs, *, path=""):

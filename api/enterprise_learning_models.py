@@ -308,12 +308,16 @@ class TrainingProgramVersion(models.Model):
 # LearningPathAssignment
 # ==========================================================================
 
+LP_ACTIVE = models.Q(status__in=("pending", "in_progress", "overdue"))
+
+
 class LearningPathAssignment(models.Model):
     STATUS_CHOICES = [
         ("pending", "Pending"),
         ("in_progress", "In Progress"),
         ("completed", "Completed"),
         ("overdue", "Overdue"),
+        ("superseded", "Superseded"),
     ]
 
     company = models.ForeignKey(
@@ -370,6 +374,16 @@ class LearningPathAssignment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Set when this row was a duplicate consolidated into another active assignment
+    # (see api/enterprise/services/assignment_dedup.py). Reversible.
+    superseded_by = models.ForeignKey(
+        "self",
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name="superseded_duplicates",
+    )
+    status_before_superseded = models.CharField(max_length=20, blank=True, default="")
+
     class Meta:
         db_table = "enterprise_learning_path_assignments"
         indexes = [
@@ -378,6 +392,29 @@ class LearningPathAssignment(models.Model):
             models.Index(fields=["team", "status"]),
             models.Index(fields=["due_date"]),
             models.Index(fields=["company", "due_date"]),
+        ]
+        # At most one active assignment per (assignee, content).
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "learning_path"],
+                condition=LP_ACTIVE & models.Q(user__isnull=False, learning_path__isnull=False),
+                name="uniq_active_user_learning_path",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "learning_module"],
+                condition=LP_ACTIVE & models.Q(user__isnull=False, learning_module__isnull=False, learning_path__isnull=True),
+                name="uniq_active_user_learning_module",
+            ),
+            models.UniqueConstraint(
+                fields=["team", "learning_path"],
+                condition=LP_ACTIVE & models.Q(user__isnull=True, team__isnull=False, learning_path__isnull=False),
+                name="uniq_active_team_learning_path",
+            ),
+            models.UniqueConstraint(
+                fields=["team", "learning_module"],
+                condition=LP_ACTIVE & models.Q(user__isnull=True, team__isnull=False, learning_module__isnull=False, learning_path__isnull=True),
+                name="uniq_active_team_learning_module",
+            ),
         ]
 
     def clean(self):

@@ -270,10 +270,12 @@ def document_upload_to(instance, filename):
 
     scope_id = getattr(instance, "collection_id", None) or instance.project_id or "unscoped"
 
-    safe_filename = os.path.basename(filename)
-    unique_filename = f"{safe_filename}"
+    # Random internal name: the client's file name is never used in the storage path
+    # (prevents overwrites and path tricks). The original name lives in Document.filename.
+    from api.services.file_validation import random_storage_name
 
-    return f"documents/{user_id}/{scope_id}/{unique_filename}"
+    extension = os.path.splitext(os.path.basename(filename or ""))[1].lstrip(".")
+    return f"documents/{user_id}/{scope_id}/{random_storage_name(extension)}"
 
 
 class Project(models.Model):
@@ -1747,3 +1749,17 @@ from api.enterprise_document_intelligence_models import (  # noqa: E402, F401
     KnowledgeRelationship,
 )
 from api.enterprise_email_models import EmailLog  # noqa: E402, F401
+
+
+class EnumValueBackup(models.Model):
+    """Original value of every enum normalized by migration 0058 (F-03), so it can be reverted."""
+    table_name = models.CharField(max_length=100)
+    row_id = models.BigIntegerField()
+    field_name = models.CharField(max_length=60)
+    old_value = models.CharField(max_length=255)
+    new_value = models.CharField(max_length=60)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "enum_value_backups"
+        indexes = [models.Index(fields=["table_name", "row_id"], name="enum_value__table_n_idx")]

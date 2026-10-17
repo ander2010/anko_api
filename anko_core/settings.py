@@ -342,6 +342,15 @@ CELERY_TASK_ROUTES = {
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Document upload policy (validated in api/services/file_validation.py)
+UPLOAD_ALLOWED_EXTENSIONS = os.getenv("UPLOAD_ALLOWED_EXTENSIONS", "pdf,docx,xlsx,pptx,txt,md,markdown")
+UPLOAD_MAX_FILE_SIZE_MB = float(os.getenv("UPLOAD_MAX_FILE_SIZE_MB", "400"))
+FILE_UPLOAD_HANDLERS = [
+    "api.upload_handlers.MaxSizeUploadHandler",
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+]
+
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
     "allauth.account.auth_backends.AuthenticationBackend",

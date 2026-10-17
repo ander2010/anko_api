@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 from decimal import Decimal, InvalidOperation
 
 from rest_framework import status, viewsets
@@ -84,30 +83,24 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         program = self.get_object()
         self._require_membership(*MANAGE_ROLES)
 
-        user_id = request.data.get("user_id")
-        due_date_str = request.data.get("due_date")
-        if not user_id:
-            raise ValidationError({"user_id": "This field is required."})
-
         from django.contrib.auth import get_user_model
+        from django.db import transaction
+        from api.enterprise.services.assignment_rules import AssignToUserRequestSerializer, run_after_commit
+        from api.enterprise.services.email_service import send_compliance_assignment_notification
+
+        data = AssignToUserRequestSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
         User = get_user_model()
         try:
-            target = User.objects.get(id=user_id)
+            target = User.objects.get(id=data.validated_data["user_id"])
         except User.DoesNotExist:
             raise ValidationError({"user_id": "User not found."})
 
-        due_date = None
-        if due_date_str:
-            try:
-                due_date = datetime.date.fromisoformat(due_date_str)
-            except ValueError:
-                raise ValidationError({"due_date": "Invalid date format. Use YYYY-MM-DD."})
-
-        assignment = ComplianceService.assign_to_user(
-            program, target, request.user, program.company, due_date
-        )
-        from api.enterprise.services.email_service import send_compliance_assignment_notification
-        send_compliance_assignment_notification(assignment)
+        with transaction.atomic():
+            assignment = ComplianceService.assign_to_user(
+                program, target, request.user, program.company, data.validated_data.get("due_date")
+            )
+            run_after_commit("compliance_assignment_notification", send_compliance_assignment_notification, assignment)
         return Response(
             ComplianceAssignmentSerializer(assignment).data,
             status=status.HTTP_201_CREATED,
@@ -118,29 +111,23 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
         program = self.get_object()
         self._require_membership(*MANAGE_ROLES)
 
-        team_id = request.data.get("team_id")
-        due_date_str = request.data.get("due_date")
-        if not team_id:
-            raise ValidationError({"team_id": "This field is required."})
-
+        from django.db import transaction
         from api.enterprise_models import Team
+        from api.enterprise.services.assignment_rules import AssignToTeamRequestSerializer, run_after_commit
+        from api.enterprise.services.email_service import send_compliance_assignment_notification
+
+        data = AssignToTeamRequestSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
         try:
-            team = Team.objects.get(id=team_id, company=program.company)
+            team = Team.objects.get(id=data.validated_data["team_id"], company=program.company)
         except Team.DoesNotExist:
             raise ValidationError({"team_id": "Team not found in this company."})
 
-        due_date = None
-        if due_date_str:
-            try:
-                due_date = datetime.date.fromisoformat(due_date_str)
-            except ValueError:
-                raise ValidationError({"due_date": "Invalid date format. Use YYYY-MM-DD."})
-
-        assignment = ComplianceService.assign_to_team(
-            program, team, request.user, program.company, due_date
-        )
-        from api.enterprise.services.email_service import send_compliance_assignment_notification
-        send_compliance_assignment_notification(assignment)
+        with transaction.atomic():
+            assignment = ComplianceService.assign_to_team(
+                program, team, request.user, program.company, data.validated_data.get("due_date")
+            )
+            run_after_commit("compliance_assignment_notification", send_compliance_assignment_notification, assignment)
         return Response(
             ComplianceAssignmentSerializer(assignment).data,
             status=status.HTTP_201_CREATED,
@@ -273,14 +260,9 @@ class ComplianceAssignmentViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet)
         assignment = self.get_object()
         self._require_membership(*MANAGE_ROLES)
 
-        due_date_str = request.data.get("due_date")
-        due_date = None
-        if due_date_str:
-            try:
-                due_date = datetime.date.fromisoformat(due_date_str)
-            except ValueError:
-                raise ValidationError({"due_date": "Invalid date format. Use YYYY-MM-DD."})
+        from api.enterprise.services.assignment_rules import parse_due_date
 
+        due_date = parse_due_date(request.data.get("due_date"))
         renewal = ComplianceService.create_renewal(assignment, request.user, due_date)
         return Response(
             ComplianceAssignmentSerializer(renewal).data,

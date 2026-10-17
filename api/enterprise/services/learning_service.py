@@ -10,8 +10,14 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Optional
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
+
+from api.enterprise.services.assignment_rules import (
+    LEARNING_ACTIVE_STATUSES,
+    AssignmentConflict,
+    due_date_to_datetime,
+)
 
 from api.enterprise_learning_models import (
     LearningPath,
@@ -24,7 +30,24 @@ from api.enterprise_learning_models import (
 from api.enterprise_models import Company, CompanyMembership, LearningEvent, Team
 
 
+def _as_due_datetime(due_date):
+    """Accept a date (new callers) or an aware datetime (internal callers)."""
+    if due_date is None or hasattr(due_date, "hour"):
+        return due_date
+    return due_date_to_datetime(due_date)
+
+
 class EnterpriseLearningService:
+
+    @staticmethod
+    def has_active_assignment(*, user, learning_path=None, learning_module=None) -> bool:
+        """True when ``user`` already has a non-finished assignment for this content."""
+        return LearningPathAssignment.objects.filter(
+            user=user,
+            learning_path=learning_path,
+            learning_module=learning_module,
+            status__in=LEARNING_ACTIVE_STATUSES,
+        ).exists()
 
     # ------------------------------------------------------------------
     # Assignment helpers
@@ -40,16 +63,28 @@ class EnterpriseLearningService:
         learning_module=None,
         due_date=None,
     ) -> LearningPathAssignment:
-        """Create a user-level assignment for a learning path or a proceso."""
-        assignment = LearningPathAssignment.objects.create(
-            company=company,
-            learning_path=learning_path,
-            learning_module=learning_module,
-            user=user,
-            assigned_by=assigned_by,
-            status="pending",
-            due_date=due_date,
-        )
+        """
+        Create a user-level assignment for a learning path or a proceso.
+        ``due_date`` is a ``datetime.date`` (validated by the caller). Raises
+        AssignmentConflict when the user already has an active assignment for it.
+        """
+        if EnterpriseLearningService.has_active_assignment(
+            user=user, learning_path=learning_path, learning_module=learning_module,
+        ):
+            raise AssignmentConflict()
+        try:
+            with transaction.atomic():
+                assignment = LearningPathAssignment.objects.create(
+                    company=company,
+                    learning_path=learning_path,
+                    learning_module=learning_module,
+                    user=user,
+                    assigned_by=assigned_by,
+                    status="pending",
+                    due_date=_as_due_datetime(due_date),
+                )
+        except IntegrityError:  # concurrent duplicate hit the unique constraint
+            raise AssignmentConflict()
         LearningEvent.objects.create(
             company=company,
             user=user,
@@ -90,24 +125,24 @@ class EnterpriseLearningService:
         """
         assignments = []
         for membership in team.memberships.select_related("user"):
-            has_active_assignment = LearningPathAssignment.objects.filter(
-                company=company,
-                learning_path=learning_path,
-                learning_module=learning_module,
-                user=membership.user,
-            ).exclude(status="completed").exists()
-            if has_active_assignment:
+            if EnterpriseLearningService.has_active_assignment(
+                user=membership.user, learning_path=learning_path, learning_module=learning_module,
+            ):
                 continue
-            assignment = LearningPathAssignment.objects.create(
-                company=company,
-                learning_path=learning_path,
-                learning_module=learning_module,
-                user=membership.user,
-                assigned_by=assigned_by,
-                status="pending",
-                due_date=due_date,
-                metadata={"assigned_via_team_id": team.id, "assigned_via_team_name": team.name},
-            )
+            try:
+                with transaction.atomic():
+                    assignment = LearningPathAssignment.objects.create(
+                        company=company,
+                        learning_path=learning_path,
+                        learning_module=learning_module,
+                        user=membership.user,
+                        assigned_by=assigned_by,
+                        status="pending",
+                        due_date=_as_due_datetime(due_date),
+                        metadata={"assigned_via_team_id": team.id, "assigned_via_team_name": team.name},
+                    )
+            except IntegrityError:  # assigned concurrently; treat like "already has one"
+                continue
             LearningEvent.objects.create(
                 company=company,
                 user=membership.user,
@@ -156,7 +191,8 @@ class EnterpriseLearningService:
                 learning_path_id=src.learning_path_id,
                 learning_module_id=src.learning_module_id,
                 user=user,
-            ).exclude(status="completed").exists()
+                status__in=LEARNING_ACTIVE_STATUSES,
+            ).exists()
             if has_active_assignment:
                 continue
 
