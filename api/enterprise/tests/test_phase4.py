@@ -325,6 +325,10 @@ class ComplianceServiceRenewalTest(TestCase):
     def test_renewal_increments_count(self):
         a = make_assignment(self.company, self.program, user=self.employee, status="completed")
         r1 = ComplianceService.create_renewal(a, self.owner)
+        # Renewals start from a non-active assignment (the UI only offers "Renew" on expired
+        # ones); renewing a still-active one is rejected to avoid duplicates (F-02).
+        r1.status = "expired"
+        r1.save(update_fields=["status"])
         r2 = ComplianceService.create_renewal(r1, self.owner)
         self.assertEqual(r2.renewal_count, 2)
 
