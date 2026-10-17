@@ -80,7 +80,7 @@ from .serializers import (
     CollectionSerializer, TagGroupSerializer,
 )
 from urllib.parse import quote, urlencode
-from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
+from .services.flashcards_ws import VALID_RATINGS, ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
 # from .models import Tag  # UNUSED-CLEANUP (2026-10-11)
 from api.mixins import EncryptSelectedActionsMixin
@@ -2357,6 +2357,11 @@ class RuleViewSet(viewsets.ModelViewSet):
         if project_id:
             qs = qs.filter(project_id=project_id)
         return qs
+def _feedback_seq_key(user_id, job_id) -> str:
+    """Cache key of the last flashcard feedback seq acknowledged for a Learn session."""
+    return f"flashcard-feedback-seq:{user_id}:{job_id}"
+
+
 def _validate_stored_object(key: str, filename: str):
     """Stream-validate an object already in default storage. Raises FileNotFoundError / FileValidationError."""
     from django.core.files.storage import default_storage
@@ -7829,6 +7834,9 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             last_seq = int(last_seq)
         except Exception:
             last_seq = 0
+        if last_seq == 0:  # a new Learn session starts: forget the previous session's seq
+            from django.core.cache import cache
+            cache.delete(_feedback_seq_key(user.id, job_id))
 
         msg = async_to_sync(ws_get_next_card)(
             job_id=str(job_id),
@@ -7851,6 +7859,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                     "message_type": "card",
                     "job_id": str(job_id),
                     "seq": msg.get("seq"),
+                    "kind": msg.get("kind"),  # "new" | "learning" | "review"
                     "card": card_payload,
                 },
                 status=status.HTTP_200_OK,
@@ -7927,6 +7936,20 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             rating = int(rating)
         except ValueError:
             return Response({"detail": "seq, card_id, rating must be integers"}, status=400)
+        if rating not in VALID_RATINGS:
+            return Response(
+                {"detail": "rating must be 0 (hard), 1 (good) or 2 (easy)"}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # seq must increase within a Learn session: ignore duplicates / out-of-order feedback.
+        from django.core.cache import cache
+        seq_key = _feedback_seq_key(user.id, job_id)
+        last_seq = cache.get(seq_key)
+        if last_seq is not None and seq <= last_seq:
+            return Response(
+                {"message_type": "stale", "detail": "This card was already rated.", "last_seq": last_seq},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         time_to_answer_ms = request.data.get("time_to_answer_ms", 500)
         try:
@@ -7948,8 +7971,12 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         )
 
         mt = msg.get("message_type")
-        if mt == "ok":
+        if mt == "ack":
+            cache.set(seq_key, seq, 6 * 60 * 60)
             return Response({"message_type": "ok", "detail": msg}, status=status.HTTP_200_OK)
+        if mt == "error" and str(msg.get("detail", "")).endswith("mismatch"):
+            # The service no longer has this card in flight (already rated / session moved on).
+            return Response({"message_type": "stale", "detail": msg.get("detail")}, status=status.HTTP_409_CONFLICT)
 
         return Response({"message_type": mt, "detail": msg}, status=status.HTTP_502_BAD_GATEWAY)
     
