@@ -10,11 +10,20 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 
 from django.core.management.base import BaseCommand
 
 from api.models import ProcessArtifact, ProcessRun, ProcessStepRun, User
 from rest_framework.authtoken.models import Token
+
+
+def _debug_api_base_url() -> str:
+    return (
+        os.getenv("INTERNAL_API_BASE_URL", "").strip()
+        or os.getenv("LOCALHOST_INTERNAL_API_BASE_URL", "").strip()
+        or "http://localhost:8000"
+    ).rstrip("/")
 
 
 class Command(BaseCommand):
@@ -52,8 +61,8 @@ class Command(BaseCommand):
         self.stdout.write(self.style.HTTP_INFO(f"\n{sep}"))
         self.stdout.write(self.style.HTTP_INFO("  ENDPOINTS DE PRUEBA"))
         self.stdout.write(self.style.HTTP_INFO(sep))
-        self.stdout.write("  GET  http://localhost:8000/api/process-runs/")
-        self.stdout.write("  POST http://localhost:8000/api/process-runs/auto-generate/")
+        self.stdout.write(f"  GET  {_debug_api_base_url()}/api/process-runs/")
+        self.stdout.write(f"  POST {_debug_api_base_url()}/api/process-runs/auto-generate/")
         self.stdout.write('       Body: {"document_ids": [<id>]}')
 
         # ── RUN ESPECÍFICO ─────────────────────────────────────────
@@ -88,7 +97,7 @@ class Command(BaseCommand):
         if not runs:
             self.stdout.write(self.style.WARNING("  No hay process runs para este usuario."))
             self.stdout.write("  Lanza uno con:")
-            self.stdout.write(f"    POST http://localhost:8000/api/process-runs/auto-generate/")
+            self.stdout.write(f"    POST {_debug_api_base_url()}/api/process-runs/auto-generate/")
             self.stdout.write(f"    Authorization: Token {token.key}")
             self.stdout.write('    Body: {"document_ids": [1]}')
         else:
@@ -122,7 +131,7 @@ class Command(BaseCommand):
         self.stdout.write(f"  creado    : {run.created_at}")
         self.stdout.write(f"  finalizado: {run.finished_at or '—'}")
 
-        endpoint = f"http://localhost:8000/api/process-runs/{run.run_id}/"
+        endpoint = f"{_debug_api_base_url()}/api/process-runs/{run.run_id}/"
         self.stdout.write(f"  GET       : {endpoint}")
 
         if verbose:
