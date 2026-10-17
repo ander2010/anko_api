@@ -270,10 +270,12 @@ def document_upload_to(instance, filename):
 
     scope_id = getattr(instance, "collection_id", None) or instance.project_id or "unscoped"
 
-    safe_filename = os.path.basename(filename)
-    unique_filename = f"{safe_filename}"
+    # Random internal name: the client's file name is never used in the storage path
+    # (prevents overwrites and path tricks). The original name lives in Document.filename.
+    from api.services.file_validation import random_storage_name
 
-    return f"documents/{user_id}/{scope_id}/{unique_filename}"
+    extension = os.path.splitext(os.path.basename(filename or ""))[1].lstrip(".")
+    return f"documents/{user_id}/{scope_id}/{random_storage_name(extension)}"
 
 
 class Project(models.Model):

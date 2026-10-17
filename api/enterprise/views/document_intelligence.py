@@ -134,33 +134,44 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
           - file       : the uploaded file (required)
           - version_note: optional text describing this addition (e.g. "Actualización Q2")
         """
-        import hashlib
-
         company, membership = self._resolve_company_membership()
         self._require_trainer(membership)
         ks = _resolve_ks(company.id, pk)
 
+        from api.services.file_validation import (
+            FileValidationError, oversize_error, rejection_response, validate_uploaded_file,
+        )
+        from api.upload_handlers import oversize_uploads
+
+        too_large = oversize_uploads(request)
+        if too_large:
+            return rejection_response(request, oversize_error(), filename=too_large[0], source="knowledge_source_add_document")
         if "file" not in request.FILES:
             raise ValidationError({"file": "A file is required."})
 
         uploaded_file = request.FILES["file"]
-        content = uploaded_file.read()
-        uploaded_file.seek(0)
-
-        ext = uploaded_file.name.rsplit(".", 1)[-1].lower() if "." in uploaded_file.name else "bin"
-        file_hash = hashlib.sha256(content).hexdigest()
+        # Validate name, size and real content before the Document exists.
+        try:
+            validated = validate_uploaded_file(uploaded_file)
+        except FileValidationError as err:
+            return rejection_response(
+                request, err, filename=uploaded_file.name, size=uploaded_file.size,
+                source="knowledge_source_add_document",
+            )
 
         from api.models import Document
         from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
 
-        document = Document.objects.create(
-            filename=uploaded_file.name,
+        document = Document(
+            filename=validated.original_name,
             file=uploaded_file,
-            type=ext,
-            size=len(content),
-            hash=file_hash,
+            type=validated.extension,  # enterprise documents keep the lowercase extension as type
+            size=validated.size,
+            hash=validated.sha256,
             uploaded_by=request.user,
         )
+        document._uploader_id = request.user.id
+        document.save()
 
         KnowledgeSourceDocument.objects.get_or_create(
             knowledge_source=ks,

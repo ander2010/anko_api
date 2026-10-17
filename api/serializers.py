@@ -176,7 +176,27 @@ class DocumentSerializer(serializers.ModelSerializer):
         fields = "__all__"  # mantiene todos tus campos
         # + agrega filename y url porque son fields extra
 
+    def validate_file(self, value):
+        # Direct API create/update must pass the same checks as the upload views.
+        from django.core.files.uploadedfile import UploadedFile
+        from api.services.file_validation import (
+            FileValidationError, as_api_exception, log_rejected_upload, validate_uploaded_file,
+        )
+
+        if isinstance(value, UploadedFile):
+            try:
+                validate_uploaded_file(value)
+            except FileValidationError as err:
+                request = self.context.get("request")
+                if request is not None:
+                    log_rejected_upload(request, err, filename=value.name, size=value.size, source="documents_api")
+                raise as_api_exception(err)
+        return value
+
     def get_filename(self, obj):
+        # Storage names are random; show the original name the user uploaded.
+        if obj.filename:
+            return obj.filename
         if not obj.file:
             return None
         try:
@@ -218,6 +238,9 @@ class DocumentListSerializer(serializers.ModelSerializer):
         ]
 
     def get_filename(self, obj):
+        # Storage names are random; show the original name the user uploaded.
+        if obj.filename:
+            return obj.filename
         if not obj.file:
             return None
         try:

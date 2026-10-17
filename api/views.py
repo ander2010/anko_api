@@ -103,6 +103,13 @@ from .serializers import (
 from rest_framework.pagination import PageNumberPagination
 from api.pagination import StandardResultsSetPagination
 from api.throttles import LeadAnonRateThrottle
+from api.services.file_validation import (
+    FileValidationError,
+    oversize_error,
+    rejection_response,
+    validate_uploaded_file,
+)
+from api.upload_handlers import oversize_uploads
 from .models import SummaryDocument
 from django.shortcuts import get_object_or_404
 from django.core.mail import send_mail
@@ -1293,21 +1300,25 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         logger.info("User %s uploading %s files to project %s", request.user.id, len(files), project.id)
+
+        # Validate every file (name, size, real content) before anything is stored.
+        too_large = oversize_uploads(request)
+        if too_large:
+            return rejection_response(request, oversize_error(), filename=too_large[0], source="project_upload")
+        validated_files = {}
+        for f in files:
+            try:
+                validated_files[id(f)] = validate_uploaded_file(f)
+            except FileValidationError as err:
+                return rejection_response(request, err, filename=getattr(f, "name", ""), size=getattr(f, "size", None), source="project_upload")
+
         PlanGuard.assert_upload_allowed(user=request.user, files=files)
         created_docs = []
         processing = []  # doc + ws_url + respuesta del microservicio
 
         with transaction.atomic():
             for f in files:
-                inferred_type = infer_document_type(
-                    filename=getattr(f, "name", "document"),
-                    supplied_type=getattr(f, "content_type", ""),
-                )
-                if not inferred_type:
-                    return Response(
-                        {"detail": supported_document_types_message()},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                inferred_type = validated_files[id(f)].document_type
 
                 # ✅ HASH REAL DEL CONTENIDO
                 hasher = hashlib.sha256()
@@ -1336,7 +1347,7 @@ class ProjectViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
 
 
                 if not doc:
-                    document_name = getattr(f, "name", "document")
+                    document_name = validated_files[id(f)].original_name
                     doc = Document(
                     project=project,
                     file=f,
@@ -1866,17 +1877,39 @@ class DocumentViewSet(viewsets.ModelViewSet):
                 {"detail": "Missing required fields (project_id, filename, file_key, hash)"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        if not file_type:
-            return Response(
-                {"detail": supported_document_types_message()},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # The real type is decided by validate_document() once the stored bytes are read.
 
         project = get_object_or_404(Project, id=project_id)
         # Check access
         if project.owner != request.user and not project.members.filter(id=request.user.id).exists():
             logger.info("doc_register no_access user_id=%s project_id=%s", request.user.id, project_id)
             return Response({"detail": "No access to project"}, status=status.HTTP_403_FORBIDDEN)
+
+        # The object must live in this project's upload folder (caller's or owner's):
+        # blocks registering another user's file under this project.
+        file_key = str(file_key).lstrip("/")
+        allowed_prefixes = {
+            f"documents/{request.user.id}/{project.id}/",
+            f"documents/{project.owner_id}/{project.id}/",
+        }
+        if ".." in file_key.split("/") or not any(file_key.startswith(p) for p in allowed_prefixes):
+            logger.warning("doc_register invalid_key user_id=%s project_id=%s", request.user.id, project_id)
+            return Response({"detail": "Invalid file key for this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        # The browser uploaded straight to S3, so the stored object is in quarantine until
+        # its real content is validated here. Rejected objects are deleted.
+        try:
+            validated = _validate_stored_object(file_key, filename)
+        except FileNotFoundError:
+            return Response({"detail": "Uploaded file not found."}, status=status.HTTP_400_BAD_REQUEST)
+        except FileValidationError as err:
+            _delete_stored_object(file_key)
+            return rejection_response(request, err, filename=filename, source="document_register")
+        filename = validated.original_name
+        file_type = validated.document_type
+        file_size = validated.size
+        file_hash = validated.sha256  # never trust the client-sent hash
+
         fake_file = type("F", (), {"size": int(file_size or 0)})()
         with transaction.atomic():
             User.objects.select_for_update().get(pk=request.user.pk)
@@ -2324,6 +2357,31 @@ class RuleViewSet(viewsets.ModelViewSet):
         if project_id:
             qs = qs.filter(project_id=project_id)
         return qs
+def _validate_stored_object(key: str, filename: str):
+    """Stream-validate an object already in default storage. Raises FileNotFoundError / FileValidationError."""
+    from django.core.files.storage import default_storage
+    from api.services.file_validation import validate_stream
+
+    try:
+        if not default_storage.exists(key):
+            raise FileNotFoundError(key)
+        fh = default_storage.open(key, "rb")
+    except (OSError, ClientError):
+        raise FileNotFoundError(key)
+    with fh:
+        return validate_stream(filename, fh)
+
+
+def _delete_stored_object(key: str) -> None:
+    """Best-effort removal of a rejected upload from storage."""
+    from django.core.files.storage import default_storage
+
+    try:
+        default_storage.delete(key)
+    except Exception:
+        logger.exception("Failed to delete rejected upload key=%s", key)
+
+
 def normalize_storage_key(key: str) -> str:
     key = (key or "").lstrip("/")
 

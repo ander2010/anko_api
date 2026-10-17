@@ -58,6 +58,9 @@ from api.throttles import (
     SustainedUserRateThrottle,
 )
 from api.urls import router
+from api.test_file_validation import make_ooxml
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 
 
 class RbacAdminPanelTests(APITestCase):
@@ -188,7 +191,7 @@ class RbacAdminPanelTests(APITestCase):
         self.client.force_authenticate(user=self.user_a)
         upload = SimpleUploadedFile(
             "deck-slides.pptx",
-            b"presentation-bytes",
+            make_ooxml("pptx"),
             content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
 
@@ -204,35 +207,34 @@ class RbacAdminPanelTests(APITestCase):
         self.assertEqual(document.type, "PPTX")
         self.assertEqual(response.data["uploaded"][0]["type"], "PPTX")
 
-    def test_document_register_infers_supported_doc_type_from_filename_over_payload(self):
+    def test_document_register_rejects_legacy_doc_and_deletes_object(self):
+        # .doc is no longer in the upload whitelist (api/services/file_validation.py).
         self.client.force_authenticate(user=self.user_a)
-        fake_response = Mock()
-        fake_response.json.return_value = {"job_id": "job-doc-register"}
+        key = default_storage.save(
+            f"documents/{self.user_a.id}/{self.project_a.id}/report.doc", ContentFile(b"legacy-doc-bytes")
+        )
+        response = self.client.post(
+            "/api/documents/register/",
+            {
+                "project_id": self.project_a.id,
+                "filename": "report.doc",
+                "file_key": key,
+                "size": 1234,
+                "type": "PDF",
+                "hash": "hash-doc-register",
+            },
+            format="json",
+        )
 
-        with patch("api.views._post_with_logging", return_value=fake_response):
-            response = self.client.post(
-                "/api/documents/register/",
-                {
-                    "project_id": self.project_a.id,
-                    "filename": "report.doc",
-                    "file_key": "documents/1/1/report.doc",
-                    "size": 1234,
-                    "type": "PDF",
-                    "hash": "hash-doc-register",
-                },
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        document = Document.objects.get(project=self.project_a, hash="hash-doc-register")
-        self.assertEqual(document.type, "DOC")
-        self.assertEqual(response.data["document"]["type"], "DOC")
+        self.assertEqual(response.status_code, 415)
+        self.assertFalse(default_storage.exists(key))
+        self.assertFalse(Document.objects.filter(project=self.project_a, filename="report.doc").exists())
 
     def test_project_documents_infers_supported_docx_type_from_uploaded_filename(self):
         self.client.force_authenticate(user=self.user_a)
         upload = SimpleUploadedFile(
             "chapter-notes.docx",
-            b"wordprocessing-bytes",
+            make_ooxml("docx"),
             content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
 
@@ -253,13 +255,16 @@ class RbacAdminPanelTests(APITestCase):
         fake_response = Mock()
         fake_response.json.return_value = {"job_id": "job-pptx-register"}
 
+        key = default_storage.save(
+            f"documents/{self.user_a.id}/{self.project_a.id}/slides.pptx", ContentFile(make_ooxml("pptx"))
+        )
         with patch("api.views._post_with_logging", return_value=fake_response):
             response = self.client.post(
                 "/api/documents/register/",
                 {
                     "project_id": self.project_a.id,
                     "filename": "slides.pptx",
-                    "file_key": "documents/1/1/slides.pptx",
+                    "file_key": key,
                     "size": 4321,
                     "type": "PDF",
                     "hash": "hash-pptx-register",
@@ -268,7 +273,8 @@ class RbacAdminPanelTests(APITestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        document = Document.objects.get(project=self.project_a, hash="hash-pptx-register")
+        document = Document.objects.get(project=self.project_a, filename="slides.pptx")
+        self.assertNotEqual(document.hash, "hash-pptx-register")  # never trusts the client hash
         self.assertEqual(document.type, "PPTX")
         self.assertEqual(response.data["document"]["type"], "PPTX")
 
@@ -277,13 +283,16 @@ class RbacAdminPanelTests(APITestCase):
         fake_response = Mock()
         fake_response.json.return_value = {"job_id": "job-docx-register"}
 
+        key = default_storage.save(
+            f"documents/{self.user_a.id}/{self.project_a.id}/report.docx", ContentFile(make_ooxml("docx"))
+        )
         with patch("api.views._post_with_logging", return_value=fake_response):
             response = self.client.post(
                 "/api/documents/register/",
                 {
                     "project_id": self.project_a.id,
                     "filename": "report.docx",
-                    "file_key": "documents/1/1/report.docx",
+                    "file_key": key,
                     "size": 1234,
                     "type": "PDF",
                     "hash": "hash-docx-register",
@@ -292,11 +301,13 @@ class RbacAdminPanelTests(APITestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        document = Document.objects.get(project=self.project_a, hash="hash-docx-register")
+        document = Document.objects.get(project=self.project_a, filename="report.docx")
+        self.assertNotEqual(document.hash, "hash-docx-register")  # never trusts the client hash
         self.assertEqual(document.type, "DOCX")
         self.assertEqual(response.data["document"]["type"], "DOCX")
 
-    def test_project_documents_rejects_unsupported_xlsx_type(self):
+    def test_project_documents_rejects_spreadsheet_with_fake_content(self):
+        # .xlsx is allowed, but only when the bytes are a real spreadsheet package.
         self.client.force_authenticate(user=self.user_a)
         upload = SimpleUploadedFile(
             "financial-model.xlsx",
@@ -310,8 +321,8 @@ class RbacAdminPanelTests(APITestCase):
             format="multipart",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("Supported document types", response.data["detail"])
+        self.assertEqual(response.status_code, 422)
+        self.assertFalse(Document.objects.filter(project=self.project_a, filename="financial-model.xlsx").exists())
 
     def test_document_delete_removes_converted_source_and_pdf_variants(self):
         self.client.force_authenticate(user=self.user_a)
