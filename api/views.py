@@ -615,8 +615,26 @@ class AuthViewSet(viewsets.GenericViewSet):
 def flashcard_redis_key(job_id: str) -> str:
     return f"flashcards:cards:{job_id}"
 class UserViewSet(viewsets.ModelViewSet):
+    """
+    Platform-wide user directory (Admin Area > Users, platform-admin invite search).
+    Restricted to platform admins: it exposes every user's email, roles and companies.
+    Regular users manage their own profile through /api/auth/me/.
+    """
     queryset = User.objects.all().prefetch_related("roles", "company_memberships__company")
     serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated, IsPlatformAdmin]
+
+    def get_queryset(self):
+        qs = super().get_queryset().order_by("id")
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(username__icontains=search)
+                | Q(email__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(last_name__icontains=search)
+            )
+        return qs
 
 
 class SSERenderer(BaseRenderer):
