@@ -26,6 +26,68 @@ from api.enterprise.serializers.document_intelligence import (
 )
 
 
+def _ks_generated_topics(ks, doc_ids=None):
+    """
+    Topics (tag groups) produced by Auto-generate for a KnowledgeSource.
+
+    Every auto-generate run ever launched for a subset of this KS's currently
+    linked documents "belongs" to this process — not just the one matching the
+    exact current document set. Re-running Auto-generar after adding a new
+    document changes that exact-match key (e.g. "75" -> "75,76"), so matching
+    only the latest run made earlier topics — and anything manually added
+    under them via "+ Agregar deck/batería" — vanish from view even though
+    nothing was actually deleted. Aggregating every qualifying run keeps old
+    topics and manual content visible forever while still layering in
+    whatever a fresh Auto-generar run produces.
+
+    Returns (runs, tag_group_ids, topics) where topics is [{"id", "tags"}].
+    """
+    from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+    from api.models import ProcessRun
+
+    if doc_ids is None:
+        doc_ids = sorted(
+            KnowledgeSourceDocument.objects.filter(knowledge_source=ks).values_list("document_id", flat=True)
+        )
+    doc_id_set = set(doc_ids)
+    if not doc_id_set:
+        return [], [], []
+
+    candidate_runs = (
+        ProcessRun.objects
+        .filter(workflow_key="collection_auto_generate", resource_type="document_batch")
+        .exclude(status__in=["canceled", "cancelled", "queued", "draft"])
+        .order_by("created_at")
+    )
+    runs = []
+    for candidate in candidate_runs:
+        try:
+            run_doc_ids = {int(v) for v in candidate.resource_id.split(",") if v.strip()}
+        except ValueError:
+            continue
+        if run_doc_ids and run_doc_ids.issubset(doc_id_set):
+            runs.append(candidate)
+
+    # Tag-group artifacts across every qualifying run → used as "topics"
+    tag_group_ids: list[int] = []
+    topics = []
+    seen_tag_group_ids = set()
+    for run in runs:
+        for a in run.artifacts.filter(artifact_type="tag_group").order_by("resource_id"):
+            if a.resource_id in seen_tag_group_ids:
+                continue
+            seen_tag_group_ids.add(a.resource_id)
+            tag_group_ids.append(int(a.resource_id))
+            topics.append({"id": a.resource_id, "tags": a.payload.get("tags", [])})
+    return runs, tag_group_ids, topics
+
+
+def _ks_topic_ids(ks) -> set:
+    """Every topic (TagGroup id) that belongs to this KnowledgeSource."""
+    _, tag_group_ids, _ = _ks_generated_topics(ks)
+    return set(tag_group_ids)
+
+
 def _resolve_ks(company_id, ks_id):
     from api.enterprise_document_intelligence_models import KnowledgeSource
     try:
@@ -220,44 +282,9 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
 
         doc_id_set = set(doc_ids)
 
-        # Every auto-generate run ever launched for a subset of this KS's currently
-        # linked documents "belongs" to this process — not just the one matching the
-        # exact current document set. Re-running Auto-generar after adding a new
-        # document changes that exact-match key (e.g. "75" -> "75,76"), so matching
-        # only the latest run made earlier topics — and anything manually added
-        # under them via "+ Agregar deck/batería" — vanish from view even though
-        # nothing was actually deleted. Aggregating every qualifying run keeps old
-        # topics and manual content visible forever while still layering in
-        # whatever a fresh Auto-generar run produces.
-        candidate_runs = (
-            ProcessRun.objects
-            .filter(workflow_key="collection_auto_generate", resource_type="document_batch")
-            .exclude(status__in=["canceled", "cancelled", "queued", "draft"])
-            .order_by("created_at")
-        )
-        runs = []
-        for candidate in candidate_runs:
-            try:
-                run_doc_ids = {int(v) for v in candidate.resource_id.split(",") if v.strip()}
-            except ValueError:
-                continue
-            if run_doc_ids and run_doc_ids.issubset(doc_id_set):
-                runs.append(candidate)
-
+        runs, tag_group_ids, topics = _ks_generated_topics(ks, doc_ids)
         if not runs:
             return Response({"run": None, "batteries": [], "decks": [], "topics": []})
-
-        # Tag-group artifacts across every qualifying run → used as "topics"
-        tag_group_ids: list[int] = []
-        topics = []
-        seen_tag_group_ids = set()
-        for run in runs:
-            for a in run.artifacts.filter(artifact_type="tag_group").order_by("resource_id"):
-                if a.resource_id in seen_tag_group_ids:
-                    continue
-                seen_tag_group_ids.add(a.resource_id)
-                tag_group_ids.append(int(a.resource_id))
-                topics.append({"id": a.resource_id, "tags": a.payload.get("tags", [])})
 
         # Battery/deck artifacts across every qualifying run, unioned with anything
         # linked afterward via "+ Agregar deck/batería" (which links through
@@ -307,6 +334,55 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             "decks": decks_data,
             "topics": topics,
         })
+
+    @action(detail=True, methods=["post"], url_path=r"topics/(?P<topic_id>\d+)/decks")
+    def create_topic_deck(self, request, pk=None, topic_id=None):
+        """
+        POST /api/enterprise/knowledge-sources/{id}/topics/{topic_id}/decks/?company_id=
+        Manual deck (F-08): {"title", "description"?, "is_public"?, "flashcards": [{"front", "back", "notes"?}]}
+        Same Deck/Flashcard models and topic link (DeckSourceTagGroup) as AI decks.
+        201 -> deck in the /results/ format (DeckListSerializer) + "flashcards".
+        """
+        from django.db import transaction
+        from api.enterprise.serializers.document_intelligence import ManualDeckCreateSerializer
+        from api.models import Deck, Flashcard, TagGroup
+        from api.serializers import DeckListSerializer, FlashcardSerializer
+        from api.services.auto_generate_workflow import sync_deck_source_links
+
+        company, membership = self._resolve_company_membership()
+        self._require_trainer(membership)
+        ks = _resolve_ks(company.id, pk)
+        topic_id = int(topic_id)
+        if topic_id not in _ks_topic_ids(ks):
+            raise NotFound("Topic not found in this process.")
+
+        data = ManualDeckCreateSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
+        d = data.validated_data
+        if d.get("knowledge_source_id") not in (None, ks.id) or d.get("topic_id") not in (None, topic_id):
+            raise ValidationError({"detail": "knowledge_source_id/topic_id do not match the URL."})
+
+        topic = TagGroup.objects.get(pk=topic_id)
+        with transaction.atomic():
+            deck = Deck.objects.create(
+                project=None,
+                collection=None,
+                owner=request.user,
+                title=d["title"],
+                description=d.get("description", ""),
+                visibility="public" if d.get("is_public") else "private",
+            )
+            Flashcard.objects.bulk_create([
+                Flashcard(deck=deck, front=c["front"], back=c["back"], notes=c.get("notes", ""))
+                for c in d["flashcards"]
+            ])
+            sync_deck_source_links(deck=deck, source_bundle={"tag_group_ids": [str(topic.id)]})
+
+        payload = DeckListSerializer(deck, context={"request": request}).data
+        payload["flashcards"] = FlashcardSerializer(
+            deck.cards.order_by("created_at", "id"), many=True, context={"request": request}
+        ).data
+        return Response(payload, status=201)
 
     @action(detail=True, methods=["get"], url_path="documents-with-sections")
     def documents_with_sections(self, request, pk=None):
