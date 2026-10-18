@@ -240,3 +240,23 @@ class ManualDeckCreateSerializer(serializers.Serializer):
     knowledge_source_id = serializers.IntegerField(required=False)
     topic_id = serializers.IntegerField(required=False)
 
+
+# ---------------------------------------------------------------------------
+# Topics created by hand inside a process (F-09)
+# ---------------------------------------------------------------------------
+
+class ManualTopicSerializer(serializers.Serializer):
+    title = serializers.CharField(trim_whitespace=True, max_length=255)
+    description = serializers.CharField(trim_whitespace=True, required=False, allow_blank=True, default="")
+    tags = serializers.ListField(
+        child=serializers.CharField(trim_whitespace=True, allow_blank=True, max_length=255), required=False, default=list, max_length=50,
+    )
+
+    def validate_tags(self, value):
+        # Drop blanks and case-insensitive duplicates, keeping the first spelling.
+        seen, tags = set(), []
+        for tag in value:
+            if tag and tag.lower() not in seen:
+                seen.add(tag.lower())
+                tags.append(tag)
+        return tags

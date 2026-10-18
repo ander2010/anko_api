@@ -169,6 +169,47 @@ class KnowledgeSourceDocument(models.Model):
 
 
 # ==========================================================================
+# KnowledgeSourceTopic  (topics added by hand to a process, F-09)
+# ==========================================================================
+
+class KnowledgeSourceTopic(models.Model):
+    """
+    A topic created by hand inside a process. The topic itself is a TagGroup, so
+    decks/batteries attach to it exactly like Auto-generate topics
+    (DeckSourceTagGroup / BatterySourceTagGroup); this row ties it to the process.
+    """
+    knowledge_source = models.ForeignKey(
+        KnowledgeSource,
+        on_delete=models.CASCADE,
+        related_name="manual_topics",
+    )
+    tag_group = models.OneToOneField(
+        "api.TagGroup",
+        on_delete=models.CASCADE,
+        related_name="knowledge_source_topic",
+    )
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    order = models.PositiveIntegerField(default=0)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "enterprise_knowledge_source_topics"
+        ordering = ["order", "id"]
+
+    def __str__(self) -> str:
+        return f"{self.title} ({self.knowledge_source_id})"
+
+
+# ==========================================================================
 # DocumentVersion
 # ==========================================================================
 
