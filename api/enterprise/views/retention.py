@@ -126,11 +126,13 @@ class RetentionViewSet(EnterpriseViewSetMixin, viewsets.GenericViewSet):
     def team_retention(self, request):
         company_id = self._get_company_id()
         team_id = request.query_params.get("team_id")
-        if not company_id or not team_id:
-            raise ValidationError({
-                "company_id": "Required.",
-                "team_id": "Required.",
-            })
+        # F-11: name only the field that is actually missing.
+        if not company_id:
+            raise ValidationError({"company_id": "This field is required."})
+        if not team_id:
+            raise ValidationError({"team_id": "This field is required. Pick a team."})
+        if not str(team_id).isdigit():
+            raise ValidationError({"team_id": "A valid team id is required."})
         self._require_permission("enterprise.ent-retention-team", "view")
 
         from api.enterprise_models import Company, Team

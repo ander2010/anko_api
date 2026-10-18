@@ -479,15 +479,37 @@ class ComplianceService:
                 "avg_compliance_rate": Decimal("0"),
                 "fully_compliant_count": 0,
                 "at_risk_count": 0,
+                "members": [],
+                "compliant": 0,
+                "non_compliant": 0,
+                "pending": 0,
+                "expired": 0,
+                "risk_distribution": {"low": 0, "medium": 0, "high": 0},
             }
 
         rates = []
         risks = []
+        member_rows = []
         for m in members:
             result = ComplianceService.evaluate_compliance(m.user, company)
             rates.append(result["compliance_rate"])
             risk = ComplianceService.calculate_compliance_risk(m.user, company)
             risks.append(risk)
+            # F-11: per-member detail (new keys only; the aggregates below are unchanged).
+            member_rows.append({
+                "user_id": m.user.id,
+                "user_name": m.user.get_full_name() or m.user.username,
+                "email": m.user.email,
+                "team_role": m.role,
+                "total_programs": result["total_programs"],
+                "compliant": result["compliant"],
+                "non_compliant": result["non_compliant"],
+                "pending": result["pending"],
+                "expired": result["expired"],
+                "compliance_rate": result["compliance_rate"],
+                "risk_score": risk,
+                "risk_level": "high" if risk >= Decimal("50") else "medium" if risk >= Decimal("25") else "low",
+            })
 
         n = Decimal(str(len(rates)))
         avg_rate = sum(rates) / n
@@ -501,6 +523,14 @@ class ComplianceService:
             "avg_compliance_rate": avg_rate.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             "fully_compliant_count": fully_compliant,
             "at_risk_count": at_risk,
+            "members": member_rows,
+            "compliant": sum(r["compliant"] for r in member_rows),
+            "non_compliant": sum(r["non_compliant"] for r in member_rows),
+            "pending": sum(r["pending"] for r in member_rows),
+            "expired": sum(r["expired"] for r in member_rows),
+            "risk_distribution": {
+                level: sum(1 for r in member_rows if r["risk_level"] == level) for level in ("low", "medium", "high")
+            },
         }
 
     @staticmethod

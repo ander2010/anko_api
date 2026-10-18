@@ -39,6 +39,22 @@ from api.enterprise_retention_models import (
 # We approximate: each review at score >= 80 multiplies S by ease_factor.
 _DECAY_WINDOW_DAYS = 90          # Assessments older than this contribute little
 _GAP_THRESHOLD = Decimal("60")   # Retention below 60% = knowledge gap
+
+
+def _risk_level(risk) -> str:
+    """Bucket a 0-100 risk score: high > 60 (same cut as the 'At risk' badge), medium >= 30."""
+    if risk > 60:
+        return "high"
+    if risk >= 30:
+        return "medium"
+    return "low"
+
+
+def _risk_distribution(risks) -> dict:
+    counts = {"low": 0, "medium": 0, "high": 0}
+    for risk in risks:
+        counts[_risk_level(risk)] += 1
+    return counts
 _HIGH_RISK_THRESHOLD = Decimal("40")
 _CRITICAL_THRESHOLD = Decimal("25")
 
@@ -500,16 +516,36 @@ class RetentionService:
                 "avg_retention": Decimal("0"),
                 "avg_risk": Decimal("0"),
                 "at_risk_count": 0,
+                "members": [],
+                "risk_distribution": {"low": 0, "medium": 0, "high": 0},
             }
 
         retention_scores = []
         risk_scores = []
+        member_rows = []
 
         for m in members:
             r = RetentionService.calculate_user_retention(m.user, company)
             risk = RetentionService.calculate_risk_score(m.user, company)
             retention_scores.append(r)
             risk_scores.append(risk)
+            # F-11: per-member detail (new keys only; the aggregates below are unchanged).
+            last = (
+                KnowledgeAssessment.objects.filter(company=company, user=m.user)
+                .order_by("-created_at").values_list("created_at", flat=True).first()
+            )
+            member_rows.append({
+                "user_id": m.user.id,
+                "name": m.user.get_full_name() or m.user.username,
+                "email": m.user.email,
+                "team_role": m.role,
+                "retention_score": r,
+                "risk_score": risk,
+                "risk_level": _risk_level(risk),
+                "open_gaps": KnowledgeGap.objects.filter(company=company, user=m.user, status="open").count(),
+                "last_assessment": last,
+                "at_risk": r < _GAP_THRESHOLD,
+            })
 
         n = Decimal(str(len(retention_scores)))
         avg_retention = sum(retention_scores) / n
@@ -523,6 +559,8 @@ class RetentionService:
             "avg_retention": avg_retention.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             "avg_risk": avg_risk.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             "at_risk_count": at_risk,
+            "members": member_rows,
+            "risk_distribution": _risk_distribution(risk_scores),
         }
 
     @staticmethod
