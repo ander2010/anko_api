@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from api.services.content_access import user_can_access_company_content  # noqa: E402  (C1)
 from django.conf import settings
 from api.utils.subscriptionstouser import ensure_free_subscription_for_user
 from dj_rest_auth.views import PasswordResetView
@@ -2597,7 +2598,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             (battery.project_id is not None and battery.project is not None and battery.project.owner_id == user.id)
             or battery.visibility == "public"
             or battery.shares.filter(shared_with=user).exists()
-            or (battery.project_id is None and user.company_memberships.exists())
+            or (battery.project_id is None and user_can_access_company_content(user, battery=battery))
         )
         if not has_access:
             return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
@@ -2661,7 +2662,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         user = request.user
         has_access = (
             (battery.project_id is not None and battery.project.owner_id == user.id)
-            or (battery.project_id is None and user.company_memberships.exists())
+            or (battery.project_id is None and user_can_access_company_content(user, battery=battery))
         )
         if not has_access:
             return Response({"detail": "No tienes permiso para eliminar esta batería."}, status=status.HTTP_403_FORBIDDEN)
@@ -2684,7 +2685,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             (battery.project_id is not None and battery.project is not None and battery.project.owner_id == user.id)
             or battery.visibility == "public"
             or battery.shares.filter(shared_with=user).exists()
-            or (battery.project_id is None and user.company_memberships.exists())
+            or (battery.project_id is None and user_can_access_company_content(user, battery=battery))
         )
         if not has_access:
             return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
@@ -7733,7 +7734,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
-            or (deck.project_id is None and user.company_memberships.exists())
+            or (deck.project_id is None and user_can_access_company_content(user, deck=deck))
         )
         if not has_access:
             return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
@@ -7819,7 +7820,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
-            or (deck.project_id is None and user.company_memberships.exists())
+            or (deck.project_id is None and user_can_access_company_content(user, deck=deck))
         )
         if not has_access:
             return None, Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
@@ -8086,7 +8087,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or deck.shares.filter(shared_with=user).exists()
-            or (deck.project_id is None and user.company_memberships.exists())
+            or (deck.project_id is None and user_can_access_company_content(user, deck=deck))
         )
         if not has_access:
             raise PermissionDenied("You do not have access to this deck.")
