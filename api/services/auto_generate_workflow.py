@@ -1146,6 +1146,10 @@ def _finalize_run_summary(*, run: ProcessRun, dispatch_errors: list[dict[str, An
         run,
         event="process_run.completed" if final_status in {ProcessRun.Status.COMPLETED, ProcessRun.Status.COMPLETED_WITH_ERRORS} else "process_run.updated",
     )
+    # F-13: refresh the knowledge graph of the process(es) these documents belong to.
+    # sync_graph_for_documents logs and swallows its own errors.
+    from api.enterprise.services.knowledge_graph_builder import sync_graph_for_documents
+    sync_graph_for_documents([v for v in str(run.resource_id or "").split(",") if v.strip().isdigit()])
     return final_status
 
 

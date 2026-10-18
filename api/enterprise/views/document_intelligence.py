@@ -412,6 +412,8 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
                 knowledge_source=ks, tag_group=tag_group, title=d["title"],
                 description=d.get("description", ""), order=(last or 0) + 1, created_by=request.user,
             )
+        from api.enterprise.services.knowledge_graph_builder import safe_build
+        safe_build(ks)  # F-13
         return Response(_manual_topic_payload(topic), status=201)
 
     @action(detail=True, methods=["patch"], url_path=r"topics/(?P<topic_id>\d+)")
@@ -441,6 +443,8 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             if "description" in d:
                 topic.description = d["description"]
             topic.save(update_fields=["title", "description", "updated_at"])
+        from api.enterprise.services.knowledge_graph_builder import safe_build
+        safe_build(ks)  # F-13
         topic = KnowledgeSourceTopic.objects.prefetch_related("tag_group__items").get(pk=topic.pk)
         return Response(_manual_topic_payload(topic))
 
@@ -779,6 +783,37 @@ class KnowledgeGraphViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
 
         data = DocumentIntelligenceService.get_knowledge_graph(company, ks)
         return Response(KnowledgeGraphSerializer(data).data)
+
+    @action(detail=False, methods=["post"], url_path="rebuild")
+    def rebuild(self, request):
+        """
+        POST /api/enterprise/knowledge-graph/rebuild/?company_id=[&knowledge_source_id=]
+        F-13: rebuilds the structure graph (process, topics, tags, procedures) of one
+        process or of every process in the company. Trainer role or higher.
+        """
+        company = self._get_company()
+        membership = validate_company_access(request.user, company.id)
+        if membership.role not in ("owner", "admin", "trainer", "manager"):
+            raise PermissionDenied("Trainer role or higher required.")
+        from api.enterprise.services.knowledge_graph_builder import build_knowledge_graph
+        from api.enterprise_document_intelligence_models import KnowledgeSource
+
+        qs = KnowledgeSource.objects.filter(company=company)
+        ks_id = request.query_params.get("knowledge_source_id") or request.data.get("knowledge_source_id")
+        if ks_id:
+            qs = qs.filter(pk=ks_id)
+            if not qs.exists():
+                raise NotFound("KnowledgeSource not found.")
+        results = [build_knowledge_graph(ks) for ks in qs]
+        graph = DocumentIntelligenceService.get_knowledge_graph(company, qs.first() if ks_id else None)
+        return Response({
+            "processes": len(results),
+            "nodes_created": sum(r["nodes_created"] for r in results),
+            "nodes_updated": sum(r["nodes_updated"] for r in results),
+            "nodes_deleted": sum(r["nodes_deleted"] for r in results),
+            "node_count": graph["node_count"],
+            "edge_count": graph["edge_count"],
+        })
 
     @action(detail=False, methods=["get"], url_path="nodes")
     def nodes(self, request):
