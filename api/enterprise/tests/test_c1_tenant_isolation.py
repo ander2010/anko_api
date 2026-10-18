@@ -267,3 +267,32 @@ class CompanyContentAccessTests(TenantIsolationTests):
     test_nested_and_custom_actions = None
     test_company_wide_reports_need_membership = None
     test_flashcards_and_batteries_of_another_company = None
+
+
+class GeneralListsTests(CompanyContentAccessTests):
+    """Platform-wide /api/decks/ and /api/batteries/ must not expose another company's process content."""
+
+    def test_general_lists_and_battery_actions(self):
+        battery = self._battery_in_b_topic()
+        for url in ("/api/decks/", "/api/decks/?tag_group=%d" % self.b["topic"].id, "/api/batteries/",
+                    "/api/batteries/?tag_group=%d" % self.b["topic"].id, f"/api/flashcards/?deck={self.b['deck']}"):
+            with self.subTest(url=url):
+                r = self.client.get(url)
+                body = r.content.decode(errors="ignore")
+                if r.status_code == 200 and "_n" in body:
+                    from api.test_f05_learn_mode import decrypt
+                    from rest_framework.authtoken.models import Token
+                    token = Token.objects.get_or_create(user=self.a_owner)[0].key
+                    self.client.credentials(HTTP_AUTHORIZATION=f"Token {token}")
+                    body = str(decrypt(self.client.get(url).json(), token))
+                for secret in ("secret B front", "B deck", "B battery", "B question"):
+                    self.assertNotIn(secret, body, f"GET {url} leaked {secret!r}")
+        for method, url in (("get", f"/api/batteries/{battery.id}/"), ("post", f"/api/batteries/{battery.id}/start_attempt/"),
+                            ("patch", f"/api/batteries/{battery.id}/"), ("delete", f"/api/batteries/{battery.id}/")):
+            with self.subTest(method=method, url=url):
+                r = self.attempt(method, url, {"name": "hacked"} if method == "patch" else None)
+                self.assertTrue(is_denied(r), f"{method.upper()} {url} -> {r.status_code}")
+
+    test_b_employee_still_learns_lists_and_answers = None
+    test_a_cannot_answer_b_battery = None
+    test_deck_in_a_learning_module_is_reachable_by_that_company = None

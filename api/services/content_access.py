@@ -74,3 +74,41 @@ def user_can_access_company_content(user, *, deck=None, battery=None) -> bool:
     if not company_ids:
         return False
     return CompanyMembership.objects.filter(user=user, status="active", company_id__in=company_ids).exists()
+
+
+def company_battery_ids(user) -> set[int]:
+    """Ids of project-less batteries reachable through the companies the user is an active member of."""
+    from api.enterprise_document_intelligence_models import KnowledgeSourceDocument, KnowledgeSourceTopic
+    from api.enterprise_learning_models import LearningModuleItem
+    from api.enterprise_models import CompanyMembership
+    from api.models import BatterySourceTagGroup, ProcessArtifact
+
+    company_ids = set(CompanyMembership.objects.filter(user=user, status="active").values_list("company_id", flat=True))
+    if not company_ids:
+        return set()
+    tag_group_ids = set(
+        KnowledgeSourceTopic.objects.filter(knowledge_source__company_id__in=company_ids).values_list("tag_group_id", flat=True)
+    )
+    company_doc_ids = set(
+        KnowledgeSourceDocument.objects.filter(knowledge_source__company_id__in=company_ids).values_list("document_id", flat=True)
+    )
+    battery_ids: set[int] = set()
+    if company_doc_ids:
+        artifacts = ProcessArtifact.objects.filter(
+            run__workflow_key="collection_auto_generate", run__resource_type="document_batch",
+            artifact_type__in=("tag_group", "battery"),
+        ).values_list("artifact_type", "resource_id", "run__resource_id")
+        for artifact_type, resource_id, run_resource in artifacts:
+            try:
+                run_docs = {int(v) for v in str(run_resource or "").split(",") if v.strip()}
+                rid = int(resource_id)
+            except ValueError:
+                continue
+            if not run_docs or not run_docs <= company_doc_ids:
+                continue
+            (tag_group_ids if artifact_type == "tag_group" else battery_ids).add(rid)
+    battery_ids |= set(BatterySourceTagGroup.objects.filter(tag_group_id__in=tag_group_ids).values_list("battery_id", flat=True))
+    battery_ids |= set(
+        LearningModuleItem.objects.filter(module__company_id__in=company_ids, battery__isnull=False).values_list("battery_id", flat=True)
+    )
+    return battery_ids

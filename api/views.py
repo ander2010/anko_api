@@ -2523,6 +2523,14 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        user = self.request.user
+        if not _is_rbac_admin_user(user):
+            # C1: only batteries the user may see (it used to be every battery on the platform).
+            from api.services.content_access import company_battery_ids
+            qs = qs.filter(
+                Q(project__owner=user) | Q(collection__owner=user) | Q(visibility="public")
+                | Q(shares__shared_with=user) | Q(project__isnull=True, id__in=company_battery_ids(user))
+            ).distinct()
         if getattr(self, "action", None) in {"list", "my"}:
             qs = qs.annotate(question_count=Count("questions_rel", distinct=True))
         project_id = self.request.query_params.get("project")
