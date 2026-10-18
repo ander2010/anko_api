@@ -345,6 +345,8 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Document upload policy (validated in api/services/file_validation.py)
 UPLOAD_ALLOWED_EXTENSIONS = os.getenv("UPLOAD_ALLOWED_EXTENSIONS", "pdf,docx,xlsx,pptx,txt,md,markdown")
 UPLOAD_MAX_FILE_SIZE_MB = float(os.getenv("UPLOAD_MAX_FILE_SIZE_MB", "400"))
+# Log decrypted Learn-mode API responses (development only).
+LEARN_DEBUG_LOG_RESPONSES = os.getenv("LEARN_DEBUG_LOG_RESPONSES", "false").lower() in ("1", "true", "yes")
 FILE_UPLOAD_HANDLERS = [
     "api.upload_handlers.MaxSizeUploadHandler",
     "django.core.files.uploadhandler.MemoryFileUploadHandler",

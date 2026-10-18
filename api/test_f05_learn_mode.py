@@ -1,93 +1,15 @@
-"""
-F-05: Learn mode must advance after feedback.
-
-A fake flashcard WebSocket service reproduces the real protocol of
-anko_services (per-connection seq, in-flight card, "seq mismatch" rejection,
-"ack" after applying feedback) so the anko_api client is exercised end to end.
-"""
-import asyncio
+"""F-05: Learn mode sessions are DB-backed, strictly ordered by seq and idempotent."""
 import base64
 import hashlib
 import json
-import threading
-from unittest.mock import patch
 
-import websockets
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from django.core.cache import cache
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase
 
-from api.models import Deck, Project, User
-from api.services import flashcards_ws
-from api.services.flashcards_ws import RATING_EASY, RATING_GOOD, RATING_HARD
+from api.models import Deck, Flashcard, FlashcardSchedule, LearnAnswer, LearnRating, Project, User
 
-
-class FakeFlashcardService:
-    """In-memory imitation of anko_services' /ws/flashcards/{job_id} endpoint."""
-
-    def __init__(self, card_ids):
-        self.queue = list(card_ids)   # due cards, in order
-        self.inflight = None          # {"seq": int, "card_id": int}
-        self.loop = asyncio.new_event_loop()
-        self.port = None
-        ready = threading.Event()
-
-        async def start():
-            self.server = await websockets.serve(self.handler, "127.0.0.1", 0)
-            self.port = self.server.sockets[0].getsockname()[1]
-            ready.set()
-
-        self.thread = threading.Thread(target=lambda: (self.loop.run_until_complete(start()), self.loop.run_forever()), daemon=True)
-        self.thread.start()
-        ready.wait(5)
-
-    def stop(self):
-        self.loop.call_soon_threadsafe(self.loop.stop)
-
-    async def handler(self, ws):
-        sub = json.loads(await ws.recv())
-        session = {"seq": int(sub.get("last_seq") or 0)}
-        await ws.send(json.dumps({"message_type": "accepted"}))
-
-        async def send_next():
-            if not self.queue:
-                await ws.send(json.dumps({"message_type": "idle"}))
-                await ws.send(json.dumps({"message_type": "done"}))
-                return False
-            session["seq"] += 1
-            card_id = self.queue[0]
-            self.inflight = {"seq": session["seq"], "card_id": card_id}
-            await ws.send(json.dumps({"message_type": "card", "seq": session["seq"], "kind": "new",
-                                      "card": {"id": card_id, "card_id": card_id, "front": f"Q{card_id}"}}))
-            return True
-
-        if self.inflight:  # reconnect: resend in-flight card with its seq
-            await ws.send(json.dumps({"message_type": "card", "seq": self.inflight["seq"], "kind": "new",
-                                      "card": {"id": self.inflight["card_id"], "card_id": self.inflight["card_id"]}}))
-        elif not await send_next():
-            return
-
-        try:
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg.get("message_type") != "card_feedback":
-                    continue
-                if msg["seq"] != session["seq"]:
-                    await ws.send(json.dumps({"error": "seq mismatch"}))
-                    continue
-                if not self.inflight or msg["card_id"] != self.inflight["card_id"]:
-                    await ws.send(json.dumps({"error": "card mismatch"}))
-                    continue
-                card_id = self.queue.pop(0)
-                if msg["rating"] == RATING_HARD:
-                    self.queue.append(card_id)  # rescheduled: comes back later in the session
-                self.inflight = None
-                await ws.send(json.dumps({"message_type": "ack", "seq": msg["seq"], "card_id": card_id}))
-                if not await send_next():
-                    return
-        except websockets.ConnectionClosed:
-            return
+AGAIN, HARD, GOOD, EASY = (int(r) for r in (LearnRating.AGAIN, LearnRating.HARD, LearnRating.GOOD, LearnRating.EASY))
 
 
 def decrypt(body, token):
@@ -99,65 +21,144 @@ def decrypt(body, token):
 
 class LearnModeTests(APITestCase):
     def setUp(self):
-        cache.clear()
         self.user = User.objects.create_user("f05", "f05@test.com", "Pass123!")
         self.token = Token.objects.create(user=self.user).key
         project = Project.objects.create(title="P", owner=self.user)
-        self.deck = Deck.objects.create(project=project, owner=self.user, title="Deck", visibility="private", external_job_id="job-f05")
+        self.deck = Deck.objects.create(project=project, owner=self.user, title="Deck", visibility="private")
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token}")
 
-    def start_service(self, cards):
-        self.service = FakeFlashcardService(cards)
-        self.addCleanup(self.service.stop)
-        patcher = patch.object(flashcards_ws, "BASE_WS", f"ws://127.0.0.1:{self.service.port}/ws/flashcards")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    def make_cards(self, n):
+        return [Flashcard.objects.create(deck=self.deck, card_id=f"c{i}", front=f"Q{i}", back=f"A{i}") for i in range(1, n + 1)]
 
-    def pull(self, last_seq):
-        r = self.client.post("/api/flashcards/ws-pull-card/", {"deck_id": self.deck.id, "last_seq": last_seq}, format="json")
-        self.assertEqual(r.status_code, 200, r.content)
-        body = r.json()
-        body = decrypt(body, self.token) if "_n" in body else body
-        return body.get("data", body)  # encrypted envelope wraps the payload in {"data": ...}
+    def call(self, path, body):
+        r = self.client.post(path, body, format="json")
+        data = r.json()
+        if "_n" in data:
+            data = decrypt(data, self.token)
+            data = data.get("data", data)
+        return r.status_code, data
 
-    def rate(self, card, rating):
-        return self.client.post("/api/flashcards/ws-push-feedback/", {
-            "deck_id": self.deck.id, "seq": card["seq"], "card_id": card["card"]["card_id"], "rating": rating,
-        }, format="json")
+    def start(self, job_id="job-1"):
+        return self.call("/api/flashcards/ws-pull-card/", {"deck_id": self.deck.id, "job_id": job_id})
 
-    def run_session(self, ratings):
-        seen, last_seq = [], 0
-        for _ in range(20):
-            data = self.pull(last_seq)
-            if data["message_type"] == "done":
-                return seen, True
-            card = data
-            seen.append(card["card"]["card_id"])
-            rating = ratings.get(len(seen), RATING_GOOD)
-            self.assertEqual(self.rate(card, rating).status_code, 200)
-            last_seq = card["seq"]
-        return seen, False
+    def answer(self, job_id, seq, card_id, rating=None, action=None):
+        body = {"deck_id": self.deck.id, "job_id": job_id, "seq": seq, "card_id": card_id, "time_to_answer_ms": 900}
+        if rating is not None:
+            body["rating"] = rating
+        if action:
+            body["action"] = action
+        return self.call("/api/flashcards/ws-push-feedback/", body)
 
-    def test_all_good_walks_every_card_once_and_ends(self):
-        self.start_service([1, 2, 3, 4, 5])
-        seen, finished = self.run_session({})
-        self.assertEqual(seen, [1, 2, 3, 4, 5])
-        self.assertTrue(finished)
+    def run_session(self, job_id, ratings=None, max_steps=30):
+        """Answer until done; returns (card ids shown, last payload)."""
+        ratings = ratings or {}
+        _, data = self.start(job_id)
+        shown, seq = [], 0
+        while data["next_card"] and len(shown) < max_steps:
+            card_id = data["next_card"]["card_id"]
+            shown.append(card_id)
+            seq += 1
+            code, data = self.answer(job_id, seq, card_id, ratings.get(len(shown), GOOD))
+            self.assertEqual(code, 200, data)
+            self.assertEqual(data["ack_seq"], seq)
+        return shown, data
 
-    def test_hard_card_comes_back_later(self):
-        self.start_service([1, 2, 3])
-        seen, finished = self.run_session({1: RATING_HARD})
-        self.assertEqual(seen, [1, 2, 3, 1])
-        self.assertTrue(finished)
+    def test_all_good_returns_five_distinct_cards_then_done(self):
+        self.make_cards(5)
+        shown, last = self.run_session("job-good")
+        self.assertEqual(shown, ["c1", "c2", "c3", "c4", "c5"])
+        self.assertIsNone(last["next_card"])
+        self.assertTrue(last["session"]["done"])
+        self.assertEqual(last["session"]["reviewed"], 5)
 
-    def test_repeated_or_older_seq_is_rejected(self):
-        self.start_service([1, 2])
-        card = self.pull(0)
-        self.assertEqual(self.rate(card, RATING_GOOD).status_code, 200)
-        self.assertEqual(self.rate(card, RATING_GOOD).status_code, 409)  # same seq again
+    def test_again_card_returns_after_at_least_three_distinct_cards(self):
+        self.make_cards(5)
+        shown, last = self.run_session("job-again", ratings={1: AGAIN})
+        self.assertEqual(shown[0], "c1")
+        again_at = shown.index("c1", 1)
+        self.assertGreaterEqual(len(set(shown[1:again_at])), 3)
+        self.assertTrue(last["session"]["done"])
 
-    def test_invalid_rating_is_400(self):
-        self.start_service([1])
-        card = self.pull(0)
-        self.assertEqual(self.rate(card, 3).status_code, 400)
-        self.assertEqual(self.rate(card, RATING_EASY).status_code, 200)
+    def test_repeated_card_is_flagged_as_review(self):
+        self.make_cards(5)
+        _, data = self.start("job-review")
+        self.assertFalse(data["next_card"]["is_review"])
+        seq, flags = 0, {}
+        while data["next_card"]:
+            seq += 1
+            card = data["next_card"]
+            flags.setdefault(card["card_id"], []).append(card["is_review"])
+            _, data = self.answer("job-review", seq, card["card_id"], HARD if seq == 1 else GOOD)
+        self.assertEqual(flags["c1"], [False, True])
+        self.assertTrue(all(v == [False] for k, v in flags.items() if k != "c1"))
+
+    def test_last_pending_card_can_repeat(self):
+        self.make_cards(1)
+        self.start("job-single")
+        _, data = self.answer("job-single", 1, "c1", AGAIN)
+        self.assertEqual(data["next_card"]["card_id"], "c1")
+        self.assertTrue(data["next_card"]["is_review"])
+
+    def test_same_seq_twice_returns_same_response_and_applies_once(self):
+        cards = self.make_cards(3)
+        _, data = self.start("job-dup")
+        first = self.answer("job-dup", 1, data["next_card"]["card_id"], GOOD)
+        second = self.answer("job-dup", 1, data["next_card"]["card_id"], GOOD)
+        self.assertEqual(first[0], 200)
+        self.assertEqual(first, second)
+        self.assertEqual(LearnAnswer.objects.filter(session__job_id="job-dup").count(), 1)
+        self.assertEqual(FlashcardSchedule.objects.get(user=self.user, card=cards[0]).reps, 1)
+
+    def test_seq_gap_returns_409_with_expected_seq(self):
+        self.make_cards(3)
+        _, data = self.start("job-gap")
+        code, body = self.answer("job-gap", 3, data["next_card"]["card_id"], GOOD)
+        self.assertEqual(code, 409)
+        self.assertEqual(body["expected_seq"], 1)
+
+    def test_rating_out_of_range_is_400(self):
+        self.make_cards(2)
+        _, data = self.start("job-400")
+        for rating in (0, 5):
+            code, _ = self.answer("job-400", 1, data["next_card"]["card_id"], rating)
+            self.assertEqual(code, 400, rating)
+        self.assertEqual(self.answer("job-400", 1, data["next_card"]["card_id"], action="nope")[0], 400)
+        self.assertEqual(self.answer("job-400", 1, data["next_card"]["card_id"])[0], 400)  # neither rating nor action
+
+    def test_two_sessions_do_not_mix_seq(self):
+        self.make_cards(3)
+        _, a = self.start("job-A")
+        _, b = self.start("job-B")
+        self.assertEqual(self.answer("job-A", 1, a["next_card"]["card_id"], GOOD)[0], 200)
+        self.assertEqual(self.answer("job-A", 2, "c2", GOOD)[0], 200)
+        code, body = self.answer("job-B", 1, b["next_card"]["card_id"], GOOD)  # B keeps its own seq
+        self.assertEqual(code, 200)
+        self.assertEqual(body["ack_seq"], 1)
+        self.assertEqual(body["next_card"]["card_id"], "c2")
+
+    def test_skip_does_not_schedule_and_requeues(self):
+        cards = self.make_cards(3)
+        self.start("job-skip")
+        code, data = self.answer("job-skip", 1, "c1", action="skip")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["next_card"]["card_id"], "c2")
+        self.assertFalse(FlashcardSchedule.objects.filter(card=cards[0]).exists())
+        self.assertEqual(data["session"]["reviewed"], 0)
+
+    def test_resume_returns_current_card_and_wrong_card_is_409(self):
+        self.make_cards(3)
+        self.start("job-resume")
+        self.answer("job-resume", 1, "c1", GOOD)
+        _, resumed = self.start("job-resume")
+        self.assertEqual((resumed["ack_seq"], resumed["next_card"]["card_id"]), (1, "c2"))
+        code, body = self.answer("job-resume", 2, "c3", GOOD)
+        self.assertEqual(code, 409)
+        self.assertEqual(body["expected_card_id"], "c2")
+
+    def test_good_schedules_next_review_in_days(self):
+        cards = self.make_cards(1)
+        self.start("job-sched")
+        self.answer("job-sched", 1, "c1", GOOD)
+        schedule = FlashcardSchedule.objects.get(user=self.user, card=cards[0])
+        self.assertEqual(schedule.state, "review")
+        self.assertGreater((schedule.due_at - schedule.last_reviewed_at).days, 2)

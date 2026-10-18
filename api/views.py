@@ -80,7 +80,7 @@ from .serializers import (
     CollectionSerializer, TagGroupSerializer,
 )
 from urllib.parse import quote, urlencode
-from .services.flashcards_ws import VALID_RATINGS, ws_get_next_card, ws_send_card_feedback
+from .services.flashcards_ws import ws_get_next_card, ws_send_card_feedback
 from api.services.plan_guard import PlanGuard
 # from .models import Tag  # UNUSED-CLEANUP (2026-10-11)
 from api.mixins import EncryptSelectedActionsMixin
@@ -111,6 +111,7 @@ from api.services.file_validation import (
 )
 from api.upload_handlers import oversize_uploads
 from .models import SummaryDocument
+from .models import LearnSession
 from django.shortcuts import get_object_or_404
 from django.core.mail import send_mail
 from api.emails.access_requests import (
@@ -2379,11 +2380,6 @@ class RuleViewSet(viewsets.ModelViewSet):
         if project_id:
             qs = qs.filter(project_id=project_id)
         return qs
-def _feedback_seq_key(user_id, job_id) -> str:
-    """Cache key of the last flashcard feedback seq acknowledged for a Learn session."""
-    return f"flashcard-feedback-seq:{user_id}:{job_id}"
-
-
 def _validate_stored_object(key: str, filename: str):
     """Stream-validate an object already in default storage. Raises FileNotFoundError / FileValidationError."""
     from django.core.files.storage import default_storage
@@ -7644,7 +7640,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         # agrega aquí si quieres cifrar acciones custom:
         "sync_from_job",
         "ws_pull_card",
-        # "ws_push_feedback",
+        "ws_push_feedback",  # also returns the next card
         # "shuffle_deck_cards",
     }
 
@@ -7806,33 +7802,18 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
-    @action(detail=False, methods=["post"], url_path="ws-pull-card", permission_classes=[IsAuthenticated])
-    def ws_pull_card(self, request):
-        """
-        POST /api/flashcards/ws-pull-card/
-        Body:
-        {
-          "deck_id": 123,          (required)
-          "job_id": "...",         (optional; default deck.external_job_id)
-          "user_id": "...",        (optional; default request.user.id)
-          "last_seq": 0,           (optional; default 0)
-          "token": ""              (optional)
-        }
-        """
-        deck_id = request.data.get("deck_id")
-        if not deck_id:
-            return Response({"detail": "deck_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+    # ------------------------------------------------------------------
+    # Learn mode (F-05): session state in the DB — see api/services/learn_session.py
+    # ------------------------------------------------------------------
 
+    def _learn_deck_or_error(self, request, deck_id):
+        """Return (deck, None) or (None, error Response) applying the Learn access rules."""
         try:
-            deck_id_int = int(deck_id)
-        except ValueError:
-            return Response({"detail": "deck_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            deck = Deck.objects.get(id=deck_id_int)
+            deck = Deck.objects.get(id=int(deck_id))
+        except (TypeError, ValueError):
+            return None, Response({"detail": "deck_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
         except Deck.DoesNotExist:
-            return Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
-
+            return None, Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
         user = request.user
         has_access = (
             deck.owner_id == user.id
@@ -7841,167 +7822,76 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             or (deck.project_id is None and user.company_memberships.exists())
         )
         if not has_access:
-            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
+            return None, Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
+        return deck, None
 
-        job_id = request.data.get("job_id") or deck.external_job_id
-        job_id = str(job_id).strip() if job_id else None
-        if not job_id:
-            return Response({"detail": "job_id is required (or deck must have external_job_id)."}, status=400)
+    @staticmethod
+    def _learn_response(payload, http_status=status.HTTP_200_OK):
+        if getattr(settings, "LEARN_DEBUG_LOG_RESPONSES", False):
+            logger.info("learn_response status=%s payload=%s", http_status, json.dumps(payload, default=str)[:4000])
+        return Response(payload, status=http_status)
 
-        user_id = request.data.get("user_id") or str(user.id) or str(uuid.uuid4())
-        last_seq = request.data.get("last_seq", 0)
-        token = request.data.get("token", "")
+    @action(detail=False, methods=["post"], url_path="ws-pull-card", permission_classes=[IsAuthenticated])
+    def ws_pull_card(self, request):
+        """
+        POST /api/flashcards/ws-pull-card/  — start (or resume) a Learn session.
+        Body: {"deck_id": 19, "job_id": "<uuid generated by the client per session>"}
+        Returns {"job_id", "ack_seq", "next_card", "session"}; next_card is the card to show.
+        """
+        from api.serializers import LearnStartSerializer
+        from api.services import learn_session
 
+        data = LearnStartSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
+        deck, error = self._learn_deck_or_error(request, data.validated_data["deck_id"])
+        if error:
+            return error
+        job_id = data.validated_data.get("job_id") or uuid.uuid4().hex
         try:
-            last_seq = int(last_seq)
-        except Exception:
-            last_seq = 0
-        if last_seq == 0:  # a new Learn session starts: forget the previous session's seq
-            from django.core.cache import cache
-            cache.delete(_feedback_seq_key(user.id, job_id))
-
-        msg = async_to_sync(ws_get_next_card)(
-            job_id=str(job_id),
-            user_id=str(user_id),
-            last_seq=int(last_seq),
-            token=str(token),
-            timeout_sec=25,
-        )
-
-        mt = msg.get("message_type")
-        if mt == "card":
-            card_payload = self._enrich_learning_card_payload(
-                deck=deck,
-                job_id=str(job_id),
-                payload=msg.get("card"),
-                request=request,
-            )
-            return Response(
-                {
-                    "message_type": "card",
-                    "job_id": str(job_id),
-                    "seq": msg.get("seq"),
-                    "kind": msg.get("kind"),  # "new" | "learning" | "review"
-                    "card": card_payload,
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        if mt == "done":
-            return Response({"message_type": "done", "job_id": str(job_id)}, status=status.HTTP_200_OK)
-
-        if mt == "error":
-            return Response(
-                {"message_type": "error", "job_id": str(job_id), "detail": msg},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        return Response({"message_type": mt, "job_id": str(job_id), "detail": msg}, status=status.HTTP_200_OK)
+            payload = learn_session.start_or_resume(user=request.user, deck=deck, job_id=job_id, request=request)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return self._learn_response(payload)
 
     @action(detail=False, methods=["post"], url_path="ws-push-feedback", permission_classes=[IsAuthenticated])
     def ws_push_feedback(self, request):
         """
-        POST /api/flashcards/ws-push-feedback/
-        Body:
-        {
-          "deck_id": 123,          (required)
-          "job_id": "...",         (optional; default deck.external_job_id)
-          "user_id": "...",        (optional; default request.user.id)
-          "seq": 10,               (required)
-          "card_id": 999,          (required)
-          "rating": 0|1|2,         (required)
-          "time_to_answer_ms": 500 (optional)
-          "token": ""              (optional)
-        }
+        POST /api/flashcards/ws-push-feedback/  — answer the current card and get the next one.
+        Body: {"deck_id", "job_id", "seq", "card_id", "rating": 1-4 | "action": "skip", "time_to_answer_ms"}
+          rating: 1 Again, 2 Hard, 3 Good, 4 Easy (LearnRating). Skip does not change the schedule.
+        seq must be last_seq + 1: a repeated seq returns the stored response (idempotent),
+        a gap returns 409 {"expected_seq"}.
+        Returns {"job_id", "ack_seq", "next_card" | null, "session"}.
         """
-        deck_id = request.data.get("deck_id")
-        if not deck_id:
-            return Response({"detail": "deck_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        from api.serializers import LearnAnswerSerializer
+        from api.services import learn_session
 
+        data = LearnAnswerSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
+        d = data.validated_data
+        deck, error = self._learn_deck_or_error(request, d["deck_id"])
+        if error:
+            return error
         try:
-            deck_id_int = int(deck_id)
-        except ValueError:
-            return Response({"detail": "deck_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            deck = Deck.objects.get(id=deck_id_int)
-        except Deck.DoesNotExist:
-            return Response({"detail": "Deck not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        user = request.user
-        has_access = (
-            deck.owner_id == user.id
-            or deck.visibility == "public"
-            or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
-            or (deck.project_id is None and user.company_memberships.exists())
-        )
-        if not has_access:
-            return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
-
-        job_id = request.data.get("job_id") or deck.external_job_id
-        job_id = str(job_id).strip() if job_id else None
-        if not job_id:
-            return Response({"detail": "job_id is required (or deck must have external_job_id)."}, status=400)
-
-        user_id = request.data.get("user_id") or str(user.id) or str(uuid.uuid4())
-
-        seq = request.data.get("seq")
-        card_id = request.data.get("card_id") or 1
-
-        rating = request.data.get("rating")
-        if seq is None or card_id is None or rating is None:
-            return Response({"detail": "seq, card_id and rating are required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            seq = int(seq)
-            card_id = card_id
-            rating = int(rating)
-        except ValueError:
-            return Response({"detail": "seq, card_id, rating must be integers"}, status=400)
-        if rating not in VALID_RATINGS:
-            return Response(
-                {"detail": "rating must be 0 (hard), 1 (good) or 2 (easy)"}, status=status.HTTP_400_BAD_REQUEST,
+            result = learn_session.answer(
+                user=request.user,
+                job_id=d["job_id"],
+                seq=d["seq"],
+                card_id=d["card_id"],
+                rating=d.get("rating"),
+                skip=d.get("action") == "skip",
+                time_to_answer_ms=d.get("time_to_answer_ms"),
+                request=request,
             )
-
-        # seq must increase within a Learn session: ignore duplicates / out-of-order feedback.
-        from django.core.cache import cache
-        seq_key = _feedback_seq_key(user.id, job_id)
-        last_seq = cache.get(seq_key)
-        if last_seq is not None and seq <= last_seq:
-            return Response(
-                {"message_type": "stale", "detail": "This card was already rated.", "last_seq": last_seq},
-                status=status.HTTP_409_CONFLICT,
+        except LearnSession.DoesNotExist:
+            return Response({"detail": "Learn session not found. Start it with ws-pull-card."}, status=status.HTTP_404_NOT_FOUND)
+        except learn_session.SeqConflict as exc:
+            return self._learn_response({"detail": "Unexpected seq.", "expected_seq": exc.expected_seq}, status.HTTP_409_CONFLICT)
+        except learn_session.CardMismatch as exc:
+            return self._learn_response(
+                {"detail": "This is not the current card.", "expected_card_id": exc.expected_card_id}, status.HTTP_409_CONFLICT,
             )
-
-        time_to_answer_ms = request.data.get("time_to_answer_ms", 500)
-        try:
-            time_to_answer_ms = int(time_to_answer_ms)
-        except Exception:
-            time_to_answer_ms = 500
-
-        token = str(request.data.get("token", ""))
-
-        msg = async_to_sync(ws_send_card_feedback)(
-            job_id=str(job_id),
-            user_id=str(user_id),
-            seq=seq,
-            card_id=card_id,
-            rating=rating,
-            time_to_answer_ms=time_to_answer_ms,
-            token=token,
-            timeout_sec=15,
-        )
-
-        mt = msg.get("message_type")
-        if mt == "ack":
-            cache.set(seq_key, seq, 6 * 60 * 60)
-            return Response({"message_type": "ok", "detail": msg}, status=status.HTTP_200_OK)
-        if mt == "error" and str(msg.get("detail", "")).endswith("mismatch"):
-            # The service no longer has this card in flight (already rated / session moved on).
-            return Response({"message_type": "stale", "detail": msg.get("detail")}, status=status.HTTP_409_CONFLICT)
-
-        return Response({"message_type": mt, "detail": msg}, status=status.HTTP_502_BAD_GATEWAY)
-    
+        return self._learn_response(result.payload)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="add-card")
     def add_card(self, request, pk=None):

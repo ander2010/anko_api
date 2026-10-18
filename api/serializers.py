@@ -3,6 +3,7 @@ import io
 import os
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import serializers
+from api.models import LearnRating
 from PIL import Image, ImageOps
 from .models import AccessRequest, ConversationMessage, SummaryJob, SupportRequest, User, Project, Document, Section, Topic, Rule, Battery, BatteryOption, BatteryQuestion,BatteryAttempt, BatteryAttemptAnswer, ProcessRun, ProcessStepRun, ProcessArtifact, Collection, TagGroup
 from django.contrib.auth import get_user_model
@@ -1557,3 +1558,28 @@ class UserNotificationSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "user", "sent_at", "created_at"]
+
+
+# ─── Learn mode (F-05) ────────────────────────────────────────────────────────
+
+class LearnStartSerializer(serializers.Serializer):
+    deck_id = serializers.IntegerField()
+    job_id = serializers.CharField(max_length=64, required=False, allow_blank=True, allow_null=True)
+
+
+class LearnAnswerSerializer(serializers.Serializer):
+    """rating uses the single LearnRating scale (1 Again, 2 Hard, 3 Good, 4 Easy); skip is an action."""
+    deck_id = serializers.IntegerField()
+    job_id = serializers.CharField(max_length=64)
+    seq = serializers.IntegerField(min_value=1)
+    card_id = serializers.CharField(max_length=255)
+    rating = serializers.ChoiceField(choices=LearnRating.choices, required=False, allow_null=True)
+    action = serializers.ChoiceField(choices=["skip"], required=False, allow_null=True)
+    time_to_answer_ms = serializers.IntegerField(min_value=0, required=False, allow_null=True)
+
+    def validate(self, attrs):
+        has_rating = attrs.get("rating") is not None
+        has_action = bool(attrs.get("action"))
+        if has_rating == has_action:
+            raise serializers.ValidationError({"rating": "Send either a rating (1-4) or action='skip'."})
+        return attrs

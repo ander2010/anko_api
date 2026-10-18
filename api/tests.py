@@ -753,11 +753,10 @@ class RbacAdminPanelTests(APITestCase):
 
     def test_ws_pull_card_enriches_learning_payload_with_image_metadata(self):
         self.client.force_authenticate(user=self.user_a)
-        self.deck_a.external_job_id = "job-learn-1"
-        self.deck_a.save(update_fields=["external_job_id"])
+        image_deck = Deck.objects.create(project=self.project_a, owner=self.user_a, title="Image deck", visibility="private")
 
         image_card = Flashcard.objects.create(
-            deck=self.deck_a,
+            deck=image_deck,
             front="Learn with image",
             back="Answer",
             job_id="job-learn-1",
@@ -769,26 +768,17 @@ class RbacAdminPanelTests(APITestCase):
             back_image_height=600,
         )
 
-        with patch("api.views.async_to_sync") as async_to_sync_mock:
-            async_to_sync_mock.return_value = lambda **kwargs: {
-                "message_type": "card",
-                "seq": 4,
-                "card": {
-                    "card_id": "pipeline-card-1",
-                    "front": "Learn with image",
-                    "back": "Answer",
-                },
-            }
-
-            response = self.client.post(
-                "/api/flashcards/ws-pull-card/",
-                {"deck_id": self.deck_a.id},
-                format="json",
-            )
+        # Learn sessions are served by anko_api from the DB (F-05).
+        response = self.client.post(
+            "/api/flashcards/ws-pull-card/",
+            {"deck_id": image_deck.id, "job_id": "learn-session-1"},
+            format="json",
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        payload = response.data["card"]
+        payload = response.data["next_card"]
         self.assertEqual(payload["id"], image_card.id)
+        self.assertEqual(payload["card_id"], "pipeline-card-1")
         self.assertEqual(payload["back_image_size_bytes"], 987)
         self.assertEqual(payload["back_image_original_size_bytes"], 1234)
         self.assertEqual(payload["back_image_width"], 600)
