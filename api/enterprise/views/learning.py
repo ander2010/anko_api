@@ -510,6 +510,8 @@ class TrainingProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             path = LearningPath.objects.get(id=learning_path_id, company=program.company)
         except LearningPath.DoesNotExist:
             raise ValidationError({"learning_path_id": "Learning path not found in this company."})
+        if path.status != "published":
+            raise ValidationError({"learning_path_id": "Only a published learning path can be used for a version."})
 
         version = EnterpriseLearningService.publish_training_program(
             program=program,

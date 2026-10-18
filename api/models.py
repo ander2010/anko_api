@@ -1742,6 +1742,7 @@ from api.enterprise_certification_models import (  # noqa: E402, F401
 # ==========================================================================
 from api.enterprise_document_intelligence_models import (  # noqa: E402, F401
     KnowledgeSource,
+    KnowledgeSourceTopic,
     DocumentVersion,
     Procedure,
     ChangeImpactAnalysis,

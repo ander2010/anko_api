@@ -671,6 +671,7 @@ class DocumentIntelligenceService:
 
         nodes = list(node_qs.values(
             "id", "title", "node_type", "description", "importance_score",
+            "source_id", "metadata",  # F-13: for the node detail panel (additive)
         ))
 
         node_ids = [n["id"] for n in nodes]

@@ -339,6 +339,8 @@ class TrainingProgramListSerializer(serializers.ModelSerializer):
     """Light serializer for list — no nested versions."""
 
     version_count = serializers.SerializerMethodField()
+    # Additive (F-10): lets the program card show its current version without the detail call.
+    current_version_number = serializers.SerializerMethodField()
     created_by_username = serializers.CharField(
         source="created_by.username", read_only=True
     )
@@ -355,6 +357,7 @@ class TrainingProgramListSerializer(serializers.ModelSerializer):
             "created_by",
             "created_by_username",
             "version_count",
+            "current_version_number",
             "created_at",
             "updated_at",
         ]
@@ -367,6 +370,10 @@ class TrainingProgramListSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_current_version_number(self, obj):
+        current = obj.versions.filter(is_current=True).order_by("-version_number").first()
+        return current.version_number if current else None
 
     def get_version_count(self, obj):
         return obj.versions.count()

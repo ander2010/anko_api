@@ -216,3 +216,47 @@ class KnowledgeGraphSerializer(serializers.Serializer):
     edge_count = serializers.IntegerField()
     nodes = serializers.ListField(child=serializers.DictField())
     relationships = serializers.ListField(child=serializers.DictField())
+
+
+# ---------------------------------------------------------------------------
+# Manual decks inside a process topic (F-08)
+# ---------------------------------------------------------------------------
+
+MAX_MANUAL_DECK_CARDS = 500  # same ceiling as /decks/start-generate/ (cards_count max 500)
+
+
+class ManualFlashcardSerializer(serializers.Serializer):
+    front = serializers.CharField(trim_whitespace=True, max_length=5000)
+    back = serializers.CharField(trim_whitespace=True, max_length=5000)
+    notes = serializers.CharField(trim_whitespace=True, required=False, allow_blank=True, default="", max_length=5000)
+
+
+class ManualDeckCreateSerializer(serializers.Serializer):
+    title = serializers.CharField(trim_whitespace=True, max_length=200)
+    description = serializers.CharField(trim_whitespace=True, required=False, allow_blank=True, default="")
+    is_public = serializers.BooleanField(required=False, default=False)
+    flashcards = ManualFlashcardSerializer(many=True, allow_empty=False, max_length=MAX_MANUAL_DECK_CARDS)
+    # Optional echo of the URL ids (kept for clients that send them in the body).
+    knowledge_source_id = serializers.IntegerField(required=False)
+    topic_id = serializers.IntegerField(required=False)
+
+
+# ---------------------------------------------------------------------------
+# Topics created by hand inside a process (F-09)
+# ---------------------------------------------------------------------------
+
+class ManualTopicSerializer(serializers.Serializer):
+    title = serializers.CharField(trim_whitespace=True, max_length=255)
+    description = serializers.CharField(trim_whitespace=True, required=False, allow_blank=True, default="")
+    tags = serializers.ListField(
+        child=serializers.CharField(trim_whitespace=True, allow_blank=True, max_length=255), required=False, default=list, max_length=50,
+    )
+
+    def validate_tags(self, value):
+        # Drop blanks and case-insensitive duplicates, keeping the first spelling.
+        seen, tags = set(), []
+        for tag in value:
+            if tag and tag.lower() not in seen:
+                seen.add(tag.lower())
+                tags.append(tag)
+        return tags

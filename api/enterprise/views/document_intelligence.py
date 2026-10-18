@@ -26,6 +26,89 @@ from api.enterprise.serializers.document_intelligence import (
 )
 
 
+def _ks_generated_topics(ks, doc_ids=None):
+    """
+    Topics (tag groups) produced by Auto-generate for a KnowledgeSource.
+
+    Every auto-generate run ever launched for a subset of this KS's currently
+    linked documents "belongs" to this process — not just the one matching the
+    exact current document set. Re-running Auto-generar after adding a new
+    document changes that exact-match key (e.g. "75" -> "75,76"), so matching
+    only the latest run made earlier topics — and anything manually added
+    under them via "+ Agregar deck/batería" — vanish from view even though
+    nothing was actually deleted. Aggregating every qualifying run keeps old
+    topics and manual content visible forever while still layering in
+    whatever a fresh Auto-generar run produces.
+
+    Returns (runs, tag_group_ids, topics) where topics is [{"id", "tags"}].
+    """
+    from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+    from api.models import ProcessRun
+
+    if doc_ids is None:
+        doc_ids = sorted(
+            KnowledgeSourceDocument.objects.filter(knowledge_source=ks).values_list("document_id", flat=True)
+        )
+    doc_id_set = set(doc_ids)
+    if not doc_id_set:
+        return [], [], []
+
+    candidate_runs = (
+        ProcessRun.objects
+        .filter(workflow_key="collection_auto_generate", resource_type="document_batch")
+        .exclude(status__in=["canceled", "cancelled", "queued", "draft"])
+        .order_by("created_at")
+    )
+    runs = []
+    for candidate in candidate_runs:
+        try:
+            run_doc_ids = {int(v) for v in candidate.resource_id.split(",") if v.strip()}
+        except ValueError:
+            continue
+        if run_doc_ids and run_doc_ids.issubset(doc_id_set):
+            runs.append(candidate)
+
+    # Tag-group artifacts across every qualifying run → used as "topics"
+    tag_group_ids: list[int] = []
+    topics = []
+    seen_tag_group_ids = set()
+    for run in runs:
+        for a in run.artifacts.filter(artifact_type="tag_group").order_by("resource_id"):
+            if a.resource_id in seen_tag_group_ids:
+                continue
+            seen_tag_group_ids.add(a.resource_id)
+            tag_group_ids.append(int(a.resource_id))
+            topics.append({"id": a.resource_id, "tags": a.payload.get("tags", [])})
+    return runs, tag_group_ids, topics
+
+
+def _manual_topic_payload(topic) -> dict:
+    """A hand-made topic in the /results/ "topics" format (plus title/description/manual)."""
+    return {
+        "id": str(topic.tag_group_id),
+        "tags": [item.value for item in topic.tag_group.items.all()],
+        "title": topic.title,
+        "description": topic.description,
+        "manual": True,
+    }
+
+
+def _ks_manual_topics(ks):
+    """Topics created by hand in this KnowledgeSource (F-09), in display order."""
+    from api.enterprise_document_intelligence_models import KnowledgeSourceTopic
+    return list(
+        KnowledgeSourceTopic.objects.filter(knowledge_source=ks)
+        .select_related("tag_group").prefetch_related("tag_group__items")
+        .order_by("order", "id")
+    )
+
+
+def _ks_topic_ids(ks) -> set:
+    """Every topic (TagGroup id) that belongs to this KnowledgeSource: generated + manual."""
+    _, tag_group_ids, _ = _ks_generated_topics(ks)
+    return set(tag_group_ids) | {t.tag_group_id for t in _ks_manual_topics(ks)}
+
+
 def _resolve_ks(company_id, ks_id):
     from api.enterprise_document_intelligence_models import KnowledgeSource
     try:
@@ -215,49 +298,19 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             .filter(knowledge_source=ks)
             .values_list("document_id", flat=True)
         )
-        if not doc_ids:
+        manual_topics = _ks_manual_topics(ks)
+        if not doc_ids and not manual_topics:
             return Response({"run": None, "batteries": [], "decks": [], "topics": []})
 
-        doc_id_set = set(doc_ids)
-
-        # Every auto-generate run ever launched for a subset of this KS's currently
-        # linked documents "belongs" to this process — not just the one matching the
-        # exact current document set. Re-running Auto-generar after adding a new
-        # document changes that exact-match key (e.g. "75" -> "75,76"), so matching
-        # only the latest run made earlier topics — and anything manually added
-        # under them via "+ Agregar deck/batería" — vanish from view even though
-        # nothing was actually deleted. Aggregating every qualifying run keeps old
-        # topics and manual content visible forever while still layering in
-        # whatever a fresh Auto-generar run produces.
-        candidate_runs = (
-            ProcessRun.objects
-            .filter(workflow_key="collection_auto_generate", resource_type="document_batch")
-            .exclude(status__in=["canceled", "cancelled", "queued", "draft"])
-            .order_by("created_at")
-        )
-        runs = []
-        for candidate in candidate_runs:
-            try:
-                run_doc_ids = {int(v) for v in candidate.resource_id.split(",") if v.strip()}
-            except ValueError:
-                continue
-            if run_doc_ids and run_doc_ids.issubset(doc_id_set):
-                runs.append(candidate)
-
-        if not runs:
+        runs, tag_group_ids, topics = _ks_generated_topics(ks, doc_ids)
+        if not runs and not manual_topics:
             return Response({"run": None, "batteries": [], "decks": [], "topics": []})
 
-        # Tag-group artifacts across every qualifying run → used as "topics"
-        tag_group_ids: list[int] = []
-        topics = []
-        seen_tag_group_ids = set()
-        for run in runs:
-            for a in run.artifacts.filter(artifact_type="tag_group").order_by("resource_id"):
-                if a.resource_id in seen_tag_group_ids:
-                    continue
-                seen_tag_group_ids.add(a.resource_id)
-                tag_group_ids.append(int(a.resource_id))
-                topics.append({"id": a.resource_id, "tags": a.payload.get("tags", [])})
+        # Topics added by hand (F-09) come after the generated ones.
+        for manual in manual_topics:
+            if manual.tag_group_id not in tag_group_ids:
+                tag_group_ids.append(manual.tag_group_id)
+                topics.append(_manual_topic_payload(manual))
 
         # Battery/deck artifacts across every qualifying run, unioned with anything
         # linked afterward via "+ Agregar deck/batería" (which links through
@@ -294,7 +347,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         )
         decks_data = DeckListSerializer(decks_qs, many=True, context={"request": request}).data
 
-        latest_run = runs[-1]
+        latest_run = runs[-1] if runs else None
         return Response({
             "run": {
                 "id": latest_run.id,
@@ -302,11 +355,147 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
                 "status": latest_run.status,
                 "progress_percent": float(latest_run.progress_percent or 0),
                 "status_message": latest_run.status_message or "",
-            },
+            } if latest_run else None,
             "batteries": batteries_data,
             "decks": decks_data,
             "topics": topics,
         })
+
+    def _save_manual_topic(self, ks, tag_group, d, *, exclude_id=None):
+        """Applies validated ManualTopicSerializer data; titles are unique per process (case-insensitive)."""
+        from api.enterprise_document_intelligence_models import KnowledgeSourceTopic
+        from api.models import TagGroup, TagGroupItem
+
+        title = d["title"]
+        _, generated_ids, _ = _ks_generated_topics(ks)
+        clash = (
+            KnowledgeSourceTopic.objects.filter(knowledge_source=ks, title__iexact=title)
+            .exclude(tag_group_id=exclude_id).exists()
+            or TagGroup.objects.filter(id__in=generated_ids, name__iexact=title).exists()
+        )
+        if clash:
+            raise ValidationError({"title": "A topic with this name already exists in this process."})
+
+        tag_group.name = title
+        tag_group.save(update_fields=["name", "updated_at"])
+        if "tags" in d:
+            tag_group.items.all().delete()
+            TagGroupItem.objects.bulk_create([
+                TagGroupItem(tag_group=tag_group, value=tag, order=i) for i, tag in enumerate(d["tags"])
+            ])
+
+    @action(detail=True, methods=["post"], url_path="topics")
+    def create_topic(self, request, pk=None):
+        """
+        POST /api/enterprise/knowledge-sources/{id}/topics/?company_id=
+        {"title", "description"?, "tags"?: [str]} -> 201 topic in the /results/ "topics" format.
+        The topic is a TagGroup, so "+ Add deck/battery" link to it like any generated topic.
+        """
+        from django.db import transaction
+        from django.db.models import Max
+        from api.enterprise.serializers.document_intelligence import ManualTopicSerializer
+        from api.enterprise_document_intelligence_models import KnowledgeSourceTopic
+        from api.models import TagGroup
+
+        company, membership = self._resolve_company_membership()
+        self._require_trainer(membership)
+        ks = _resolve_ks(company.id, pk)
+        ser = ManualTopicSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        d = ser.validated_data
+
+        with transaction.atomic():
+            last = KnowledgeSourceTopic.objects.filter(knowledge_source=ks).aggregate(m=Max("order"))["m"]
+            tag_group = TagGroup.objects.create(name=d["title"], metadata={"knowledge_source_id": ks.id, "manual": True})
+            self._save_manual_topic(ks, tag_group, d)
+            topic = KnowledgeSourceTopic.objects.create(
+                knowledge_source=ks, tag_group=tag_group, title=d["title"],
+                description=d.get("description", ""), order=(last or 0) + 1, created_by=request.user,
+            )
+        from api.enterprise.services.knowledge_graph_builder import safe_build
+        safe_build(ks)  # F-13
+        return Response(_manual_topic_payload(topic), status=201)
+
+    @action(detail=True, methods=["patch"], url_path=r"topics/(?P<topic_id>\d+)")
+    def update_topic(self, request, pk=None, topic_id=None):
+        """PATCH /api/enterprise/knowledge-sources/{id}/topics/{topic_id}/ — edits a hand-made topic."""
+        from django.db import transaction
+        from api.enterprise.serializers.document_intelligence import ManualTopicSerializer
+        from api.enterprise_document_intelligence_models import KnowledgeSourceTopic
+
+        company, membership = self._resolve_company_membership()
+        self._require_trainer(membership)
+        ks = _resolve_ks(company.id, pk)
+        topic = (
+            KnowledgeSourceTopic.objects.select_related("tag_group")
+            .filter(knowledge_source=ks, tag_group_id=int(topic_id)).first()
+        )
+        if topic is None:
+            raise NotFound("Topic not found in this process (only hand-made topics can be edited).")
+
+        ser = ManualTopicSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        d = dict(ser.validated_data)
+        d.setdefault("title", topic.title)
+        with transaction.atomic():
+            self._save_manual_topic(ks, topic.tag_group, d, exclude_id=topic.tag_group_id)
+            topic.title = d["title"]
+            if "description" in d:
+                topic.description = d["description"]
+            topic.save(update_fields=["title", "description", "updated_at"])
+        from api.enterprise.services.knowledge_graph_builder import safe_build
+        safe_build(ks)  # F-13
+        topic = KnowledgeSourceTopic.objects.prefetch_related("tag_group__items").get(pk=topic.pk)
+        return Response(_manual_topic_payload(topic))
+
+    @action(detail=True, methods=["post"], url_path=r"topics/(?P<topic_id>\d+)/decks")
+    def create_topic_deck(self, request, pk=None, topic_id=None):
+        """
+        POST /api/enterprise/knowledge-sources/{id}/topics/{topic_id}/decks/?company_id=
+        Manual deck (F-08): {"title", "description"?, "is_public"?, "flashcards": [{"front", "back", "notes"?}]}
+        Same Deck/Flashcard models and topic link (DeckSourceTagGroup) as AI decks.
+        201 -> deck in the /results/ format (DeckListSerializer) + "flashcards".
+        """
+        from django.db import transaction
+        from api.enterprise.serializers.document_intelligence import ManualDeckCreateSerializer
+        from api.models import Deck, Flashcard, TagGroup
+        from api.serializers import DeckListSerializer, FlashcardSerializer
+        from api.services.auto_generate_workflow import sync_deck_source_links
+
+        company, membership = self._resolve_company_membership()
+        self._require_trainer(membership)
+        ks = _resolve_ks(company.id, pk)
+        topic_id = int(topic_id)
+        if topic_id not in _ks_topic_ids(ks):
+            raise NotFound("Topic not found in this process.")
+
+        data = ManualDeckCreateSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
+        d = data.validated_data
+        if d.get("knowledge_source_id") not in (None, ks.id) or d.get("topic_id") not in (None, topic_id):
+            raise ValidationError({"detail": "knowledge_source_id/topic_id do not match the URL."})
+
+        topic = TagGroup.objects.get(pk=topic_id)
+        with transaction.atomic():
+            deck = Deck.objects.create(
+                project=None,
+                collection=None,
+                owner=request.user,
+                title=d["title"],
+                description=d.get("description", ""),
+                visibility="public" if d.get("is_public") else "private",
+            )
+            Flashcard.objects.bulk_create([
+                Flashcard(deck=deck, front=c["front"], back=c["back"], notes=c.get("notes", ""))
+                for c in d["flashcards"]
+            ])
+            sync_deck_source_links(deck=deck, source_bundle={"tag_group_ids": [str(topic.id)]})
+
+        payload = DeckListSerializer(deck, context={"request": request}).data
+        payload["flashcards"] = FlashcardSerializer(
+            deck.cards.order_by("created_at", "id"), many=True, context={"request": request}
+        ).data
+        return Response(payload, status=201)
 
     @action(detail=True, methods=["get"], url_path="documents-with-sections")
     def documents_with_sections(self, request, pk=None):
@@ -594,6 +783,37 @@ class KnowledgeGraphViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
 
         data = DocumentIntelligenceService.get_knowledge_graph(company, ks)
         return Response(KnowledgeGraphSerializer(data).data)
+
+    @action(detail=False, methods=["post"], url_path="rebuild")
+    def rebuild(self, request):
+        """
+        POST /api/enterprise/knowledge-graph/rebuild/?company_id=[&knowledge_source_id=]
+        F-13: rebuilds the structure graph (process, topics, tags, procedures) of one
+        process or of every process in the company. Trainer role or higher.
+        """
+        company = self._get_company()
+        membership = validate_company_access(request.user, company.id)
+        if membership.role not in ("owner", "admin", "trainer", "manager"):
+            raise PermissionDenied("Trainer role or higher required.")
+        from api.enterprise.services.knowledge_graph_builder import build_knowledge_graph
+        from api.enterprise_document_intelligence_models import KnowledgeSource
+
+        qs = KnowledgeSource.objects.filter(company=company)
+        ks_id = request.query_params.get("knowledge_source_id") or request.data.get("knowledge_source_id")
+        if ks_id:
+            qs = qs.filter(pk=ks_id)
+            if not qs.exists():
+                raise NotFound("KnowledgeSource not found.")
+        results = [build_knowledge_graph(ks) for ks in qs]
+        graph = DocumentIntelligenceService.get_knowledge_graph(company, qs.first() if ks_id else None)
+        return Response({
+            "processes": len(results),
+            "nodes_created": sum(r["nodes_created"] for r in results),
+            "nodes_updated": sum(r["nodes_updated"] for r in results),
+            "nodes_deleted": sum(r["nodes_deleted"] for r in results),
+            "node_count": graph["node_count"],
+            "edge_count": graph["edge_count"],
+        })
 
     @action(detail=False, methods=["get"], url_path="nodes")
     def nodes(self, request):
