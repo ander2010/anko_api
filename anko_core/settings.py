@@ -51,7 +51,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-!@@uw(j#in54g*gx_ky!yh7c9k4z1zu2d_z67)fhw@v)t$spxp'
+# C7: set DJANGO_SECRET_KEY in production (the value below is public in the repo and only kept as a
+# default so nothing breaks before the variable exists). DJANGO_SECRET_KEY_FALLBACKS (comma-separated)
+# keeps the previous key valid during a rotation.
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or 'django-insecure-!@@uw(j#in54g*gx_ky!yh7c9k4z1zu2d_z67)fhw@v)t$spxp'
+SECRET_KEY_FALLBACKS = [k for k in os.getenv("DJANGO_SECRET_KEY_FALLBACKS", "").split(",") if k]
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
@@ -385,6 +389,16 @@ CSRF_TRUSTED_ORIGINS = CSRF_TRUSTED_ORIGINS
 # Required for cross-site cookie-based CSRF in modern browsers
 CSRF_COOKIE_SAMESITE = "None"
 CSRF_COOKIE_SECURE = True
+
+# C7: transport security, off by default (TLS ends at the proxy); enable per environment.
+SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0") or 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("SECURE_HSTS_INCLUDE_SUBDOMAINS", "false").lower() == "true"
+SECURE_HSTS_PRELOAD = os.getenv("SECURE_HSTS_PRELOAD", "false").lower() == "true"
+SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", "false").lower() == "true"
+if os.getenv("SECURE_PROXY_SSL_HEADER", "").lower() == "true":
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
 SESSION_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = True
 
@@ -413,7 +427,8 @@ EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 
 EMAIL_HOST_USER = "info@ankard.com"
-EMAIL_HOST_PASSWORD = "BigShark16!"
+# C7: set EMAIL_HOST_PASSWORD in the environment and rotate this password (it is in git history).
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD") or "BigShark16!"
 
 DEFAULT_FROM_EMAIL = "Ankard <info@ankard.com>"
 
