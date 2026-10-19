@@ -206,6 +206,13 @@ class KnowledgeSourceTopic(models.Model):
     class Meta:
         db_table = "enterprise_knowledge_source_topics"
         ordering = ["order", "id"]
+        constraints = [
+            # C8: same rule the API already applies (topic names unique per process, case-insensitive).
+            models.UniqueConstraint(
+                models.F("knowledge_source"), models.functions.Lower("title"),
+                name="uniq_ks_topic_title_ci",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.title} ({self.knowledge_source_id})"
