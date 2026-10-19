@@ -101,6 +101,7 @@ class KnowledgeSourceSerializer(serializers.Serializer):
                 "added_at": link.added_at.isoformat(),
                 "added_by": link.added_by.username if link.added_by else None,
                 "version_note": link.version_note,
+                "quarantined": link.document.quarantined_at is not None,  # B2 (additive)
             }
             for link in links
         ]

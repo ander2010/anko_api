@@ -541,6 +541,9 @@ def create_auto_generate_run(*, initiated_by, documents: list[Document], payload
         status_message="Queued for automatic generation",
         started_at=now,
     )
+    # 14: the process(es) of these documents are now processing (never raises).
+    from api.enterprise.services.process_status import mark_processing
+    mark_processing([document.id for document in documents])
     return run
 
 
@@ -1149,7 +1152,11 @@ def _finalize_run_summary(*, run: ProcessRun, dispatch_errors: list[dict[str, An
     # F-13: refresh the knowledge graph of the process(es) these documents belong to.
     # sync_graph_for_documents logs and swallows its own errors.
     from api.enterprise.services.knowledge_graph_builder import sync_graph_for_documents
-    sync_graph_for_documents([v for v in str(run.resource_id or "").split(",") if v.strip().isdigit()])
+    run_doc_ids = [v for v in str(run.resource_id or "").split(",") if v.strip().isdigit()]
+    sync_graph_for_documents(run_doc_ids)
+    # 14: processing -> processed / failed (never raises).
+    from api.enterprise.services.process_status import mark_finished
+    mark_finished(run_doc_ids, final_status, finalize_message)
     return final_status
 
 

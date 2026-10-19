@@ -519,7 +519,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             .values_list("document_id", flat=True)
         )
         docs = (
-            Document.objects.filter(id__in=list(doc_ids))
+            Document.objects.filter(id__in=list(doc_ids), quarantined_at__isnull=True)  # B2: never generate from quarantined files
             .prefetch_related(Prefetch("sections", queryset=Section.objects.all().order_by("order", "id")))
             .order_by("id")
         )

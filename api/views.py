@@ -2242,7 +2242,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         return Document.objects.filter(
             Q(project__owner=user) | Q(project__members=user)
-        ).distinct()
+        ).filter(quarantined_at__isnull=True).distinct()  # B2: quarantined files are never listed or served
 
 
 class SectionViewSet(viewsets.ModelViewSet):
@@ -9166,6 +9166,11 @@ class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
                 {"detail": "Some documents were not found or are not accessible", "missing_document_ids": missing_ids},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        # B2: quarantined files are never sent to generation.
+        documents = [document for document in documents if document.quarantined_at is None]
+        if not documents:
+            return Response({"detail": "All selected documents are quarantined."}, status=status.HTTP_400_BAD_REQUEST)
+        normalized["document_ids"] = [document.id for document in documents]
 
         try:
             process_run = create_auto_generate_run(
