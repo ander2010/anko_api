@@ -109,6 +109,51 @@ def _ks_topic_ids(ks) -> set:
     return set(tag_group_ids) | {t.tag_group_id for t in _ks_manual_topics(ks)}
 
 
+def _ks_output_ids(runs, tag_group_ids):
+    """
+    Battery/deck artifacts across every qualifying run, unioned with anything
+    linked afterward via "+ Agregar deck/batería" (which links through
+    BatterySourceTagGroup/DeckSourceTagGroup to one of these tag_groups but
+    was never registered as an artifact of any run). Returns (deck_ids, battery_ids).
+    """
+    from api.models import BatterySourceTagGroup, DeckSourceTagGroup
+
+    battery_ids = set()
+    deck_ids = set()
+    for run in runs:
+        battery_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="battery"))
+        deck_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="deck"))
+    if tag_group_ids:
+        battery_ids |= set(
+            BatterySourceTagGroup.objects
+            .filter(tag_group_id__in=tag_group_ids)
+            .values_list("battery_id", flat=True)
+        )
+        deck_ids |= set(
+            DeckSourceTagGroup.objects
+            .filter(tag_group_id__in=tag_group_ids)
+            .values_list("deck_id", flat=True)
+        )
+    return deck_ids, battery_ids
+
+
+def ks_content_counts(ks) -> dict:
+    """15: {"topics", "decks", "batteries"} of a process — what its learning-path row shows."""
+    from api.models import Battery, Deck
+
+    runs, tag_group_ids, topics = _ks_generated_topics(ks)
+    for manual in _ks_manual_topics(ks):
+        if manual.tag_group_id not in tag_group_ids:
+            tag_group_ids.append(manual.tag_group_id)
+            topics.append(manual)
+    deck_ids, battery_ids = _ks_output_ids(runs, tag_group_ids)
+    return {
+        "topics": len(topics),
+        "decks": Deck.objects.filter(id__in=deck_ids).count() if deck_ids else 0,
+        "batteries": Battery.objects.filter(id__in=battery_ids).count() if battery_ids else 0,
+    }
+
+
 def _results_summary(ks, topics, decks, batteries) -> dict:
     """
     14: the one source for the process header counters, the "Ready" banner and
@@ -333,26 +378,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
                 tag_group_ids.append(manual.tag_group_id)
                 topics.append(_manual_topic_payload(manual))
 
-        # Battery/deck artifacts across every qualifying run, unioned with anything
-        # linked afterward via "+ Agregar deck/batería" (which links through
-        # BatterySourceTagGroup/DeckSourceTagGroup to one of these tag_groups but
-        # was never registered as an artifact of any run).
-        battery_ids = set()
-        deck_ids = set()
-        for run in runs:
-            battery_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="battery"))
-            deck_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="deck"))
-        if tag_group_ids:
-            battery_ids |= set(
-                BatterySourceTagGroup.objects
-                .filter(tag_group_id__in=tag_group_ids)
-                .values_list("battery_id", flat=True)
-            )
-            deck_ids |= set(
-                DeckSourceTagGroup.objects
-                .filter(tag_group_id__in=tag_group_ids)
-                .values_list("deck_id", flat=True)
-            )
+        deck_ids, battery_ids = _ks_output_ids(runs, tag_group_ids)
 
         # Respect manual display order set via /batteries/reorder/ and /decks/reorder/
         # (same convention as the /batteries/?tag_group= and /decks/?tag_group= querysets).
