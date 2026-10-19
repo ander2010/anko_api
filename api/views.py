@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hmac
+
+from api.throttles import AIGenerationUserRateThrottle, AuthAnonRateThrottle, with_default_throttles  # C3
+
 from api.services.content_access import user_can_access_company_content, user_can_manage_company_content  # (C1/C2)
 from api.services.generation_text import keep_user_casing  # (16)
 
@@ -150,7 +154,19 @@ def _validate_internal_service_token(request) -> bool:
         or request.query_params.get("token")
         or request.data.get("token")
     )
-    return bool(token) and token == _get_internal_service_token()
+    # C3: constant-time comparison.
+    return bool(token) and hmac.compare_digest(str(token), str(_get_internal_service_token()))
+
+
+def _admin_bootstrap_token_ok(request) -> bool:
+    """
+    C3: /auth/users/ and /auth/make-admin/ used the hard-coded SECRET_TOKEN ("andelef"), so
+    anyone could list every user or make themselves a platform admin. They now need the
+    ADMIN_BOOTSTRAP_TOKEN environment variable (no default, >= 32 chars); without it they are off.
+    """
+    expected = os.getenv("ADMIN_BOOTSTRAP_TOKEN", "")
+    token = request.query_params.get("token") or request.data.get("token") or ""
+    return len(expected) >= 32 and bool(token) and hmac.compare_digest(str(token), expected)
 
 
 def _generate_pdf_owner_password() -> str:
@@ -195,17 +211,13 @@ class AuthViewSet(viewsets.GenericViewSet):
 
 
     def _validate_internal_token(self, request):
-        token = (
-            request.query_params.get("token") or
-            request.data.get("token")
-        )
-        return token == SECRET_TOKEN
+        return _admin_bootstrap_token_ok(request)  # C3
 
 
     @action(detail=False, methods=["get"], permission_classes=[AllowAny], url_path="users")
     def list_users(self, request):
         if not self._validate_internal_token(request):
-            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
         qs = User.objects.all().order_by("-date_joined", "-id")
 
@@ -222,7 +234,7 @@ class AuthViewSet(viewsets.GenericViewSet):
     @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="make-admin")
     def make_admin(self, request):
         if not self._validate_internal_token(request):
-            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
         user_id = request.data.get("user_id")
         username = request.data.get("username")
@@ -270,10 +282,18 @@ class AuthViewSet(viewsets.GenericViewSet):
         user.set_password(new_password)  # ✅ HASH
         user.save(update_fields=["password"])
 
-        # (opcional) invalidar tokens existentes
+        # C3: every existing token is invalidated; the caller gets a fresh one (additive "token")
+        # so this session keeps working while other devices are signed out.
         Token.objects.filter(user=user).delete()
+        new_token = Token.objects.create(user=user)
 
-        return Response({"ok": True}, status=status.HTTP_200_OK)
+        return Response({"ok": True, "token": new_token.key}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="logout")
+    def logout(self, request):
+        """C3: POST /api/auth/logout/ deletes the caller's token on the server."""
+        Token.objects.filter(user=request.user).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
         
     @staticmethod
@@ -300,7 +320,8 @@ class AuthViewSet(viewsets.GenericViewSet):
 
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="resend-verification")
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="resend-verification",
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def resend_verification(self, request):
         email = (request.data.get("username") or "").strip().lower()
         if not email:
@@ -338,7 +359,8 @@ class AuthViewSet(viewsets.GenericViewSet):
 
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="verify-email")
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="verify-email",
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def verify_email(self, request):
         raw_token = request.data.get("token")
 
@@ -377,7 +399,8 @@ class AuthViewSet(viewsets.GenericViewSet):
         )
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny])
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny],
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def register(self, request):
         data = request.data
 
@@ -430,7 +453,8 @@ class AuthViewSet(viewsets.GenericViewSet):
         )
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny])
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny],
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def login(self, request):
         username = (request.data.get("username") or "").strip()
         password = (request.data.get("password") or "").strip()
@@ -4060,7 +4084,8 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
 
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate")
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     @transaction.atomic
     def start_generate(self, request):
         """
@@ -6462,7 +6487,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         # PlanGuard.assert_flashcards_allowed(user=request.user)
 
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate")
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     @transaction.atomic
     def start_generate(self, request):
         PlanGuard.assert_flashcards_allowed(user=request.user)
@@ -8588,11 +8614,13 @@ class RBACViewSet(viewsets.ViewSet):
 
 
 class GoogleLoginView(SocialLoginView):
+    throttle_classes = with_default_throttles(AuthAnonRateThrottle)  # C3
     permission_classes = [AllowAny]
     adapter_class = GoogleOAuth2Adapter
 
 
 class FacebookLoginView(SocialLoginView):
+    throttle_classes = with_default_throttles(AuthAnonRateThrottle)  # C3
     permission_classes = [AllowAny]
     adapter_class = FacebookOAuth2Adapter
 
@@ -8630,6 +8658,7 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class FrontendPasswordResetView(PasswordResetView):
+        throttle_classes = with_default_throttles(AuthAnonRateThrottle)  # C3
         permission_classes = [AllowAny]
         authentication_classes = [] 
 
@@ -9148,7 +9177,8 @@ class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(obj)
         return Response(serializer.data)
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="auto-generate")
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="auto-generate",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     @transaction.atomic
     def auto_generate(self, request):
         try:

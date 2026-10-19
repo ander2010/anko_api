@@ -8,6 +8,8 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from api.throttles import AIGenerationUserRateThrottle, with_default_throttles
+
 from api.enterprise.services.document_intelligence_service import (
     DocumentIntelligenceService,
 )
@@ -833,7 +835,8 @@ class KnowledgeGraphViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         data = DocumentIntelligenceService.get_knowledge_graph(company, ks)
         return Response(KnowledgeGraphSerializer(data).data)
 
-    @action(detail=False, methods=["post"], url_path="rebuild")
+    @action(detail=False, methods=["post"], url_path="rebuild",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     def rebuild(self, request):
         """
         POST /api/enterprise/knowledge-graph/rebuild/?company_id=[&knowledge_source_id=]

@@ -6,4 +6,5 @@ class ApiConfig(AppConfig):
     name = 'api'
     def ready(self):
         
-        import api.signals  
+        import api.signals
+        import api.checks  # noqa: F401  (C3/C7 deploy checks)  

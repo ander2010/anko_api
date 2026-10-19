@@ -282,6 +282,10 @@ REST_FRAMEWORK = {
         'user_burst': os.getenv("DRF_THROTTLE_USER_BURST", "120/min"),
         'user_sustained': os.getenv("DRF_THROTTLE_USER_SUSTAINED", "2000/hour"),
         'anon_lead': os.getenv("DRF_THROTTLE_ANON_LEAD", "5/hour"),
+        # C3: scoped limits (api/throttles.py)
+        'auth': os.getenv("DRF_THROTTLE_AUTH", "10/min"),
+        'invitations': os.getenv("DRF_THROTTLE_INVITATIONS", "60/hour"),
+        'ai_generation': os.getenv("DRF_THROTTLE_AI_GENERATION", "120/hour"),
     },
     'NUM_PROXIES': int(os.getenv("DRF_NUM_PROXIES", "0")),
 }
@@ -366,6 +370,10 @@ SITE_NAME = "Ankard"
 DOMAIN = "ankard.com"
 EMAIL_SUBJECT_PREFIX = ""
 ACCOUNT_EMAIL_SUBJECT_PREFIX  = ""
+# C3: token lifetime in hours. 0 (default) = tokens never expire (current behavior).
+# Turning it on signs out users whose token is older than this: see the rollout plan in the PR.
+TOKEN_TTL_HOURS = float(os.getenv("TOKEN_TTL_HOURS", "0") or 0)
+
 REST_AUTH = {
     "SESSION_LOGIN": False,
     "PASSWORD_RESET_SERIALIZER": "api.serializers.FrontendPasswordResetSerializer",
