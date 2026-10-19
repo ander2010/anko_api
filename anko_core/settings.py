@@ -51,10 +51,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-# C7: set DJANGO_SECRET_KEY in production (the value below is public in the repo and only kept as a
-# default so nothing breaks before the variable exists). DJANGO_SECRET_KEY_FALLBACKS (comma-separated)
-# keeps the previous key valid during a rotation.
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or 'django-insecure-!@@uw(j#in54g*gx_ky!yh7c9k4z1zu2d_z67)fhw@v)t$spxp'
+# C7: the key only comes from the environment (DJANGO_SECRET_KEY). Without it a random key is
+# generated at start-up: the app keeps running (auth uses DB tokens), but password-reset links
+# stop working after a restart, and `check --deploy` reports anko.E001.
+# DJANGO_SECRET_KEY_FALLBACKS (comma-separated) keeps previous keys valid during a rotation.
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    import secrets as _secrets
+    import warnings as _warnings
+    SECRET_KEY = _secrets.token_urlsafe(64)
+    _warnings.warn("DJANGO_SECRET_KEY is not set: using a random key for this process only.", RuntimeWarning)
 SECRET_KEY_FALLBACKS = [k for k in os.getenv("DJANGO_SECRET_KEY_FALLBACKS", "").split(",") if k]
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -427,8 +433,8 @@ EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 
 EMAIL_HOST_USER = "info@ankard.com"
-# C7: set EMAIL_HOST_PASSWORD in the environment and rotate this password (it is in git history).
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD") or "BigShark16!"
+# C7: only from the environment (never in the code). Empty = e-mail cannot be sent (check --deploy: anko.E002).
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 
 DEFAULT_FROM_EMAIL = "Ankard <info@ankard.com>"
 
