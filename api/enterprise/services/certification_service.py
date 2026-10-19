@@ -132,9 +132,11 @@ class CertificationService:
                     f"required by template '{template.code}'."
                 )
 
+        # 13: one timestamp for both, so expiry is exactly issued + validity_days.
+        issued_at = timezone.now()
         expires_at = None
         if template.validity_days > 0:
-            expires_at = timezone.now() + datetime.timedelta(days=template.validity_days)
+            expires_at = issued_at + datetime.timedelta(days=template.validity_days)
 
         cert = Certification.objects.create(
             company=company,
@@ -142,7 +144,7 @@ class CertificationService:
             template=template,
             status="active",
             score=score,
-            issued_at=timezone.now(),
+            issued_at=issued_at,
             expires_at=expires_at,
             issued_by=issued_by,
             learning_path=learning_path,
@@ -493,4 +495,8 @@ class CertificationService:
             ),
             "score": str(certification.score) if certification.score is not None else None,
             "status": certification.status,
+            # 13 (additive): full UTC timestamps so every screen shows the same local day
+            # ("issued_at"/"expires_at" above are the UTC calendar day and stay as they were).
+            "issued_at_iso": certification.issued_at.isoformat(),
+            "expires_at_iso": certification.expires_at.isoformat() if certification.expires_at else None,
         }

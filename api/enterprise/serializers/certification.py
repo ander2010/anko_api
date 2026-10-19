@@ -231,5 +231,8 @@ class CertificateDataSerializer(serializers.Serializer):
     company_name = serializers.CharField()
     issued_at = serializers.CharField()
     expires_at = serializers.CharField(allow_null=True)
+    # 13 (additive): full UTC timestamps; issued_at/expires_at above stay the UTC calendar day.
+    issued_at_iso = serializers.CharField(required=False, allow_null=True)
+    expires_at_iso = serializers.CharField(required=False, allow_null=True)
     score = serializers.CharField(allow_null=True)
     status = serializers.CharField()
