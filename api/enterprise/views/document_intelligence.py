@@ -272,6 +272,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             cards_per_group=d.get("cards_per_group", 20),
             questions_per_group=d.get("questions_per_group", 15),
             question_format=d.get("question_format", "multiple_choice"),
+            language=d.get("language", ""),  # 16: "" = use the language detected in the documents
             status="pending",
             created_by=request.user,
         )

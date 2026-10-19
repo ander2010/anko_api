@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from api.services.content_access import user_can_access_company_content, user_can_manage_company_content  # (C1/C2)
+from api.services.generation_text import keep_user_casing  # (16)
+
+
+def _generation_language_metadata(document_ids) -> dict:
+    """16: same language metadata as Auto-generate for the "+ Add deck/battery" (AI) requests."""
+    from api.services.auto_generate_workflow import _run_generation_metadata
+    return _run_generation_metadata([d for d in document_ids if str(d).strip().isdigit()])
 from django.conf import settings
 from api.utils.subscriptionstouser import ensure_free_subscription_for_user
 from dj_rest_auth.views import PasswordResetView
@@ -3424,7 +3431,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             if result.get("questions_created", 0) > 0:
                 battery.status = "Ready"
                 if title:
-                    battery.name = title
+                    battery.name = keep_user_casing(battery.name, title)
                 if not getattr(battery, "external_job_id", None):
                     battery.external_job_id = str(job_id)
                     update_fields = ["status", "external_job_id"]
@@ -3473,6 +3480,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         if job_id and battery.external_job_id != job_id:
             battery.external_job_id = job_id
             update_fields.append("external_job_id")
+        title = keep_user_casing(battery.name, title)  # 16
         if title and battery.name != title:
             battery.name = title
             update_fields.append("name")
@@ -4190,6 +4198,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 "title_hints": derived_tags[:6],
             },
             "metadata": {
+                **_generation_language_metadata(document_ids),  # 16
                 "project_id": project_id,
                 "rule_id": rule.id if rule else None,
                 "section_ids": [section.id for section in sections],
@@ -4260,6 +4269,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         # guarda job_id en battery (si añadiste el field)
         battery.external_job_id = ws_job_id
         update_fields = ["external_job_id"]
+        resolved_title = keep_user_casing(battery.name, resolved_title)  # 16
         if resolved_title and resolved_title != battery.name:
             battery.name = resolved_title
             update_fields.append("name")
@@ -6646,6 +6656,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             "difficulty": difficulty,
             "source_bundle": source_bundle,
             "metadata": {
+                **_generation_language_metadata(source_bundle.get("document_ids") or []),  # 16
                 "project_id": project.id if project else None,
                 "collection_id": collection.id if collection else None,
                 "callback_url": _build_internal_callback_url(
@@ -6715,6 +6726,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if deck.external_job_id != ws_job_id:
             deck.external_job_id = ws_job_id
             update_fields.append("external_job_id")
+        resolved_title = keep_user_casing(deck.title, resolved_title)  # 16
         if resolved_title and resolved_title != deck.title:
             deck.title = resolved_title
             update_fields.append("title")
@@ -7457,6 +7469,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if job_id and deck.external_job_id != job_id:
             deck.external_job_id = job_id
             update_fields.append("external_job_id")
+        title = keep_user_casing(deck.title, title)  # 16
         if title and deck.title != title:
             deck.title = title
             update_fields.append("title")

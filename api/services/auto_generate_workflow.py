@@ -256,15 +256,21 @@ def _title_case(text: str) -> str:
 
 
 def _fallback_output_title(*, tags: list[str], kind: str, index: int) -> str:
-    hints = [_title_case(tag) for tag in tags[:3] if str(tag).strip()]
-    if hints:
-        base = " ".join(hints)
-        if kind == "battery":
-            return f"{base} Assessment"
-        if kind == "flashcards":
-            return f"{base} Flashcards"
-        return base
-    return f"{'Assessment' if kind == 'battery' else 'Flashcards'} Set {index}"
+    # 16: a short, topic-based title (<= 60 chars) instead of "Tag1 Tag2 Tag3 Flashcards".
+    from api.services.generation_text import short_title
+    return short_title(tags=tags, kind=kind, index=index)
+
+
+def _run_generation_metadata(document_ids) -> dict:
+    """16: language of the run's documents (process setting first) for the generation `metadata`."""
+    try:
+        from api.enterprise.services.process_status import processes_for_documents
+        from api.services.generation_text import generation_metadata, language_for_documents
+        processes = processes_for_documents(document_ids)
+        return generation_metadata(language_for_documents(document_ids, processes[0] if processes else None))
+    except Exception:  # noqa: BLE001 - never block generation on language detection
+        logger.exception("language detection failed for documents %s", document_ids)
+        return {}
 
 
 def _derive_unique_tags(*, documents: list[Document]) -> list[str]:
@@ -1283,6 +1289,12 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
     for document in documents:
         if Document.objects.filter(id=document.id).exists():
             Document.objects.filter(id=document.id).update(status="ready", processing_error=None)
+            # 16: remember the language of the processed text (never blocks the run).
+            try:
+                from api.services.generation_text import document_language
+                document_language(Document.objects.get(id=document.id))
+            except Exception:  # noqa: BLE001
+                logger.exception("language detection failed for document %s", document.id)
 
     run = _refresh_run(run_id)
     aggregate_step = _step_by_key(run, AUTO_STAGE_KEYS["aggregate"])
@@ -1466,6 +1478,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             "difficulty": flashcard_options["difficulty"],
             "source_bundle": source_bundle,
             "metadata": {
+                **_run_generation_metadata(document_ids),  # 16
                 "run_id": str(run.run_id),
                 "tag_group_id": tag_group_id,
                 "group_index": group_index,
@@ -1524,6 +1537,7 @@ def orchestrate_auto_generate_run(*, run_id: int, timeout_seconds: float = 7200.
             "question_format": battery_options["question_format"],
             "source_bundle": source_bundle,
             "metadata": {
+                **_run_generation_metadata(document_ids),  # 16
                 "run_id": str(run.run_id),
                 "tag_group_id": tag_group_id,
                 "group_index": group_index,
