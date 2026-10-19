@@ -174,8 +174,9 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Document
-        fields = "__all__"  # mantiene todos tus campos
-        # + agrega filename y url porque son fields extra
+        # Same fields as before ("__all__") + filename/url; C6: except the internal B2
+        # quarantine details (original storage key / reason), which are not for the UI.
+        exclude = ["quarantine_original_key", "quarantine_reason"]
 
     def validate_file(self, value):
         # Direct API create/update must pass the same checks as the upload views.

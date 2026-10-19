@@ -239,11 +239,12 @@ class Certification(models.Model):
 
     @staticmethod
     def _generate_verification_code() -> str:
-        import random
+        import secrets
         import string
         alphabet = string.ascii_uppercase + string.digits
         while True:
-            code = "".join(random.choices(alphabet, k=12))
+            # C6: cryptographically secure (random.choices is predictable); same alphabet and length.
+            code = "".join(secrets.choice(alphabet) for _ in range(12))
             if not Certification.objects.filter(verification_code=code).exists():
                 return code
 

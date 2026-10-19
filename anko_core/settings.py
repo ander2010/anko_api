@@ -286,6 +286,7 @@ REST_FRAMEWORK = {
         'auth': os.getenv("DRF_THROTTLE_AUTH", "10/min"),
         'invitations': os.getenv("DRF_THROTTLE_INVITATIONS", "60/hour"),
         'ai_generation': os.getenv("DRF_THROTTLE_AI_GENERATION", "120/hour"),
+        'verify': os.getenv("DRF_THROTTLE_VERIFY", "30/min"),
     },
     'NUM_PROXIES': int(os.getenv("DRF_NUM_PROXIES", "0")),
 }

@@ -43,6 +43,11 @@ class AIGenerationUserRateThrottle(UserRateThrottle):
     scope = "ai_generation"
 
 
+class VerifyAnonRateThrottle(AnonRateThrottle):
+    """C6: public certificate verification (QR / Verify), per IP."""
+    scope = "verify"
+
+
 def with_default_throttles(*extra):
     from rest_framework.settings import api_settings
     return [*api_settings.DEFAULT_THROTTLE_CLASSES, *extra]

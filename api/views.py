@@ -5024,11 +5024,11 @@ class InviteViewSet(viewsets.ModelViewSet):
         try:
             invite = Invite.objects.select_related("battery_to_share").get(token=token)
         except Invite.DoesNotExist:
-            logger.info("invite accept not_found token=%s", token)
+            logger.info("invite accept not_found token=%s", f"{str(token)[:4]}…")  # C6: never log the full token
             return Response({"detail": "Invite not found"}, status=status.HTTP_404_NOT_FOUND)
 
         if not invite.is_valid():
-            logger.info("invite accept invalid token=%s", token)
+            logger.info("invite accept invalid token=%s", f"{str(token)[:4]}…")  # C6: never log the full token
             return Response({"detail": "Invite is not valid (expired/revoked/accepted)"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Si está autenticado, registramos accepted_by

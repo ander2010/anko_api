@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from api.throttles import VerifyAnonRateThrottle, with_default_throttles
+
 from decimal import Decimal, InvalidOperation
 
 from rest_framework import status, viewsets
@@ -348,6 +350,7 @@ class CertificationVerifyViewSet(viewsets.ViewSet):
     GET /api/enterprise/verify/<identifier>/
     """
     permission_classes = [AllowAny]
+    throttle_classes = with_default_throttles(VerifyAnonRateThrottle)  # C6
 
     def retrieve(self, request, pk=None):
         result = CertificationService.verify_certificate(pk)
