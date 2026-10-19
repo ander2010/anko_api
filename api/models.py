@@ -404,6 +404,13 @@ class Document(models.Model):
     hash = models.CharField(max_length=64, db_index=True)  # NO unique global
     job_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="uploaded_documents")
+    # Round 3 (additive, migration 0061):
+    # 16 - detected language of the text (ISO 639-1, e.g. "es"); "" = unknown.
+    language = models.CharField(max_length=12, blank=True, default="")
+    # B2 - files uploaded before the upload validator existed that it would reject today.
+    quarantined_at = models.DateTimeField(null=True, blank=True)
+    quarantine_reason = models.CharField(max_length=255, blank=True, default="")
+    quarantine_original_key = models.CharField(max_length=500, blank=True, default="")
     
     def save(self, *args, **kwargs):
         if self.file and not self.size:

@@ -8,6 +8,8 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from api.throttles import AIGenerationUserRateThrottle, with_default_throttles
+
 from api.enterprise.services.document_intelligence_service import (
     DocumentIntelligenceService,
 )
@@ -109,6 +111,72 @@ def _ks_topic_ids(ks) -> set:
     return set(tag_group_ids) | {t.tag_group_id for t in _ks_manual_topics(ks)}
 
 
+def _ks_output_ids(runs, tag_group_ids):
+    """
+    Battery/deck artifacts across every qualifying run, unioned with anything
+    linked afterward via "+ Agregar deck/batería" (which links through
+    BatterySourceTagGroup/DeckSourceTagGroup to one of these tag_groups but
+    was never registered as an artifact of any run). Returns (deck_ids, battery_ids).
+    """
+    from api.models import BatterySourceTagGroup, DeckSourceTagGroup
+
+    battery_ids = set()
+    deck_ids = set()
+    for run in runs:
+        battery_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="battery"))
+        deck_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="deck"))
+    if tag_group_ids:
+        battery_ids |= set(
+            BatterySourceTagGroup.objects
+            .filter(tag_group_id__in=tag_group_ids)
+            .values_list("battery_id", flat=True)
+        )
+        deck_ids |= set(
+            DeckSourceTagGroup.objects
+            .filter(tag_group_id__in=tag_group_ids)
+            .values_list("deck_id", flat=True)
+        )
+    return deck_ids, battery_ids
+
+
+def ks_content_counts(ks) -> dict:
+    """15: {"topics", "decks", "batteries"} of a process — what its learning-path row shows."""
+    from api.models import Battery, Deck
+
+    runs, tag_group_ids, topics = _ks_generated_topics(ks)
+    for manual in _ks_manual_topics(ks):
+        if manual.tag_group_id not in tag_group_ids:
+            tag_group_ids.append(manual.tag_group_id)
+            topics.append(manual)
+    deck_ids, battery_ids = _ks_output_ids(runs, tag_group_ids)
+    return {
+        "topics": len(topics),
+        "decks": Deck.objects.filter(id__in=deck_ids).count() if deck_ids else 0,
+        "batteries": Battery.objects.filter(id__in=battery_ids).count() if battery_ids else 0,
+    }
+
+
+def _results_summary(ks, topics, decks, batteries) -> dict:
+    """
+    14: the one source for the process header counters, the "Ready" banner and
+    "Process completion". Completion averages the user's best finished attempt of
+    every battery (0 when not attempted); a battery counts as completed when that
+    best score is >= the process minimum_passing_score.
+    """
+    passing = ks.minimum_passing_score if ks.minimum_passing_score is not None else 70
+    best = [float((b.get("best_attempt") or {}).get("percent") or 0) for b in batteries]
+    return {
+        "topics": len(topics),
+        "decks": len(decks),
+        "batteries": len(batteries),
+        "questions": sum(int(b.get("question_count") or 0) for b in batteries),
+        "cards": sum(int(d.get("cardsCount") or d.get("card_count") or 0) for d in decks),
+        "passing_score": passing,
+        "completed_batteries": sum(1 for pct in best if pct >= passing),
+        "completion_percent": round(sum(best) / len(best)) if best else 0,
+    }
+
+
 def _resolve_ks(company_id, ks_id):
     from api.enterprise_document_intelligence_models import KnowledgeSource
     try:
@@ -206,6 +274,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             cards_per_group=d.get("cards_per_group", 20),
             questions_per_group=d.get("questions_per_group", 15),
             question_format=d.get("question_format", "multiple_choice"),
+            language=d.get("language", ""),  # 16: "" = use the language detected in the documents
             status="pending",
             created_by=request.user,
         )
@@ -312,26 +381,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
                 tag_group_ids.append(manual.tag_group_id)
                 topics.append(_manual_topic_payload(manual))
 
-        # Battery/deck artifacts across every qualifying run, unioned with anything
-        # linked afterward via "+ Agregar deck/batería" (which links through
-        # BatterySourceTagGroup/DeckSourceTagGroup to one of these tag_groups but
-        # was never registered as an artifact of any run).
-        battery_ids = set()
-        deck_ids = set()
-        for run in runs:
-            battery_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="battery"))
-            deck_ids |= set(int(a.resource_id) for a in run.artifacts.filter(artifact_type="deck"))
-        if tag_group_ids:
-            battery_ids |= set(
-                BatterySourceTagGroup.objects
-                .filter(tag_group_id__in=tag_group_ids)
-                .values_list("battery_id", flat=True)
-            )
-            deck_ids |= set(
-                DeckSourceTagGroup.objects
-                .filter(tag_group_id__in=tag_group_ids)
-                .values_list("deck_id", flat=True)
-            )
+        deck_ids, battery_ids = _ks_output_ids(runs, tag_group_ids)
 
         # Respect manual display order set via /batteries/reorder/ and /decks/reorder/
         # (same convention as the /batteries/?tag_group= and /decks/?tag_group= querysets).
@@ -359,6 +409,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             "batteries": batteries_data,
             "decks": decks_data,
             "topics": topics,
+            "summary": _results_summary(ks, topics, decks_data, batteries_data),  # 14 (additive)
         })
 
     def _save_manual_topic(self, ks, tag_group, d, *, exclude_id=None):
@@ -519,7 +570,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             .values_list("document_id", flat=True)
         )
         docs = (
-            Document.objects.filter(id__in=list(doc_ids))
+            Document.objects.filter(id__in=list(doc_ids), quarantined_at__isnull=True)  # B2: never generate from quarantined files
             .prefetch_related(Prefetch("sections", queryset=Section.objects.all().order_by("order", "id")))
             .order_by("id")
         )
@@ -784,7 +835,8 @@ class KnowledgeGraphViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
         data = DocumentIntelligenceService.get_knowledge_graph(company, ks)
         return Response(KnowledgeGraphSerializer(data).data)
 
-    @action(detail=False, methods=["post"], url_path="rebuild")
+    @action(detail=False, methods=["post"], url_path="rebuild",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     def rebuild(self, request):
         """
         POST /api/enterprise/knowledge-graph/rebuild/?company_id=[&knowledge_source_id=]

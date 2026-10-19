@@ -108,6 +108,8 @@ class KnowledgeSource(TenantMixin):
     )
     metadata = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True)
+    # 16 - language of the generated content (ISO 639-1). "" = use the language detected in its documents.
+    language = models.CharField(max_length=12, blank=True, default="")
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -204,6 +206,13 @@ class KnowledgeSourceTopic(models.Model):
     class Meta:
         db_table = "enterprise_knowledge_source_topics"
         ordering = ["order", "id"]
+        constraints = [
+            # C8: same rule the API already applies (topic names unique per process, case-insensitive).
+            models.UniqueConstraint(
+                models.F("knowledge_source"), models.functions.Lower("title"),
+                name="uniq_ks_topic_title_ci",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"{self.title} ({self.knowledge_source_id})"

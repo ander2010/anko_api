@@ -196,8 +196,8 @@ class ComplianceService:
         else:
             is_compliant = True
 
-        # Expiry date = today + validity_days
-        expires_at = datetime.date.today() + datetime.timedelta(days=program.validity_days)
+        # Expiry date = today + validity_days (13: calendar arithmetic on Django's local date, not the OS clock)
+        expires_at = timezone.localdate() + datetime.timedelta(days=program.validity_days)
         valid_until = expires_at
 
         review_status = "passed" if is_compliant else "failed"

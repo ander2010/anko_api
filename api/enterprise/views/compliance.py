@@ -144,6 +144,12 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     def activate(self, request, pk=None):
         program = self.get_object()
         self._require_permission("enterprise.ent-compliance-programs", "manage")
+        # 17: an expired program cannot be activated.
+        from django.utils import timezone as tz
+        if program.expiry_date and program.expiry_date < tz.localdate():
+            raise ValidationError({"expiry_date": "This program has already expired. Update the expiry date before activating it."})
+        if program.effective_date and program.expiry_date and program.expiry_date <= program.effective_date:
+            raise ValidationError({"expiry_date": "Expiry date must be after the effective date."})
         program.status = "active"
         program.save(update_fields=["status", "updated_at"])
         return Response(ComplianceProgramSerializer(program).data)
@@ -174,27 +180,23 @@ class ComplianceRequirementViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet
             qs = qs.filter(program_id=program_id)
         return qs
 
+    def _require_requirement_permission(self, company_id):
+        from api.enterprise.services.rbac_service import require_permission
+        require_permission(self.request.user, company_id, "enterprise.ent-compliance-programs", "manage")
+
     def perform_create(self, serializer):
         program = serializer.validated_data.get("program")
-        try:
-            validate_company_access(self.request.user, program.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        # C2: same write permission as the program (membership alone let employees/auditors edit).
+        self._require_requirement_permission(program.company_id)
         serializer.save()
 
     def perform_update(self, serializer):
         program = serializer.instance.program
-        try:
-            validate_company_access(self.request.user, program.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        self._require_requirement_permission(program.company_id)  # C2
         serializer.save()
 
     def perform_destroy(self, instance):
-        try:
-            validate_company_access(self.request.user, instance.program.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        self._require_requirement_permission(instance.program.company_id)  # C2
         instance.delete()
 
 

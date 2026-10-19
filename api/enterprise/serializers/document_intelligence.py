@@ -39,12 +39,22 @@ class KnowledgeSourceCreateSerializer(serializers.Serializer):
         required=False, allow_null=True, min_value=1
     )
     # Auto-generation preferences — used as defaults when auto-generate runs
+    # 17: same 1-500 bounds the Auto-generate pipeline already clamps to.
     cards_per_group = serializers.IntegerField(
-        required=False, default=20, min_value=1
+        required=False, default=20, min_value=1, max_value=500
     )
     questions_per_group = serializers.IntegerField(
-        required=False, default=15, min_value=1
+        required=False, default=15, min_value=1, max_value=500
     )
+    # 16: language of the generated content (ISO 639-1); "" = detect from the documents.
+    language = serializers.CharField(required=False, allow_blank=True, default="", max_length=12)
+
+    def validate_language(self, value):
+        from api.services.generation_text import LANGUAGE_NAMES
+        value = (value or "").strip().lower()
+        if value and value not in LANGUAGE_NAMES:
+            raise serializers.ValidationError(f"Unsupported language. Use one of: {', '.join(sorted(LANGUAGE_NAMES))}.")
+        return value
     question_format = serializers.ChoiceField(
         choices=["true_false", "multiple_choice", "variety"],
         default="multiple_choice",
@@ -69,6 +79,8 @@ class KnowledgeSourceSerializer(serializers.Serializer):
     cards_per_group = serializers.IntegerField()
     questions_per_group = serializers.IntegerField()
     question_format = serializers.CharField()
+    language = serializers.CharField(required=False, default="")  # 16 (additive)
+    detected_language = serializers.SerializerMethodField()  # 16 (additive)
     extracted_topics_count = serializers.IntegerField()
     extracted_procedures_count = serializers.IntegerField()
     generated_training_id = serializers.IntegerField(allow_null=True)
@@ -82,6 +94,14 @@ class KnowledgeSourceSerializer(serializers.Serializer):
 
     def get_document_filename(self, obj) -> str:
         return obj.document.filename if obj.document_id else ""
+
+    def get_detected_language(self, obj) -> str:
+        """Most common language of the process documents (stored, not re-detected here)."""
+        from collections import Counter
+        from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+        codes = [c for c in KnowledgeSourceDocument.objects.filter(knowledge_source=obj)
+                 .values_list("document__language", flat=True) if c]
+        return Counter(codes).most_common(1)[0][0] if codes else ""
 
     def get_documents(self, obj) -> list:
         from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
@@ -101,6 +121,7 @@ class KnowledgeSourceSerializer(serializers.Serializer):
                 "added_at": link.added_at.isoformat(),
                 "added_by": link.added_by.username if link.added_by else None,
                 "version_note": link.version_note,
+                "quarantined": link.document.quarantined_at is not None,  # B2 (additive)
             }
             for link in links
         ]

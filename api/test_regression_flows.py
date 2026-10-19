@@ -248,3 +248,79 @@ class R10InvitationsAndTeams(RegressionBase):
         team = self.post("/api/enterprise/teams/", {"name": "Reg Team", "company": self.company.id})
         self.assertEqual(team.status_code, 201, team.content)
         self.assertTrue(Team.objects.filter(name="Reg Team", company=self.company).exists())
+
+
+# ---------------------------------------------------------------------------
+# Round 3 (fix/data-quality-security-oct-2026): the 10 flows of the brief, extended.
+# ---------------------------------------------------------------------------
+
+class R01bRenamedExecutable(RegressionBase):
+    def test_md_ok_and_exe_renamed_to_pdf_is_415(self):
+        ks = self.make_ks()
+        url = f"/api/enterprise/knowledge-sources/{ks['id']}/add-document/"
+        ok = self.post(url, {"file": SimpleUploadedFile("guide.md", b"# Safety\n\nWear helmets.\n")}, format="multipart")
+        self.assertEqual(ok.status_code, 201, ok.content)
+        bad = self.post(url, {"file": SimpleUploadedFile("invoice.pdf", EXE)}, format="multipart")
+        self.assertEqual(bad.status_code, 415)
+
+
+class R03bLearnRatingsAndReview(R03LearnStudySimulate):
+    def test_hard_card_returns_after_three_cards_marked_review(self):
+        data = self._decrypt(self.client.post("/api/flashcards/ws-pull-card/", {"deck_id": self.deck.id, "job_id": "reg-hard"}, format="json"))
+        shown, reviews, seq = [], [], 0
+        while data["next_card"] and seq < 20:
+            card = data["next_card"]
+            shown.append(card["card_id"])
+            reviews.append(card.get("is_review"))
+            seq += 1
+            data = self._decrypt(self.client.post("/api/flashcards/ws-push-feedback/", {
+                "deck_id": self.deck.id, "job_id": "reg-hard", "seq": seq, "card_id": card["card_id"],
+                "rating": 2 if seq == 1 else 3,
+            }, format="json"))
+        first = shown[0]
+        again = shown.index(first, 1)
+        self.assertGreaterEqual(len(set(shown[1:again])), 3)
+        self.assertTrue(reviews[again])
+        self.assertTrue(data["session"]["done"])
+
+    # Inherited flows already run in R03.
+    test_learn_five_good_then_session_complete = None
+    test_study_lists_every_card = None
+    test_simulate_scores_answers = None
+
+
+class R04bManualDeckInGeneratedAndManualTopics(RegressionBase):
+    def test_manual_deck_in_both_kinds_of_topic(self):
+        from api.enterprise.tests.process_fixtures import make_process_with_generated_topic
+        ks, generated, _, _ = make_process_with_generated_topic(self.company, self.owner, title="Reg topics")
+        manual = self.post(f"/api/enterprise/knowledge-sources/{ks.id}/topics/", {"title": "Reg manual topic"})
+        self.assertEqual(manual.status_code, 201, manual.content)
+        for topic_id in (generated.id, manual.data["id"]):
+            r = self.post(f"/api/enterprise/knowledge-sources/{ks.id}/topics/{topic_id}/decks/", {
+                "title": f"Deck {topic_id}", "flashcards": [{"front": "Q", "back": "A"}]})
+            self.assertEqual(r.status_code, 201, r.content)
+        results = self.get(f"/api/enterprise/knowledge-sources/{ks.id}/results/").data
+        self.assertEqual(len(results["decks"]), 2)
+
+
+class R07bTrainingProgramVersion(RegressionBase):
+    def test_publish_version(self):
+        path = self.post("/api/enterprise/learning-paths/", {"name": "Reg Version Path"}).data
+        self.post(f"/api/enterprise/learning-paths/{path['id']}/publish/")
+        program = self.post("/api/enterprise/training-programs/", {"name": "Reg Versioned"}).data
+        r = self.post(f"/api/enterprise/training-programs/{program['id']}/publish/", {"learning_path_id": path["id"]})
+        self.assertEqual(r.status_code, 201, r.content)
+
+
+class R10bReportsLoad(RegressionBase):
+    def test_invitations_team_reports_and_graph_load(self):
+        team = Team.objects.create(company=self.company, name="Reg Report Team")
+        for url in (
+            f"/api/enterprise/companies/{self.company.id}/invitations/",
+            f"/api/enterprise/retention/team-retention/?team_id={team.id}",
+            f"/api/enterprise/compliance-assignments/team-compliance/?team_id={team.id}",
+            "/api/enterprise/knowledge-graph/graph/",
+        ):
+            sep = "&" if "?" in url else "?"
+            r = self.client.get(f"{url}{sep}company_id={self.company.id}")
+            self.assertEqual(r.status_code, 200, f"{url}: {r.status_code} {r.content[:200]}")

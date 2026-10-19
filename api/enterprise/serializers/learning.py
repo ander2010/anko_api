@@ -61,6 +61,21 @@ class LearningModuleItemSerializer(serializers.ModelSerializer):
 # LearningModule
 # ---------------------------------------------------------------------------
 
+def _live_process_numbers(data, ks):
+    """
+    15: a module that wraps a process shows the process's real numbers, not the
+    module's own defaults: minimum_passing_score of the process, and item_count =
+    decks + batteries of the process (module items are not used by these modules).
+    content_counts (additive) breaks it down into topics / decks / batteries.
+    """
+    from api.enterprise.views.document_intelligence import ks_content_counts
+
+    counts = ks_content_counts(ks)
+    data["minimum_passing_score"] = ks.minimum_passing_score
+    data["item_count"] = counts["decks"] + counts["batteries"]
+    data["content_counts"] = counts
+
+
 class LearningModuleSerializer(serializers.ModelSerializer):
     items = LearningModuleItemSerializer(many=True, read_only=True)
     item_count = serializers.SerializerMethodField()
@@ -115,6 +130,7 @@ class LearningModuleSerializer(serializers.ModelSerializer):
             data["name"] = ks.title
             if ks.description:
                 data["description"] = ks.description
+            _live_process_numbers(data, ks)
         return data
 
 
@@ -148,6 +164,7 @@ class LearningModuleLightSerializer(serializers.ModelSerializer):
             data["name"] = ks.title
             if ks.description:
                 data["description"] = ks.description
+            _live_process_numbers(data, ks)
         return data
 
     def get_item_count(self, obj):

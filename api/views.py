@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+import hmac
+
+from api.throttles import AIGenerationUserRateThrottle, AuthAnonRateThrottle, with_default_throttles  # C3
+
+from api.services.content_access import user_can_access_company_content, user_can_manage_company_content  # (C1/C2)
+from api.services.generation_text import keep_user_casing  # (16)
+
+
+def _generation_language_metadata(document_ids) -> dict:
+    """16: same language metadata as Auto-generate for the "+ Add deck/battery" (AI) requests."""
+    from api.services.auto_generate_workflow import _run_generation_metadata
+    return _run_generation_metadata([d for d in document_ids if str(d).strip().isdigit()])
 from django.conf import settings
 from api.utils.subscriptionstouser import ensure_free_subscription_for_user
 from dj_rest_auth.views import PasswordResetView
@@ -142,7 +154,19 @@ def _validate_internal_service_token(request) -> bool:
         or request.query_params.get("token")
         or request.data.get("token")
     )
-    return bool(token) and token == _get_internal_service_token()
+    # C3: constant-time comparison.
+    return bool(token) and hmac.compare_digest(str(token), str(_get_internal_service_token()))
+
+
+def _admin_bootstrap_token_ok(request) -> bool:
+    """
+    C3: /auth/users/ and /auth/make-admin/ used the hard-coded SECRET_TOKEN ("andelef"), so
+    anyone could list every user or make themselves a platform admin. They now need the
+    ADMIN_BOOTSTRAP_TOKEN environment variable (no default, >= 32 chars); without it they are off.
+    """
+    expected = os.getenv("ADMIN_BOOTSTRAP_TOKEN", "")
+    token = request.query_params.get("token") or request.data.get("token") or ""
+    return len(expected) >= 32 and bool(token) and hmac.compare_digest(str(token), expected)
 
 
 def _generate_pdf_owner_password() -> str:
@@ -187,17 +211,13 @@ class AuthViewSet(viewsets.GenericViewSet):
 
 
     def _validate_internal_token(self, request):
-        token = (
-            request.query_params.get("token") or
-            request.data.get("token")
-        )
-        return token == SECRET_TOKEN
+        return _admin_bootstrap_token_ok(request)  # C3
 
 
     @action(detail=False, methods=["get"], permission_classes=[AllowAny], url_path="users")
     def list_users(self, request):
         if not self._validate_internal_token(request):
-            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
         qs = User.objects.all().order_by("-date_joined", "-id")
 
@@ -214,7 +234,7 @@ class AuthViewSet(viewsets.GenericViewSet):
     @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="make-admin")
     def make_admin(self, request):
         if not self._validate_internal_token(request):
-            return Response({"detail": "Not allowed"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
         user_id = request.data.get("user_id")
         username = request.data.get("username")
@@ -262,10 +282,18 @@ class AuthViewSet(viewsets.GenericViewSet):
         user.set_password(new_password)  # ✅ HASH
         user.save(update_fields=["password"])
 
-        # (opcional) invalidar tokens existentes
+        # C3: every existing token is invalidated; the caller gets a fresh one (additive "token")
+        # so this session keeps working while other devices are signed out.
         Token.objects.filter(user=user).delete()
+        new_token = Token.objects.create(user=user)
 
-        return Response({"ok": True}, status=status.HTTP_200_OK)
+        return Response({"ok": True, "token": new_token.key}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="logout")
+    def logout(self, request):
+        """C3: POST /api/auth/logout/ deletes the caller's token on the server."""
+        Token.objects.filter(user=request.user).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
         
     @staticmethod
@@ -292,7 +320,8 @@ class AuthViewSet(viewsets.GenericViewSet):
 
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="resend-verification")
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="resend-verification",
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def resend_verification(self, request):
         email = (request.data.get("username") or "").strip().lower()
         if not email:
@@ -330,7 +359,8 @@ class AuthViewSet(viewsets.GenericViewSet):
 
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="verify-email")
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny], url_path="verify-email",
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def verify_email(self, request):
         raw_token = request.data.get("token")
 
@@ -369,7 +399,8 @@ class AuthViewSet(viewsets.GenericViewSet):
         )
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny])
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny],
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def register(self, request):
         data = request.data
 
@@ -422,7 +453,8 @@ class AuthViewSet(viewsets.GenericViewSet):
         )
 
 
-    @action(detail=False, methods=["post"], permission_classes=[AllowAny])
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny],
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))
     def login(self, request):
         username = (request.data.get("username") or "").strip()
         password = (request.data.get("password") or "").strip()
@@ -2241,7 +2273,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         return Document.objects.filter(
             Q(project__owner=user) | Q(project__members=user)
-        ).distinct()
+        ).filter(quarantined_at__isnull=True).distinct()  # B2: quarantined files are never listed or served
 
 
 class SectionViewSet(viewsets.ModelViewSet):
@@ -2522,6 +2554,14 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        user = self.request.user
+        if not _is_rbac_admin_user(user):
+            # C1: only batteries the user may see (it used to be every battery on the platform).
+            from api.services.content_access import company_battery_ids
+            qs = qs.filter(
+                Q(project__owner=user) | Q(collection__owner=user) | Q(visibility="public")
+                | Q(shares__shared_with=user) | Q(project__isnull=True, id__in=company_battery_ids(user))
+            ).distinct()
         if getattr(self, "action", None) in {"list", "my"}:
             qs = qs.annotate(question_count=Count("questions_rel", distinct=True))
         project_id = self.request.query_params.get("project")
@@ -2597,7 +2637,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             (battery.project_id is not None and battery.project is not None and battery.project.owner_id == user.id)
             or battery.visibility == "public"
             or battery.shares.filter(shared_with=user).exists()
-            or (battery.project_id is None and user.company_memberships.exists())
+            or (battery.project_id is None and user_can_access_company_content(user, battery=battery))
         )
         if not has_access:
             return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
@@ -2656,12 +2696,20 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         )
         return Response(ser.data)
 
+    def perform_update(self, serializer):
+        # C2: a project-less (company) battery can only be edited with the content permission.
+        battery = serializer.instance
+        if battery.project_id is None and not _is_rbac_admin_user(self.request.user) \
+                and not user_can_manage_company_content(self.request.user, battery=battery):
+            raise PermissionDenied("You do not have permission to edit this battery.")
+        serializer.save()
+
     def destroy(self, request, *args, **kwargs):
         battery = self.get_object()
         user = request.user
         has_access = (
             (battery.project_id is not None and battery.project.owner_id == user.id)
-            or (battery.project_id is None and user.company_memberships.exists())
+            or (battery.project_id is None and user_can_manage_company_content(user, battery=battery))
         )
         if not has_access:
             return Response({"detail": "No tienes permiso para eliminar esta batería."}, status=status.HTTP_403_FORBIDDEN)
@@ -2684,7 +2732,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             (battery.project_id is not None and battery.project is not None and battery.project.owner_id == user.id)
             or battery.visibility == "public"
             or battery.shares.filter(shared_with=user).exists()
-            or (battery.project_id is None and user.company_memberships.exists())
+            or (battery.project_id is None and user_can_access_company_content(user, battery=battery))
         )
         if not has_access:
             return Response({"detail": "You do not have access to this battery."}, status=status.HTTP_403_FORBIDDEN)
@@ -3407,7 +3455,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             if result.get("questions_created", 0) > 0:
                 battery.status = "Ready"
                 if title:
-                    battery.name = title
+                    battery.name = keep_user_casing(battery.name, title)
                 if not getattr(battery, "external_job_id", None):
                     battery.external_job_id = str(job_id)
                     update_fields = ["status", "external_job_id"]
@@ -3456,6 +3504,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         if job_id and battery.external_job_id != job_id:
             battery.external_job_id = job_id
             update_fields.append("external_job_id")
+        title = keep_user_casing(battery.name, title)  # 16
         if title and battery.name != title:
             battery.name = title
             update_fields.append("name")
@@ -4035,7 +4084,8 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
 
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate")
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     @transaction.atomic
     def start_generate(self, request):
         """
@@ -4173,6 +4223,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
                 "title_hints": derived_tags[:6],
             },
             "metadata": {
+                **_generation_language_metadata(document_ids),  # 16
                 "project_id": project_id,
                 "rule_id": rule.id if rule else None,
                 "section_ids": [section.id for section in sections],
@@ -4243,6 +4294,7 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         # guarda job_id en battery (si añadiste el field)
         battery.external_job_id = ws_job_id
         update_fields = ["external_job_id"]
+        resolved_title = keep_user_casing(battery.name, resolved_title)  # 16
         if resolved_title and resolved_title != battery.name:
             battery.name = resolved_title
             update_fields.append("name")
@@ -4972,11 +5024,11 @@ class InviteViewSet(viewsets.ModelViewSet):
         try:
             invite = Invite.objects.select_related("battery_to_share").get(token=token)
         except Invite.DoesNotExist:
-            logger.info("invite accept not_found token=%s", token)
+            logger.info("invite accept not_found token=%s", f"{str(token)[:4]}…")  # C6: never log the full token
             return Response({"detail": "Invite not found"}, status=status.HTTP_404_NOT_FOUND)
 
         if not invite.is_valid():
-            logger.info("invite accept invalid token=%s", token)
+            logger.info("invite accept invalid token=%s", f"{str(token)[:4]}…")  # C6: never log the full token
             return Response({"detail": "Invite is not valid (expired/revoked/accepted)"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Si está autenticado, registramos accepted_by
@@ -6435,7 +6487,8 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         # PlanGuard.assert_flashcards_allowed(user=request.user)
 
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate")
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="start-generate",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     @transaction.atomic
     def start_generate(self, request):
         PlanGuard.assert_flashcards_allowed(user=request.user)
@@ -6629,6 +6682,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
             "difficulty": difficulty,
             "source_bundle": source_bundle,
             "metadata": {
+                **_generation_language_metadata(source_bundle.get("document_ids") or []),  # 16
                 "project_id": project.id if project else None,
                 "collection_id": collection.id if collection else None,
                 "callback_url": _build_internal_callback_url(
@@ -6698,6 +6752,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if deck.external_job_id != ws_job_id:
             deck.external_job_id = ws_job_id
             update_fields.append("external_job_id")
+        resolved_title = keep_user_casing(deck.title, resolved_title)  # 16
         if resolved_title and resolved_title != deck.title:
             deck.title = resolved_title
             update_fields.append("title")
@@ -7440,6 +7495,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if job_id and deck.external_job_id != job_id:
             deck.external_job_id = job_id
             update_fields.append("external_job_id")
+        title = keep_user_casing(deck.title, title)  # 16
         if title and deck.title != title:
             deck.title = title
             update_fields.append("title")
@@ -7733,7 +7789,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
-            or (deck.project_id is None and user.company_memberships.exists())
+            or (deck.project_id is None and user_can_access_company_content(user, deck=deck))
         )
         if not has_access:
             return Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
@@ -7819,7 +7875,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or DeckShare.objects.filter(deck=deck, shared_with=user).exists()
-            or (deck.project_id is None and user.company_memberships.exists())
+            or (deck.project_id is None and user_can_access_company_content(user, deck=deck))
         )
         if not has_access:
             return None, Response({"detail": "You do not have access to this deck."}, status=status.HTTP_403_FORBIDDEN)
@@ -8086,7 +8142,7 @@ class FlashcardViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
             deck.owner_id == user.id
             or deck.visibility == "public"
             or deck.shares.filter(shared_with=user).exists()
-            or (deck.project_id is None and user.company_memberships.exists())
+            or (deck.project_id is None and user_can_access_company_content(user, deck=deck))
         )
         if not has_access:
             raise PermissionDenied("You do not have access to this deck.")
@@ -8558,11 +8614,13 @@ class RBACViewSet(viewsets.ViewSet):
 
 
 class GoogleLoginView(SocialLoginView):
+    throttle_classes = with_default_throttles(AuthAnonRateThrottle)  # C3
     permission_classes = [AllowAny]
     adapter_class = GoogleOAuth2Adapter
 
 
 class FacebookLoginView(SocialLoginView):
+    throttle_classes = with_default_throttles(AuthAnonRateThrottle)  # C3
     permission_classes = [AllowAny]
     adapter_class = FacebookOAuth2Adapter
 
@@ -8600,6 +8658,7 @@ class SupportRequestViewSet(viewsets.ModelViewSet):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class FrontendPasswordResetView(PasswordResetView):
+        throttle_classes = with_default_throttles(AuthAnonRateThrottle)  # C3
         permission_classes = [AllowAny]
         authentication_classes = [] 
 
@@ -9118,7 +9177,8 @@ class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = self.get_serializer(obj)
         return Response(serializer.data)
 
-    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="auto-generate")
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated], url_path="auto-generate",
+            throttle_classes=with_default_throttles(AIGenerationUserRateThrottle))  # C3
     @transaction.atomic
     def auto_generate(self, request):
         try:
@@ -9149,6 +9209,11 @@ class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
                 {"detail": "Some documents were not found or are not accessible", "missing_document_ids": missing_ids},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        # B2: quarantined files are never sent to generation.
+        documents = [document for document in documents if document.quarantined_at is None]
+        if not documents:
+            return Response({"detail": "All selected documents are quarantined."}, status=status.HTTP_400_BAD_REQUEST)
+        normalized["document_ids"] = [document.id for document in documents]
 
         try:
             process_run = create_auto_generate_run(

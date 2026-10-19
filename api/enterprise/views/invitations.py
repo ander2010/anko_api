@@ -12,6 +12,8 @@ Endpoints:
 """
 from __future__ import annotations
 
+from api.throttles import AuthAnonRateThrottle, InvitationUserRateThrottle, with_default_throttles
+
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -57,6 +59,13 @@ class CompanyInvitationViewSet(viewsets.ViewSet):
     Manages invitations within a specific company.
     All actions require owner or admin role (or is_staff).
     """
+
+    def get_throttles(self):
+        # C3: sending/resending invitations (e-mails) has its own per-user limit.
+        throttles = super().get_throttles()
+        if getattr(self, "action", None) in ("create", "resend"):
+            throttles.append(InvitationUserRateThrottle())
+        return throttles
 
     permission_classes = [IsAuthenticated]
 
@@ -177,7 +186,8 @@ class InvitationActionViewSet(viewsets.ViewSet):
         return Response(InvitationSerializer(qs, many=True).data)
 
     # GET /enterprise/invitations/validate/?token=XYZ
-    @action(detail=False, methods=["get"], permission_classes=[AllowAny])
+    @action(detail=False, methods=["get"], permission_classes=[AllowAny],
+            throttle_classes=with_default_throttles(AuthAnonRateThrottle))  # C3: no token guessing
     def validate(self, request):
         token = request.query_params.get("token")
         if not token:

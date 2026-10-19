@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from api.throttles import VerifyAnonRateThrottle, with_default_throttles
+
 from decimal import Decimal, InvalidOperation
 
 from rest_framework import status, viewsets
@@ -209,29 +211,25 @@ class CertificationRequirementViewSet(EnterpriseViewSetMixin, viewsets.ModelView
                 "Certificate backfill failed for requirement %s", requirement.id
             )
 
+    def _require_requirement_permission(self, company_id):
+        from api.enterprise.services.rbac_service import require_permission
+        require_permission(self.request.user, company_id, "enterprise.ent-certs-templates", "manage")
+
     def perform_create(self, serializer):
         template = serializer.validated_data.get("template")
-        try:
-            validate_company_access(self.request.user, template.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        # C2: same write permission as the template (membership alone let employees/auditors edit).
+        self._require_requirement_permission(template.company_id)
         requirement = serializer.save()
         self._backfill(requirement)
 
     def perform_update(self, serializer):
         template = serializer.instance.template
-        try:
-            validate_company_access(self.request.user, template.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        self._require_requirement_permission(template.company_id)  # C2
         requirement = serializer.save()
         self._backfill(requirement)
 
     def perform_destroy(self, instance):
-        try:
-            validate_company_access(self.request.user, instance.template.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        self._require_requirement_permission(instance.template.company_id)  # C2
         instance.delete()
 
 
@@ -352,6 +350,7 @@ class CertificationVerifyViewSet(viewsets.ViewSet):
     GET /api/enterprise/verify/<identifier>/
     """
     permission_classes = [AllowAny]
+    throttle_classes = with_default_throttles(VerifyAnonRateThrottle)  # C6
 
     def retrieve(self, request, pk=None):
         result = CertificationService.verify_certificate(pk)
