@@ -174,27 +174,23 @@ class ComplianceRequirementViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet
             qs = qs.filter(program_id=program_id)
         return qs
 
+    def _require_requirement_permission(self, company_id):
+        from api.enterprise.services.rbac_service import require_permission
+        require_permission(self.request.user, company_id, "enterprise.ent-compliance-programs", "manage")
+
     def perform_create(self, serializer):
         program = serializer.validated_data.get("program")
-        try:
-            validate_company_access(self.request.user, program.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        # C2: same write permission as the program (membership alone let employees/auditors edit).
+        self._require_requirement_permission(program.company_id)
         serializer.save()
 
     def perform_update(self, serializer):
         program = serializer.instance.program
-        try:
-            validate_company_access(self.request.user, program.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        self._require_requirement_permission(program.company_id)  # C2
         serializer.save()
 
     def perform_destroy(self, instance):
-        try:
-            validate_company_access(self.request.user, instance.program.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        self._require_requirement_permission(instance.program.company_id)  # C2
         instance.delete()
 
 

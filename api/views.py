@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from api.services.content_access import user_can_access_company_content  # noqa: E402  (C1)
+from api.services.content_access import user_can_access_company_content, user_can_manage_company_content  # (C1/C2)
 from django.conf import settings
 from api.utils.subscriptionstouser import ensure_free_subscription_for_user
 from dj_rest_auth.views import PasswordResetView
@@ -2665,12 +2665,20 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         )
         return Response(ser.data)
 
+    def perform_update(self, serializer):
+        # C2: a project-less (company) battery can only be edited with the content permission.
+        battery = serializer.instance
+        if battery.project_id is None and not _is_rbac_admin_user(self.request.user) \
+                and not user_can_manage_company_content(self.request.user, battery=battery):
+            raise PermissionDenied("You do not have permission to edit this battery.")
+        serializer.save()
+
     def destroy(self, request, *args, **kwargs):
         battery = self.get_object()
         user = request.user
         has_access = (
             (battery.project_id is not None and battery.project.owner_id == user.id)
-            or (battery.project_id is None and user_can_access_company_content(user, battery=battery))
+            or (battery.project_id is None and user_can_manage_company_content(user, battery=battery))
         )
         if not has_access:
             return Response({"detail": "No tienes permiso para eliminar esta batería."}, status=status.HTTP_403_FORBIDDEN)

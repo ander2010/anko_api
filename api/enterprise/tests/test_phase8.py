@@ -13,6 +13,8 @@ Tests cover:
 
 from __future__ import annotations
 
+from django.core.management import call_command
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
@@ -509,6 +511,8 @@ class TeamAPITest(TestCase):
 class LearningModuleFieldsTest(TestCase):
 
     def setUp(self):
+        # Module writes need the seeded 'ent-paths' permission, as in production (C2).
+        call_command("seed_routes_rbac", verbosity=0)
         self.client = APIClient()
         self.owner = make_user()
         self.company = make_company(self.owner)
@@ -607,6 +611,8 @@ class LearningPathFinalBatteryTest(TestCase):
 class LearningModuleItemAPITest(TestCase):
 
     def setUp(self):
+        # Module writes need the seeded 'ent-paths' permission, as in production (C2).
+        call_command("seed_routes_rbac", verbosity=0)
         self.client = APIClient()
         self.owner = make_user()
         self.company = make_company(self.owner)

@@ -360,10 +360,8 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         company_id = self._resolve_company_id(serializer.validated_data)
-        try:
-            validate_company_access(self.request.user, company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        # C2: same write permission as the learning path (membership alone let employees/auditors edit).
+        require_permission(self.request.user, company_id, "enterprise.ent-paths", "manage")
         # If only learning_path provided, populate company automatically
         if not serializer.validated_data.get("company") and serializer.validated_data.get("learning_path"):
             serializer.save(company=serializer.validated_data["learning_path"].company)
@@ -375,20 +373,14 @@ class LearningModuleViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
             serializer.instance.company_id
             or (serializer.instance.learning_path.company_id if serializer.instance.learning_path_id else None)
         )
-        try:
-            validate_company_access(self.request.user, company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        require_permission(self.request.user, company_id, "enterprise.ent-paths", "manage")  # C2
         serializer.save()
 
     def perform_destroy(self, instance):
         company_id = instance.company_id or (
             instance.learning_path.company_id if instance.learning_path_id else None
         )
-        try:
-            validate_company_access(self.request.user, company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        require_permission(self.request.user, company_id, "enterprise.ent-paths", "manage")  # C2
 
         from api.models import Battery, ProcessArtifact
         from api.enterprise_learning_models import LearningModuleItem
@@ -688,25 +680,14 @@ class LearningModuleItemViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         module = serializer.validated_data.get("module")
-        try:
-            validate_company_access(self.request.user, module.learning_path.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        require_permission(self.request.user, module.learning_path.company_id, "enterprise.ent-paths", "manage")  # C2
         serializer.save()
 
     def perform_update(self, serializer):
         module = serializer.instance.module
-        try:
-            validate_company_access(self.request.user, module.learning_path.company_id)
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        require_permission(self.request.user, module.learning_path.company_id, "enterprise.ent-paths", "manage")  # C2
         serializer.save()
 
     def perform_destroy(self, instance):
-        try:
-            validate_company_access(
-                self.request.user, instance.module.learning_path.company_id
-            )
-        except PermissionError as exc:
-            raise PermissionDenied(str(exc))
+        require_permission(self.request.user, instance.module.learning_path.company_id, "enterprise.ent-paths", "manage")  # C2
         instance.delete()

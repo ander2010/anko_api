@@ -112,3 +112,15 @@ def company_battery_ids(user) -> set[int]:
         LearningModuleItem.objects.filter(module__company_id__in=company_ids, battery__isnull=False).values_list("battery_id", flat=True)
     )
     return battery_ids
+
+
+def user_can_manage_company_content(user, *, deck=None, battery=None) -> bool:
+    """C2: editing/deleting a project-less item needs the content ("ent-knowledge" manage) permission."""
+    from api.enterprise.services.rbac_service import has_permission
+    from api.enterprise_models import CompanyMembership
+
+    if getattr(user, "is_staff", False):
+        return True
+    company_ids = content_company_ids(deck=deck, battery=battery)
+    roles = CompanyMembership.objects.filter(user=user, status="active", company_id__in=company_ids).values_list("role", flat=True)
+    return any(has_permission(role, "enterprise.ent-knowledge", "manage") for role in set(roles))
