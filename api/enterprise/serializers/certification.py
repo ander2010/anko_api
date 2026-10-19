@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from api.enterprise.serializers.compliance import score_between_0_and_100, unique_code_in_company
+
 from api.enterprise_certification_models import (
     CertificateTemplate,
     Certification,
@@ -58,6 +60,21 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
 
     def get_issued_count(self, obj):
         return obj.issued_certifications.count()
+
+    def validate_code(self, value):
+        return unique_code_in_company(self, CertificateTemplate, value, "certificate template")
+
+    def validate(self, attrs):
+        # 17: a required minimum score must be a number between 0 and 100.
+        current = lambda f: attrs.get(f, getattr(self.instance, f, None))  # noqa: E731
+        if current("requires_score"):
+            if current("minimum_score") is None:
+                raise serializers.ValidationError({"minimum_score": "Required when a minimum score is enabled."})
+            score_between_0_and_100(current("minimum_score"), "minimum_score")
+        validity = current("validity_days")
+        if validity is not None and validity > 3650:
+            raise serializers.ValidationError({"validity_days": "Must be 3650 days or less."})
+        return attrs
 
 
 class CertificateTemplateListSerializer(serializers.ModelSerializer):

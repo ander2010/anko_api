@@ -144,6 +144,12 @@ class ComplianceProgramViewSet(EnterpriseViewSetMixin, viewsets.ModelViewSet):
     def activate(self, request, pk=None):
         program = self.get_object()
         self._require_permission("enterprise.ent-compliance-programs", "manage")
+        # 17: an expired program cannot be activated.
+        from django.utils import timezone as tz
+        if program.expiry_date and program.expiry_date < tz.localdate():
+            raise ValidationError({"expiry_date": "This program has already expired. Update the expiry date before activating it."})
+        if program.effective_date and program.expiry_date and program.expiry_date <= program.effective_date:
+            raise ValidationError({"expiry_date": "Expiry date must be after the effective date."})
         program.status = "active"
         program.save(update_fields=["status", "updated_at"])
         return Response(ComplianceProgramSerializer(program).data)

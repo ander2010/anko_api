@@ -25,6 +25,28 @@ class ComplianceRequirementSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "learning_path_name", "created_at", "updated_at"]
 
 
+def unique_code_in_company(serializer, model, value, label):
+    """17: codes are unique per company; answer a clear 400 instead of an IntegrityError."""
+    instance = getattr(serializer, "instance", None)
+    company_id = getattr(instance, "company_id", None)
+    if company_id is None:
+        view = serializer.context.get("view")
+        company_id = view._get_company_id() if view is not None and hasattr(view, "_get_company_id") else None
+    if not company_id:
+        return value
+    qs = model.objects.filter(company_id=company_id, code__iexact=value)
+    if instance is not None:
+        qs = qs.exclude(pk=instance.pk)
+    if qs.exists():
+        raise serializers.ValidationError(f"A {label} with this code already exists in this company.")
+    return value
+
+
+def score_between_0_and_100(value, field):
+    if value is not None and not (0 <= value <= 100):
+        raise serializers.ValidationError({field: "Must be between 0 and 100."})
+
+
 class ComplianceProgramSerializer(serializers.ModelSerializer):
     requirements = ComplianceRequirementSerializer(many=True, read_only=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True)
@@ -49,6 +71,22 @@ class ComplianceProgramSerializer(serializers.ModelSerializer):
 
     def get_requirement_count(self, obj):
         return obj.requirements.count()
+
+    def validate_code(self, value):
+        return unique_code_in_company(self, ComplianceProgram, value, "compliance program")
+
+    def validate(self, attrs):
+        # 17: effective/expiry and score bounds, also on partial updates.
+        current = lambda f: attrs.get(f, getattr(self.instance, f, None))  # noqa: E731
+        effective, expiry = current("effective_date"), current("expiry_date")
+        if effective and expiry and expiry <= effective:
+            raise serializers.ValidationError({"expiry_date": "Expiry date must be after the effective date."})
+        if current("requires_score"):
+            score_between_0_and_100(current("passing_score"), "passing_score")
+        validity = current("validity_days")
+        if validity is not None and validity > 3650:
+            raise serializers.ValidationError({"validity_days": "Must be 3650 days or less."})
+        return attrs
 
 
 class ComplianceProgramListSerializer(serializers.ModelSerializer):

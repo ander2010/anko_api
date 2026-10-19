@@ -39,11 +39,12 @@ class KnowledgeSourceCreateSerializer(serializers.Serializer):
         required=False, allow_null=True, min_value=1
     )
     # Auto-generation preferences — used as defaults when auto-generate runs
+    # 17: same 1-500 bounds the Auto-generate pipeline already clamps to.
     cards_per_group = serializers.IntegerField(
-        required=False, default=20, min_value=1
+        required=False, default=20, min_value=1, max_value=500
     )
     questions_per_group = serializers.IntegerField(
-        required=False, default=15, min_value=1
+        required=False, default=15, min_value=1, max_value=500
     )
     question_format = serializers.ChoiceField(
         choices=["true_false", "multiple_choice", "variety"],
