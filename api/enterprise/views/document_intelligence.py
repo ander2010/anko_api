@@ -109,6 +109,27 @@ def _ks_topic_ids(ks) -> set:
     return set(tag_group_ids) | {t.tag_group_id for t in _ks_manual_topics(ks)}
 
 
+def _results_summary(ks, topics, decks, batteries) -> dict:
+    """
+    14: the one source for the process header counters, the "Ready" banner and
+    "Process completion". Completion averages the user's best finished attempt of
+    every battery (0 when not attempted); a battery counts as completed when that
+    best score is >= the process minimum_passing_score.
+    """
+    passing = ks.minimum_passing_score if ks.minimum_passing_score is not None else 70
+    best = [float((b.get("best_attempt") or {}).get("percent") or 0) for b in batteries]
+    return {
+        "topics": len(topics),
+        "decks": len(decks),
+        "batteries": len(batteries),
+        "questions": sum(int(b.get("question_count") or 0) for b in batteries),
+        "cards": sum(int(d.get("cardsCount") or d.get("card_count") or 0) for d in decks),
+        "passing_score": passing,
+        "completed_batteries": sum(1 for pct in best if pct >= passing),
+        "completion_percent": round(sum(best) / len(best)) if best else 0,
+    }
+
+
 def _resolve_ks(company_id, ks_id):
     from api.enterprise_document_intelligence_models import KnowledgeSource
     try:
@@ -359,6 +380,7 @@ class KnowledgeSourceViewSet(EnterpriseViewSetMixin, viewsets.ViewSet):
             "batteries": batteries_data,
             "decks": decks_data,
             "topics": topics,
+            "summary": _results_summary(ks, topics, decks_data, batteries_data),  # 14 (additive)
         })
 
     def _save_manual_topic(self, ks, tag_group, d, *, exclude_id=None):

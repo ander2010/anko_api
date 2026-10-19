@@ -462,6 +462,7 @@ class BatterySerializer(serializers.ModelSerializer):
 
     attempts_count = serializers.SerializerMethodField()
     last_attempt = serializers.SerializerMethodField()
+    best_attempt = serializers.SerializerMethodField()  # 14 (additive)
 
     owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
     approved_count = serializers.SerializerMethodField()
@@ -487,6 +488,7 @@ class BatterySerializer(serializers.ModelSerializer):
             "questions",
             "attempts_count",
             "last_attempt",
+            "best_attempt",
             "owner_id",
             "approved_count",
             "rejected_count",
@@ -517,10 +519,25 @@ class BatterySerializer(serializers.ModelSerializer):
         last = qs.first()
         return BatteryAttemptSerializer(last).data if last else None
 
+    def get_best_attempt(self, obj):
+        """14: best finished attempt of the user — what the progress bar and process completion show."""
+        request = self.context.get("request")
+        qs = obj.attempts.filter(status="finished")
+        if request and request.user.is_authenticated:
+            qs = qs.filter(user=request.user)
+        best = qs.order_by("-percent", "-finished_at").first()
+        if best is None:
+            return None
+        return {
+            "id": best.id, "percent": best.percent, "correct_count": best.correct_count,
+            "total_questions": best.total_questions, "finished_at": best.finished_at,
+        }
+
 
 class BatteryListSerializer(serializers.ModelSerializer):
     attempts_count = serializers.SerializerMethodField()
     last_attempt = serializers.SerializerMethodField()
+    best_attempt = serializers.SerializerMethodField()  # 14 (additive)
     question_count = serializers.SerializerMethodField()
 
     owner_id = serializers.IntegerField(source="project.owner_id", read_only=True)
@@ -547,6 +564,7 @@ class BatteryListSerializer(serializers.ModelSerializer):
             "question_count",
             "attempts_count",
             "last_attempt",
+            "best_attempt",
             "owner_id",
             "approved_count",
             "rejected_count",
@@ -582,6 +600,20 @@ class BatteryListSerializer(serializers.ModelSerializer):
 
         last = qs.first()
         return BatteryAttemptSerializer(last).data if last else None
+
+    def get_best_attempt(self, obj):
+        """14: best finished attempt of the user — what the progress bar and process completion show."""
+        request = self.context.get("request")
+        qs = obj.attempts.filter(status="finished")
+        if request and request.user.is_authenticated:
+            qs = qs.filter(user=request.user)
+        best = qs.order_by("-percent", "-finished_at").first()
+        if best is None:
+            return None
+        return {
+            "id": best.id, "percent": best.percent, "correct_count": best.correct_count,
+            "total_questions": best.total_questions, "finished_at": best.finished_at,
+        }
 
 
 class BatteryAttemptAnswerSerializer(serializers.ModelSerializer):
