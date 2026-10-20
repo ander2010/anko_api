@@ -124,3 +124,62 @@ def user_can_manage_company_content(user, *, deck=None, battery=None) -> bool:
     company_ids = content_company_ids(deck=deck, battery=battery)
     roles = CompanyMembership.objects.filter(user=user, status="active", company_id__in=company_ids).values_list("role", flat=True)
     return any(has_permission(role, "enterprise.ent-knowledge", "manage") for role in set(roles))
+
+
+def tag_group_company_ids(tag_group_ids) -> dict[int, set[int]]:
+    """{tag_group_id: companies whose processes own that topic} (hand-made or Auto-generate topics)."""
+    from api.enterprise_document_intelligence_models import KnowledgeSourceTopic
+    from api.models import ProcessArtifact
+
+    ids = {int(t) for t in tag_group_ids}
+    result: dict[int, set[int]] = {tg: set() for tg in ids}
+    for tg, company in KnowledgeSourceTopic.objects.filter(tag_group_id__in=ids).values_list(
+        "tag_group_id", "knowledge_source__company_id"
+    ):
+        result[tg].add(company)
+    artifacts = ProcessArtifact.objects.filter(
+        run__workflow_key="collection_auto_generate", run__resource_type="document_batch",
+        artifact_type="tag_group", resource_id__in=[str(t) for t in ids],
+    ).values_list("resource_id", "run__resource_id")
+    for resource_id, run_resource in artifacts:
+        result[int(resource_id)] |= _companies_of_runs([run_resource])
+    return result
+
+
+def usable_tag_group_ids(user, tag_groups) -> set[int]:
+    """
+    Topics the user may attach AI-generated decks/batteries to: platform admins, the owner of the
+    topic's collection, or a member with the content permission (ent-knowledge manage) in the
+    company of the topic's process. Process topics have no collection, so before this only
+    platform admins could generate decks there.
+    """
+    from api.enterprise.services.rbac_service import has_permission
+    from api.enterprise_models import CompanyMembership
+
+    tag_groups = list(tag_groups)
+    if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
+        return {tg.id for tg in tag_groups}
+    allowed = {tg.id for tg in tag_groups if tg.collection_id and getattr(tg.collection, "owner_id", None) == user.id}
+    pending = [tg.id for tg in tag_groups if tg.id not in allowed]
+    if not pending:
+        return allowed
+    memberships = dict(CompanyMembership.objects.filter(user=user, status="active").values_list("company_id", "role"))
+    manage = {cid for cid, role in memberships.items() if has_permission(role, "enterprise.ent-knowledge", "manage")}
+    for tg_id, companies in tag_group_company_ids(pending).items():
+        if companies & manage:
+            allowed.add(tg_id)
+    return allowed
+
+
+def company_content_document_ids(user) -> set[int]:
+    """Documents of the processes of companies where the user has the content permission (ent-knowledge manage)."""
+    from api.enterprise.services.rbac_service import has_permission
+    from api.enterprise_document_intelligence_models import KnowledgeSourceDocument
+    from api.enterprise_models import CompanyMembership
+
+    roles = dict(CompanyMembership.objects.filter(user=user, status="active").values_list("company_id", "role"))
+    companies = [cid for cid, role in roles.items() if has_permission(role, "enterprise.ent-knowledge", "manage")]
+    if not companies:
+        return set()
+    return set(KnowledgeSourceDocument.objects.filter(knowledge_source__company_id__in=companies)
+               .values_list("document_id", flat=True))

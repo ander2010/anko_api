@@ -4,7 +4,9 @@ import hmac
 
 from api.throttles import AIGenerationUserRateThrottle, AuthAnonRateThrottle, with_default_throttles  # C3
 
-from api.services.content_access import user_can_access_company_content, user_can_manage_company_content  # (C1/C2)
+from api.services.content_access import (  # (C1/C2)
+    company_content_document_ids, user_can_access_company_content, user_can_manage_company_content,
+)
 from api.services.generation_text import keep_user_casing  # (16)
 
 
@@ -4138,7 +4140,12 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
         tag_group_ids = BatteryViewSet._coerce_int_list(request.data.get("tag_group_ids"))
         tag_groups = []
         if tag_group_ids:
-            tag_groups = list(TagGroup.objects.filter(id__in=tag_group_ids))
+            tag_groups = list(TagGroup.objects.select_related("collection").filter(id__in=tag_group_ids))
+            if not _is_rbac_admin_user(request.user):
+                # C1: same rule as decks — only topics the user may write to (it accepted any topic).
+                from api.services.content_access import usable_tag_group_ids
+                usable = usable_tag_group_ids(request.user, tag_groups)
+                tag_groups = [tg for tg in tag_groups if tg.id in usable]
             found_tag_group_ids = {tag_group.id for tag_group in tag_groups}
             missing_tag_group_ids = [tgid for tgid in tag_group_ids if tgid not in found_tag_group_ids]
             if missing_tag_group_ids:
@@ -4150,6 +4157,16 @@ class BatteryViewSet(EncryptSelectedActionsMixin,viewsets.ModelViewSet):
 
         # 1) cargar sections
         sections_qs = Section.objects.filter(id__in=section_ids).only("id", "title", "document_id").order_by("id")
+        if not _is_rbac_admin_user(request.user):
+            # C1: only sections of documents the user may use (it accepted any section of any company).
+            user = request.user
+            sections_qs = sections_qs.filter(
+                Q(document__uploaded_by=user)
+                | Q(document__project__owner=user)
+                | Q(document__project__members=user)
+                | Q(document__collection__owner=user)
+                | Q(document_id__in=company_content_document_ids(user))
+            ).distinct()
         sections = list(sections_qs)
 
         if len(sections) != len(set(section_ids)):
@@ -6535,6 +6552,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     | Q(project__owner=user)
                     | Q(project__members=user)
                     | Q(collection__owner=user)
+                    | Q(id__in=company_content_document_ids(user))  # process documents of the user's company
                 )
                 .distinct()
                 .order_by("id")
@@ -6557,6 +6575,7 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
                     | Q(document__project__owner=user)
                     | Q(document__project__members=user)
                     | Q(document__collection__owner=user)
+                    | Q(document_id__in=company_content_document_ids(user))  # process documents of the user's company
                 )
                 .distinct()
                 .order_by("id")
@@ -6573,7 +6592,11 @@ class DeckViewSet(EncryptSelectedActionsMixin, viewsets.ModelViewSet):
         if _is_rbac_admin_user(user):
             tag_groups = list(tag_groups_qs.order_by("id"))
         else:
-            tag_groups = list(tag_groups_qs.filter(Q(collection__owner=user)).distinct().order_by("id"))
+            # Process topics have no Collection: company members with the content permission may use them too.
+            from api.services.content_access import usable_tag_group_ids
+            candidates = list(tag_groups_qs.order_by("id"))
+            usable = usable_tag_group_ids(user, candidates)
+            tag_groups = [tg for tg in candidates if tg.id in usable]
         found_tag_group_ids = {tag_group.id for tag_group in tag_groups}
         missing_tag_group_ids = [tag_group_id for tag_group_id in tag_group_ids if tag_group_id not in found_tag_group_ids]
         if missing_tag_group_ids:
@@ -9197,6 +9220,7 @@ class ProcessRunViewSet(viewsets.ReadOnlyModelViewSet):
                     | Q(project__owner=request.user)
                     | Q(project__members=request.user)
                     | Q(collection__owner=request.user)
+                    | Q(id__in=company_content_document_ids(request.user))  # process documents of the user's company
                 )
                 .distinct()
                 .order_by("id")
